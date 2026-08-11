@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (
     QPushButton
 )
 
-
 class Sidebar(QFrame):
 
     def __init__(self, role):
@@ -72,6 +71,7 @@ class Sidebar(QFrame):
 
             "Master": [
                 "Dashboard",
+                "Inbox",
                 "Document Intake",
                 "Documents",
                 "Priority / Deadlines",
