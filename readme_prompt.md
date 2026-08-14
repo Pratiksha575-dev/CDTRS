@@ -700,3 +700,12 @@ Do not duplicate the application for every role.
 Do not invent backend APIs.
 Do not guess unseen code.
 Do not break verified workflows.
+4)Explain the various tools and methods used in cybercrime, including phishing, password cracking, keyloggers, viruses, worms, and SQL injection. How do these attacks impact individuals and organizations?
+1. Define Cybercrime. Explain the origin and evolution of cybercrime.
+2. Explain the relationship between Cybercrime and Information Security.
+3. Explain the classification of cybercrime with suitable examples.
+4. Explain the major types of cybercrime against individuals, organizations, and society.
+5. Explain the Indian Information Technology Act, 2000 (ITA 2000) in relation to cybercrime.
+6. Discuss the role of ITA 2000 in controlling and preventing cybercrime in India.
+7. Explain cybercrime from a global perspective and discuss the major challenges in
+combating cybercrime worldwide.
