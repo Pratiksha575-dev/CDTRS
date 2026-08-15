@@ -1,184 +1,83 @@
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 
-from data.mock_data import DOCUMENTS, HISTORY
+from models.document import DocumentModel
+from models.workflow_event import WorkflowEventModel
+from repositories.provider import get_repository
 
 
 class WorkflowService:
+    """
+    Client service managing document workflow timeline, activity events, and audit logs.
+    """
+
+    def __init__(self):
+        pass
+
+    def get_history(self, document_id_or_ref: Union[int, str]) -> List[WorkflowEventModel]:
+        """
+        Retrieves chronological workflow history for a document.
+        Supports document ID or reference string.
+        """
+        repo = get_repository()
+        if isinstance(document_id_or_ref, int):
+            return repo.get_workflow_history(document_id_or_ref)
+
+        # Lookup document by reference if string provided
+        doc = next((d for d in repo.get_documents() if d.reference == str(document_id_or_ref) or str(d.id) == str(document_id_or_ref)), None)
+        if doc and doc.id is not None:
+            return repo.get_workflow_history(doc.id)
+        return []
+
+    def get_workflow_history(self, document_id_or_ref: Union[int, str]) -> List[WorkflowEventModel]:
+        """Alias for get_history."""
+        return self.get_history(document_id_or_ref)
+
+    def get_all_audit_history(
+        self,
+        user: Optional[str] = None,
+        action: Optional[str] = None
+    ) -> List[WorkflowEventModel]:
+        """Retrieves system-wide audit timeline."""
+        repo = get_repository()
+        return repo.get_all_audit_history(user=user, action=action)
+
+    # =========================================================
+    # BACKWARD COMPATIBILITY METHODS FOR EXISTING INTAKE & INBOX
+    # =========================================================
 
     @staticmethod
-    def forward_to_director(document):
-
-        print(
-            "Forwarding document:",
-            document
-        )
-
-        # --------------------------------
-        # Find matching document
-        # --------------------------------
-
-        matched_document = None
-
-        incoming_reference = document.get(
-            "reference"
-        )
-
-        incoming_id = document.get(
-            "id"
-        )
-
-        incoming_title = document.get(
-            "title",
-            document.get("subject", "")
-        )
-
-        for item in DOCUMENTS:
-
-            # 1. Match by reference
-            if (
-                incoming_reference
-                and item.get("reference")
-                == incoming_reference
-            ):
-                matched_document = item
-                break
-
-            # 2. Match by ID
-            if (
-                incoming_id is not None
-                and item.get("id")
-                == incoming_id
-            ):
-                matched_document = item
-                break
-
-            # 3. Match by title / subject
-            if (
-                incoming_title
-                and item.get("subject")
-                == incoming_title
-            ):
-                matched_document = item
-                break
-
-        # --------------------------------
-        # No match
-        # --------------------------------
-
-        if matched_document is None:
-
-            print(
-                "ERROR: Document could not be "
-                "matched with DOCUMENTS"
-            )
-
-            return False
-
-        # --------------------------------
-        # Get actual system reference
-        # --------------------------------
-
-        actual_reference = matched_document.get(
-            "reference"
-        )
-
-        print(
-            "Matched document:",
-            actual_reference
-        )
-
-        # --------------------------------
-        # Update shared document
-        # --------------------------------
-
-        matched_document["status"] = (
-            "Director Review"
-        )
-
-        matched_document["forwarded_to"] = (
-            "Director"
-        )
-
-        matched_document["forwarded_by"] = (
-            "Master"
-        )
-
-        # --------------------------------
-        # Update current document
-        # --------------------------------
-
-        document["reference"] = (
-            actual_reference
-        )
-
-        document["status"] = (
-            "Director Review"
-        )
-
-        document["forwarded_to"] = (
-            "Director"
-        )
-
-        document["forwarded_by"] = (
-            "Master"
-        )
-
-        # --------------------------------
-        # Add workflow history
-        # --------------------------------
-
-        if actual_reference not in HISTORY:
-
-            HISTORY[actual_reference] = []
-
-        HISTORY[actual_reference].append({
-
-            "timestamp":
-                datetime.now().strftime(
-                    "%d %b %Y %H:%M"
-                ),
-
-            "user": "Master",
-
-            "action": "Forwarded",
-
-            "reference":
-                actual_reference,
-
-            "details":
-                "Forwarded to Director"
-        })
-
-        print(
-            f"SUCCESS: {actual_reference} "
-            "forwarded to Director"
-        )
-
-        return True
-
-    # ====================================
-    # DIRECTOR INBOX
-    # ====================================
+    def forward_to_director(document: Union[DocumentModel, Dict[str, Any]]) -> bool:
+        """
+        Backward compatibility handler for legacy DocumentIntakePage.
+        Routes intake document to Director via repository.
+        """
+        repo = get_repository()
+        doc_id = document.get("id") or document.get("doc_id")
+        if doc_id:
+            try:
+                repo.route_document(
+                    document_id=int(doc_id),
+                    route_type="DS_TO_DIRECTOR",
+                    to_user_id=2,
+                    remarks=document.get("remarks")
+                )
+                return True
+            except Exception:
+                return False
+        return False
 
     @staticmethod
-    def get_director_inbox():
+    def get_director_inbox() -> List[DocumentModel]:
+        """
+        Backward compatibility handler for legacy DirectorInboxPage.
+        Returns documents currently under Director review.
+        """
+        repo = get_repository()
+        return [
+            d for d in repo.get_documents()
+            if (d.current_stage == "DIRECTOR" or d.status == "Under Director Review" or d.status == "Director Review")
+        ]
 
-        inbox = []
 
-        for document in DOCUMENTS:
-
-            if (
-                document.get("forwarded_to")
-                == "Director"
-            ):
-                inbox.append(document)
-
-        print(
-            "Director Inbox:",
-            [
-                document.get("reference")
-                for document in inbox
-            ]
-        )
-
-        return inbox
+# Global singleton service instance
+workflow_service = WorkflowService()

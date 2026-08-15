@@ -1,16 +1,21 @@
 from PySide6.QtWidgets import (
     QFrame,
-    QVBoxLayout,
     QLabel,
-    QPushButton
+    QPushButton,
+    QVBoxLayout,
 )
 
+from models.enums import RoleEnum
+
+
 class Sidebar(QFrame):
+    """
+    Role-based primary sidebar navigation for CDTRS.
+    """
 
-    def __init__(self, role):
+    def __init__(self, role: str):
         super().__init__()
-
-        self.role = role
+        self.role = RoleEnum.normalize(role)
 
         self.setObjectName("sidebar")
         self.setFixedWidth(230)
@@ -20,35 +25,29 @@ class Sidebar(QFrame):
         layout.setSpacing(6)
 
         # -------------------------
-        # Application title
+        # Application title & User
         # -------------------------
-
         title = QLabel("CDTRS")
         title.setObjectName("sidebarTitle")
 
-        user_label = QLabel(role)
+        user_label = QLabel(self.role)
         user_label.setObjectName("sidebarUser")
+        user_label.setWordWrap(True)
 
         layout.addWidget(title)
         layout.addWidget(user_label)
-
         layout.addSpacing(15)
 
         # -------------------------
         # Role-based menu
         # -------------------------
-
-        menu_items = self.get_menu_items(role)
-
+        menu_items = self.get_menu_items(self.role)
         self.buttons = {}
 
         for item in menu_items:
-
             button = QPushButton(item)
             button.setObjectName("sidebarButton")
-
             self.buttons[item] = button
-
             layout.addWidget(button)
 
         # Push Logout to bottom
@@ -56,72 +55,59 @@ class Sidebar(QFrame):
 
         self.logout_button = QPushButton("Logout")
         self.logout_button.setObjectName("logoutButton")
-
         layout.addWidget(self.logout_button)
 
         self.setLayout(layout)
 
-    # -------------------------
-    # Menu configuration
-    # -------------------------
+    def set_active(self, active_item: str):
+        """Visually indicates the currently active navigation item."""
+        for item, btn in self.buttons.items():
+            if item == active_item:
+                btn.setStyleSheet("background-color: #1E293B; color: #FFFFFF; font-weight: 600;")
+            else:
+                btn.setStyleSheet("")
 
-    def get_menu_items(self, role):
-
+    def get_menu_items(self, role: str):
         menus = {
-
-            "Master": [
+            RoleEnum.DIRECTOR_SECRETARY.value: [
                 "Dashboard",
                 "Inbox",
-                "Document Intake",
+                "Document Processing",
                 "Documents",
-                "Priority / Deadlines",
-                "History"
+                "History / Audit"
             ],
-
-            "Director": [
+            RoleEnum.DIRECTOR.value: [
                 "Dashboard",
                 "Inbox",
-                "Documents",
-                "Priority / Deadlines",
-                "History"
+                "Reviewed Documents",
+                "History / Audit"
             ],
-
-            "HOD": [
+            RoleEnum.HOD.value: [
                 "Dashboard",
-                "Inbox",
                 "Department Tasks",
-                "Priority / Deadlines",
-                "History"
+                "History / Audit"
             ],
-
             "HOD PA": [
                 "Dashboard",
-                "Inbox",
                 "Department Tasks",
-                "Priority / Deadlines",
-                "History"
+                "History / Audit"
             ],
-
             "Employee": [
                 "Dashboard",
                 "My Tasks",
-                "History"
+                "History / Audit"
             ],
-
             "Administrator": [
                 "Dashboard",
                 "Users & Roles",
                 "Departments",
                 "Configuration",
-                "Audit / History"
+                "History / Audit"
             ],
-
             "Read-only User": [
                 "Dashboard",
                 "Documents",
-                "Priority / Deadlines",
-                "History"
+                "History / Audit"
             ]
         }
-
         return menus.get(role, ["Dashboard"])
