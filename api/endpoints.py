@@ -48,10 +48,33 @@ class Endpoints:
     # --- Workflow History ---
     DOCUMENT_HISTORY = lambda doc_id: f"/documents/{doc_id}/history"
 
+    # --- Remarks History ---
+    DOCUMENT_REMARKS = lambda doc_id: f"/documents/{doc_id}/remarks"
+
+    # --- Intake & Mail Ingestion ---
+    INTAKE_LIST = "/intake"
+    INTAKE_MANUAL_UPLOAD = "/intake/manual-upload"
+    INTAKE_PROCESS = lambda intake_id: f"/intake/{intake_id}/process"
+
+    # --- OCR & Field Verification ---
+    DOCUMENT_OCR = lambda doc_id: f"/documents/{doc_id}/ocr"
+    DOCUMENT_PROCESS_OCR = lambda doc_id: f"/documents/{doc_id}/process-ocr"
+    DOCUMENT_VERIFY_FIELD = lambda doc_id: f"/documents/{doc_id}/verify-field"
+
+    # --- Routing Suggestions ---
+    DOCUMENT_ROUTING_SUGGESTION = lambda doc_id: f"/documents/{doc_id}/routing-suggestion"
+    DOCUMENT_ANALYZE_ROUTING = lambda doc_id: f"/documents/{doc_id}/analyze-routing"
+
     # --- Notifications ---
     NOTIFICATIONS_LIST = "/notifications"
     NOTIFICATIONS_UNREAD = "/notifications/unread"
     NOTIFICATION_MARK_READ = lambda notif_id: f"/notifications/{notif_id}/read"
 
+    # --- Reminders ---
+    REMINDERS_LIST = "/reminders"
+    REMINDERS_CHECK = "/reminders/check"
+    REMINDER_MARK_READ = lambda rem_id: f"/reminders/{rem_id}/read"
+
     # --- Dashboard ---
     DASHBOARD_STATS = "/dashboard"
+

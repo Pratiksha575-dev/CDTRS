@@ -16,3 +16,6 @@ Thumbs.db
 
 # Environment / secrets
 .env
+data/cache/
+
+data/cache/

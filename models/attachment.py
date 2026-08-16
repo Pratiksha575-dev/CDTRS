@@ -94,7 +94,8 @@ class AttachmentModel:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AttachmentModel":
         uploaded_by_val = (
-            data.get("uploaded_by")
+            data.get("uploaded_by_user_id")
+            or data.get("uploaded_by")
             or data.get("attached_by_id")
             or data.get("uploaded_by_id")
             or 0

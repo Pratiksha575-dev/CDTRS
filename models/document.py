@@ -45,6 +45,7 @@ class DocumentModel:
     created_by: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    version: int = 1
 
     # --- Backward-Compatibility Properties for UI Components ---
 
@@ -121,6 +122,7 @@ class DocumentModel:
             created_by=data.get("created_by"),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
+            version=data.get("version", 1),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -168,4 +170,5 @@ class DocumentModel:
             "created_by": self.created_by,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "version": self.version,
         }

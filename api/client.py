@@ -225,7 +225,23 @@ class APIClient:
                     raise FileNotFoundError(f"File not found for upload: {file_path_or_tuple}")
                 opened_file = open(file_path_or_tuple, "rb")
                 filename = os.path.basename(file_path_or_tuple)
-                files = {field_name: (filename, opened_file)}
+                import mimetypes
+                content_type, _ = mimetypes.guess_type(filename)
+                if not content_type:
+                    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                    if ext == "pdf":
+                        content_type = "application/pdf"
+                    elif ext in ("xlsx", "xls"):
+                        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    elif ext in ("docx", "doc"):
+                        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    elif ext in ("png", "jpg", "jpeg"):
+                        content_type = f"image/{'jpeg' if ext == 'jpg' else ext}"
+                    elif ext == "txt":
+                        content_type = "text/plain"
+                    else:
+                        content_type = "application/pdf"
+                files = {field_name: (filename, opened_file, content_type)}
             else:
                 files = {field_name: file_path_or_tuple}
 

@@ -10,7 +10,7 @@ class Settings:
     """
 
     # Backend API Base URL (Never hardcoded in individual pages)
-    api_url: str = os.getenv("CDTRS_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_url: str = os.getenv("CDTRS_API_URL", "http://127.0.0.1:8000/api/v1").rstrip("/")
 
     # Data Source Mode: 'api' for real backend, 'mock' for local development/testing
     data_source: str = os.getenv("CDTRS_DATA_SOURCE", "mock").lower()
