@@ -168,7 +168,7 @@ class HistoryPage(QWidget):
         self.role_filter = QComboBox()
         self.role_filter.addItems([
             "All Roles",
-            "Director Secretary",
+            "Director Secretary (DS)",
             "Director",
             "HOD",
             "Employee"
@@ -261,7 +261,21 @@ class HistoryPage(QWidget):
 
             # Role filter
             if role_sel != "All Roles":
-                doc_evs = [e for e in doc_evs if (e.from_role or "").lower() == role_sel.lower()]
+                target_f = role_sel.lower()
+                def _matches_role(event: WorkflowEventModel) -> bool:
+                    fr = (event.from_role or "").strip().lower()
+                    actor = (event.performed_by_name or "").strip().lower()
+                    if "director secretary" in target_f or "ds" in target_f:
+                        return fr in ("ds", "director secretary", "master") or "secretary" in actor or "ds" in actor
+                    elif "director" in target_f:
+                        return fr in ("director", "the director") and fr not in ("ds", "director secretary", "master")
+                    elif "hod" in target_f:
+                        return fr in ("hod", "head of department") or "hod" in actor
+                    elif "employee" in target_f:
+                        return fr in ("employee", "staff") or "emp" in actor or "rahul" in actor or "priya" in actor
+                    return fr == target_f
+
+                doc_evs = [e for e in doc_evs if _matches_role(e)]
                 if not doc_evs:
                     continue
 

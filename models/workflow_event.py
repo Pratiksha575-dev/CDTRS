@@ -37,6 +37,7 @@ class WorkflowEventModel:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WorkflowEventModel":
+        raw_time = str(data.get("timestamp") or data.get("created_at") or "")
         return cls(
             id=data.get("id"),
             document_id=data.get("document_id", 0),
@@ -45,10 +46,10 @@ class WorkflowEventModel:
             to_role=data.get("to_role"),
             remarks=data.get("remarks"),
             details=data.get("details"),
-            performed_by=data.get("performed_by", 0),
+            performed_by=data.get("performed_by") or data.get("performed_by_user_id", 0),
             performed_by_name=data.get("performed_by_name") or data.get("user"),
-            timestamp=data.get("timestamp") or data.get("created_at"),
-            created_at=data.get("created_at") or data.get("timestamp")
+            timestamp=raw_time,
+            created_at=raw_time
         )
 
     def to_dict(self) -> Dict[str, Any]:

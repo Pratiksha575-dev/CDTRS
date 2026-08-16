@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from models import (
@@ -25,17 +25,17 @@ class MockRepository(BaseRepository):
     """
     Self-contained in-memory development repository for CDTRS V2.
     Simulates complete V2 multi-department workflow lifecycle across 5 departments.
-    All documents initially start in DS Incoming Inbox awaiting intake and manual routing.
+    All 5 canonical demonstration documents initially start in DS Inbox at stage=DS, status=RECEIVED.
     """
 
     def __init__(self):
         self._current_user: Optional[UserModel] = None
-        self._next_doc_id = 100
+        self._next_doc_id = 5
         self._next_route_id = 1
         self._next_assign_id = 1
         self._next_progress_id = 1
-        self._next_attach_id = 1
-        self._next_event_id = 1
+        self._next_attach_id = 10
+        self._next_event_id = 10
         self._next_notif_id = 1
 
         self._seed_users()
@@ -109,386 +109,341 @@ class MockRepository(BaseRepository):
 
     def _seed_documents(self):
         """
-        Initializes an empty active workflow store at startup.
-        All test documents initially reside in DS Incoming Inbox.
-        No HOD or Employee has pre-routed tasks at initial application launch.
+        Initializes the canonical 5 demonstration documents in the active repository store.
+        All 5 documents start in DS Inbox at stage=DS, status=RECEIVED, unassigned, and unrouted.
+        Suggested department/employee metadata is present for demonstration intelligence.
         """
-        self._documents: List[DocumentModel] = []
-        self._routes: List[DocumentRouteModel] = []
-        self._assignments: List[WorkAssignmentModel] = []
-        self._progress_updates: List[ProgressUpdateModel] = []
-        self._attachments: List[AttachmentModel] = []
-        self._history: Dict[int, List[WorkflowEventModel]] = {}
-        self._notifications: List[NotificationModel] = []
+        now_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_day = datetime.now().strftime("%Y-%m-%d")
+        deadline_7d = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
 
-    def _seed_intake_inbox(self):
-        """
-        Initializes 20 realistic incoming documents in DS Incoming Inbox.
-        All documents enter at stage=DS, status=NEW / RECEIVED, with diverse metadata,
-        sources, modes, attachment counts, and OCR suggestion intelligence.
-        """
-        self._inbox_documents: List[DocumentModel] = [
-            # 1. Finance document - suggested Finance, no employee
+        self._documents: List[DocumentModel] = [
+            # --------------------------------------------------
+            # DOCUMENT 1 — FRESH / NORMAL WORKFLOW
+            # --------------------------------------------------
             DocumentModel(
                 id=1,
-                title="Q3 Comprehensive Financial Audit Dispatch",
-                date="2026-08-15 09:30 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="Comptroller & Auditor General",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/financial_audit.pdf",
+                reference_no="CDTRS-2026-0001",
+                title="National Higher Education Accreditation & Governance Compliance Directive",
+                date=f"{now_day} 09:30 AM",
+                mode="Outlook / Government Mail",
+                source="Ministry of Higher Education",
+                priority=PriorityEnum.MEDIUM.value,
+                deadline=None,
+                status=DocumentStatusEnum.RECEIVED.value,
+                current_stage=WorkflowStageEnum.DS.value,
+                current_owner_id=1,
+                current_owner_name="Director Secretary",
+                target_department_id=None,
+                target_department_name=None,
+                assigned_employee_id=None,
+                assigned_employee_name=None,
+                suggested_department_id=None,
+                suggested_department_name=None,
+                suggested_employee_id=None,
+                suggested_employee_name=None,
+                director_remark=None,
+                hod_remark=None,
+                has_prior_director_remark=False,
+                has_director_routing_instruction=False,
+                file_path="data/incoming/government_mail/accreditation_compliance_directive.pdf",
                 file_type="PDF",
                 format="PDF",
-                attachment_count=3,
-                attachments_list=["audit_report.pdf", "expenditure_vouchers.xlsx", "covering_letter.pdf"],
-                suggested_department_name="Finance",
-                suggested_department_id=1,
-                status="New / Received"
+                attachment_count=1,
+                attachments_list=["accreditation_compliance_directive.pdf"],
+                created_by=1,
+                created_at=now_date
             ),
-            # 2. Finance document - suggested Finance, suggested Rahul Sharma
+            # --------------------------------------------------
+            # DOCUMENT 2 — DEPARTMENT SUGGESTION
+            # --------------------------------------------------
             DocumentModel(
                 id=2,
-                title="Annual Capital Budget Allocation & Fiscal Grant Directive",
-                date="2026-08-15 09:45 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="Ministry of Higher Education",
+                reference_no="CDTRS-2026-0002",
+                title="Q3 Financial Audit & Capital Grant Disbursement Notice",
+                date=f"{now_day} 09:45 AM",
+                mode="Internet / Web Portal",
+                source="State Audit Bureau",
                 priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/capital_budget.pdf",
+                deadline=None,
+                status=DocumentStatusEnum.RECEIVED.value,
+                current_stage=WorkflowStageEnum.DS.value,
+                current_owner_id=1,
+                current_owner_name="Director Secretary",
+                target_department_id=None,
+                target_department_name=None,
+                assigned_employee_id=None,
+                assigned_employee_name=None,
+                suggested_department_id=1,
+                suggested_department_name="Finance",
+                suggested_employee_id=None,
+                suggested_employee_name=None,
+                director_remark=None,
+                hod_remark=None,
+                has_prior_director_remark=False,
+                has_director_routing_instruction=False,
+                file_path="data/incoming/government_mail/audit_disbursement_notice.pdf",
                 file_type="PDF",
                 format="PDF",
                 attachment_count=2,
-                attachments_list=["capital_budget.pdf", "statutory_allocation_breakdown.pdf"],
+                attachments_list=["audit_disbursement_notice.pdf", "capital_grant_schedule.xlsx"],
+                created_by=1,
+                created_at=now_date
+            ),
+            # --------------------------------------------------
+            # DOCUMENT 3 — DEPARTMENT + EMPLOYEE SUGGESTION
+            # --------------------------------------------------
+            DocumentModel(
+                id=3,
+                reference_no="CDTRS-2026-0003",
+                title="Statutory Vendor Tax Clearance & Procurement Verification",
+                date=f"{now_day} 10:00 AM",
+                mode="Fax",
+                source="Central Board of Direct Taxes",
+                priority=PriorityEnum.HIGH.value,
+                deadline=None,
+                status=DocumentStatusEnum.RECEIVED.value,
+                current_stage=WorkflowStageEnum.DS.value,
+                current_owner_id=1,
+                current_owner_name="Director Secretary",
+                target_department_id=None,
+                target_department_name=None,
+                assigned_employee_id=None,
+                assigned_employee_name=None,
+                suggested_department_id=1,
+                suggested_department_name="Finance",
+                suggested_employee_id=101,
+                suggested_employee_name="Rahul Sharma",
+                director_remark=None,
+                hod_remark=None,
+                has_prior_director_remark=False,
+                has_director_routing_instruction=False,
+                file_path="data/incoming/government_mail/vendor_tax_clearance.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=1,
+                attachments_list=["vendor_tax_clearance.pdf"],
+                created_by=1,
+                created_at=now_date
+            ),
+            # --------------------------------------------------
+            # DOCUMENT 4 — PRE-REVIEWED / DIRECTOR REMARK
+            # --------------------------------------------------
+            DocumentModel(
+                id=4,
+                reference_no="CDTRS-2026-0004",
+                title="Urgent Campus Security Infrastructure Upgrade Order (Pre-Reviewed)",
+                date=f"{now_day} 10:15 AM",
+                mode="Physical / Scanned PDF",
+                source="Office of the Director",
+                priority=PriorityEnum.HIGH.value,
+                deadline=None,
+                status=DocumentStatusEnum.RECEIVED.value,
+                current_stage=WorkflowStageEnum.DS.value,
+                current_owner_id=1,
+                current_owner_name="Director Secretary",
+                target_department_id=None,
+                target_department_name=None,
+                assigned_employee_id=None,
+                assigned_employee_name=None,
+                suggested_department_id=1,
+                suggested_department_name="Finance",
+                suggested_employee_id=101,
+                suggested_employee_name="Rahul Sharma",
+                director_remark="Approved. Expedite procurement and assign to Rahul Sharma for immediate execution.",
+                hod_remark=None,
+                has_prior_director_remark=True,
+                has_director_routing_instruction=True,
+                director_routing_raw_text="Approved. Expedite procurement and assign to Rahul Sharma for immediate execution.",
+                routing_instruction_confidence=96,
+                file_path="data/incoming/scans/security_infrastructure_upgrade.pdf",
+                file_type="Scanned PDF",
+                format="PDF",
+                attachment_count=1,
+                attachments_list=["security_infrastructure_upgrade.pdf"],
+                created_by=1,
+                created_at=now_date
+            ),
+            # --------------------------------------------------
+            # DOCUMENT 5 — URGENT / DEADLINE
+            # --------------------------------------------------
+            DocumentModel(
+                id=5,
+                reference_no="CDTRS-2026-0005",
+                title="High-Priority Enterprise Server Maintenance & Firewall Compliance",
+                date=f"{now_day} 10:30 AM",
+                mode="Internet / Web Portal",
+                source="Cyber Security Directorate",
+                priority=PriorityEnum.HIGH.value,
+                deadline=deadline_7d,
+                status=DocumentStatusEnum.RECEIVED.value,
+                current_stage=WorkflowStageEnum.DS.value,
+                current_owner_id=1,
+                current_owner_name="Director Secretary",
+                target_department_id=None,
+                target_department_name=None,
+                assigned_employee_id=None,
+                assigned_employee_name=None,
+                suggested_department_id=5,
+                suggested_department_name="IT",
+                suggested_employee_id=None,
+                suggested_employee_name=None,
+                director_remark=None,
+                hod_remark=None,
+                has_prior_director_remark=False,
+                has_director_routing_instruction=False,
+                file_path="data/incoming/outlook/server_maintenance_compliance.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=2,
+                attachments_list=["server_maintenance_compliance.pdf", "firewall_rules.xlsx"],
+                created_by=1,
+                created_at=now_date
+            ),
+        ]
+
+        self._routes: List[DocumentRouteModel] = []
+        self._assignments: List[WorkAssignmentModel] = []
+        self._progress_updates: List[ProgressUpdateModel] = []
+        self._notifications: List[NotificationModel] = []
+        self._attachments: List[AttachmentModel] = []
+        self._history: Dict[int, List[WorkflowEventModel]] = {}
+
+        # Seed initial intake/received audit events (one per document)
+        for doc in self._documents:
+            remarks_text = f"Document {doc.reference_no} received and registered at DS stage."
+            if doc.id == 4:
+                remarks_text = f"Document {doc.reference_no} registered from physical intake with pre-existing Director directive."
+            elif doc.id == 5:
+                remarks_text = f"Document {doc.reference_no} received with priority deadline ({doc.deadline})."
+
+            self._history[doc.id] = [
+                WorkflowEventModel(
+                    id=doc.id,
+                    document_id=doc.id,
+                    action="Document Ingested",
+                    from_role="DS",
+                    to_role="DS",
+                    remarks=remarks_text,
+                    performed_by=1,
+                    performed_by_name="Director Secretary",
+                    timestamp=doc.date or now_date
+                )
+            ]
+
+            # Seed initial attachments
+            if doc.attachments_list:
+                for idx, fname in enumerate(doc.attachments_list, 1):
+                    fext = fname.rsplit(".", 1)[-1].upper() if "." in fname else "PDF"
+                    self._attachments.append(
+                        AttachmentModel(
+                            id=len(self._attachments) + 1,
+                            document_id=doc.id,
+                            progress_update_id=None,
+                            file_name=fname,
+                            file_path=doc.file_path or f"data/incoming/{fname}",
+                            file_type=fext,
+                            file_size=2048 * idx,
+                            category="ORIGINAL",
+                            source=doc.source or "Initial Intake",
+                            uploaded_by=1,
+                            uploaded_by_name="Director Secretary",
+                            created_at=doc.date or now_date
+                        )
+                    )
+
+    def _seed_intake_inbox(self):
+        """
+        Initializes the 5 canonical intake documents in the DS Incoming Queue.
+        """
+        now_day = datetime.now().strftime("%Y-%m-%d")
+        deadline_7d = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+
+        self._inbox_documents: List[DocumentModel] = [
+            DocumentModel(
+                id=1,
+                title="National Higher Education Accreditation & Governance Compliance Directive",
+                date=f"{now_day} 09:30 AM",
+                mode="Outlook / Government Mail",
+                source="Ministry of Higher Education",
+                priority=PriorityEnum.MEDIUM.value,
+                file_path="data/incoming/government_mail/accreditation_compliance_directive.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=1,
+                attachments_list=["accreditation_compliance_directive.pdf"],
+                status="Received"
+            ),
+            DocumentModel(
+                id=2,
+                title="Q3 Financial Audit & Capital Grant Disbursement Notice",
+                date=f"{now_day} 09:45 AM",
+                mode="Internet / Web Portal",
+                source="State Audit Bureau",
+                priority=PriorityEnum.HIGH.value,
+                file_path="data/incoming/government_mail/audit_disbursement_notice.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=2,
+                attachments_list=["audit_disbursement_notice.pdf", "capital_grant_schedule.xlsx"],
+                suggested_department_name="Finance",
+                suggested_department_id=1,
+                status="Received"
+            ),
+            DocumentModel(
+                id=3,
+                title="Statutory Vendor Tax Clearance & Procurement Verification",
+                date=f"{now_day} 10:00 AM",
+                mode="Fax",
+                source="Central Board of Direct Taxes",
+                priority=PriorityEnum.HIGH.value,
+                file_path="data/incoming/government_mail/vendor_tax_clearance.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=1,
+                attachments_list=["vendor_tax_clearance.pdf"],
                 suggested_department_name="Finance",
                 suggested_department_id=1,
                 suggested_employee_name="Rahul Sharma",
                 suggested_employee_id=101,
-                status="New / Received"
+                status="Received"
             ),
-            # 3. Procurement document - suggested Procurement, no employee
-            DocumentModel(
-                id=3,
-                title="High-Performance Compute Cluster Procurement Proposal",
-                date="2026-08-15 10:00 AM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Advanced Computing Laboratory",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/outlook/hpc_cluster_procurement.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["hpc_cluster_procurement.pdf", "vendor_price_bids.xlsx"],
-                suggested_department_name="Procurement",
-                suggested_department_id=2,
-                status="New / Received"
-            ),
-            # 4. Procurement document - suggested Procurement, suggested Priya Verma
             DocumentModel(
                 id=4,
-                title="Scientific Laboratory Spectrometer Supply Contract",
-                date="2026-08-15 10:15 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="Central Instrumentation Facility",
+                title="Urgent Campus Security Infrastructure Upgrade Order (Pre-Reviewed)",
+                date=f"{now_day} 10:15 AM",
+                mode="Physical / Scanned PDF",
+                source="Office of the Director",
                 priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/spectrometer_contract.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=1,
-                attachments_list=["spectrometer_contract.pdf"],
-                suggested_department_name="Procurement",
-                suggested_department_id=2,
-                suggested_employee_name="Priya Verma",
-                suggested_employee_id=201,
-                status="New / Received"
-            ),
-            # 5. HR document - suggested Human Resources
-            DocumentModel(
-                id=5,
-                title="Academic Staff Promotion & Performance Appraisal Guidelines",
-                date="2026-08-15 10:30 AM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Academic Senate Secretariat",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/outlook/faculty_appraisal_guidelines.docx",
-                file_type="DOCX",
-                format="DOCX",
-                attachment_count=1,
-                attachments_list=["faculty_appraisal_guidelines.docx"],
-                suggested_department_name="Human Resources",
-                suggested_department_id=3,
-                status="New / Received"
-            ),
-            # 6. Maintenance document - suggested Maintenance
-            DocumentModel(
-                id=6,
-                title="Campus High-Voltage Substation Transformer Overhaul",
-                date="2026-08-15 10:45 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="State Electricity Board",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/substation_overhaul.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["substation_overhaul.pdf", "safety_inspection_certificate.pdf"],
-                suggested_department_name="Maintenance",
-                suggested_department_id=4,
-                status="New / Received"
-            ),
-            # 7. IT document - suggested IT
-            DocumentModel(
-                id=7,
-                title="Campus Core Network Switches & Firewall Upgrade",
-                date="2026-08-15 11:00 AM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="IT Cell Network Infrastructure",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/outlook/network_switch_upgrade.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=3,
-                attachments_list=["network_switch_upgrade.pdf", "switch_specifications.xlsx", "topology_diagram.png"],
-                suggested_department_name="IT",
-                suggested_department_id=5,
-                status="New / Received"
-            ),
-            # 8. Document with no routing suggestion
-            DocumentModel(
-                id=8,
-                title="Inter-Institutional Collaboration Memorandum of Understanding",
-                date="2026-08-15 11:15 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="National Research Foundation",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/government_mail/collaboration_mou.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=1,
-                attachments_list=["collaboration_mou.pdf"],
-                status="New / Received"
-            ),
-            # 9. Document with ambiguous routing information
-            DocumentModel(
-                id=9,
-                title="Campus Environmental Safety & Hazardous Waste Disposal Directive",
-                date="2026-08-15 11:30 AM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="Pollution Control Board",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/government_mail/hazardous_waste_directive.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["hazardous_waste_directive.pdf", "compliance_checklist.pdf"],
-                suggested_department_name="Maintenance",
-                suggested_department_id=4,
-                status="New / Received"
-            ),
-            # 10. Document with multiple attachments
-            DocumentModel(
-                id=10,
-                title="Quarterly Vendor Empanelment & Rate Contract Renewal",
-                date="2026-08-15 11:45 AM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Vendor Registration Desk",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/outlook/vendor_empanelment_2026.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=4,
-                attachments_list=["vendor_empanelment_2026.pdf", "approved_vendor_list.xlsx", "tax_clearance_certificates.zip", "undertaking_affidavit.pdf"],
-                suggested_department_name="Procurement",
-                suggested_department_id=2,
-                suggested_employee_name="Priya Verma",
-                suggested_employee_id=201,
-                status="New / Received"
-            ),
-            # 11. Scanned image requiring OCR
-            DocumentModel(
-                id=11,
-                title="Scanned Paper Dispatch: Central Laboratory Equipment Requisition",
-                date="2026-08-15 12:00 PM",
-                mode="Physical Scan / Optical Ingest",
-                source="Chemistry Research Wing",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/scans/scanned_lab_requisition.jpg",
-                file_type="Scanned Image",
-                format="JPG",
-                attachment_count=1,
-                attachments_list=["scanned_lab_requisition.jpg"],
-                suggested_department_name="Procurement",
-                suggested_department_id=2,
-                status="New / Received"
-            ),
-            # 12. HR Mediclaim Policy
-            DocumentModel(
-                id=12,
-                title="Employee Health & Group Mediclaim Insurance Policy 2026",
-                date="2026-08-15 12:15 PM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Welfare Committee",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/outlook/mediclaim_policy_terms.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["mediclaim_policy_terms.pdf", "premium_deduction_slab.pdf"],
-                suggested_department_name="Human Resources",
-                suggested_department_id=3,
-                suggested_employee_name="Anjali Gupta",
-                suggested_employee_id=301,
-                status="New / Received"
-            ),
-            # 13. Maintenance HVAC Contract
-            DocumentModel(
-                id=13,
-                title="Campus Central Chiller & HVAC System Annual Service Agreement",
-                date="2026-08-15 12:30 PM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Estate Office",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/outlook/chiller_maintenance_contract.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["chiller_maintenance_contract.pdf", "preventive_schedule.xlsx"],
-                suggested_department_name="Maintenance",
-                suggested_department_id=4,
-                suggested_employee_name="Suresh Pawar",
-                suggested_employee_id=401,
-                status="New / Received"
-            ),
-            # 14. IT Disaster Recovery
-            DocumentModel(
-                id=14,
-                title="Data Center Disaster Recovery & Cloud Backup Strategy Directive",
-                date="2026-08-15 12:45 PM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="National Cyber Security Coordinator",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/disaster_recovery_directive.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["disaster_recovery_directive.pdf", "rpo_rto_standards.pdf"],
-                suggested_department_name="IT",
-                suggested_department_id=5,
-                suggested_employee_name="Aditya Kulkarni",
-                suggested_employee_id=501,
-                status="New / Received"
-            ),
-            # 15. Finance TDS Compliance
-            DocumentModel(
-                id=15,
-                title="Tax Deducted at Source (TDS) Quarterly Compliance Certificate",
-                date="2026-08-15 01:00 PM",
-                mode=IngestionModeEnum.GOVERNMENT_MAIL.value,
-                source="Income Tax Department",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/government_mail/tds_compliance_q1.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=1,
-                attachments_list=["tds_compliance_q1.pdf"],
-                suggested_department_name="Finance",
-                suggested_department_id=1,
-                suggested_employee_name="Sneha Patil",
-                suggested_employee_id=102,
-                status="New / Received"
-            ),
-            # 16. Email Body Communication
-            DocumentModel(
-                id=16,
-                title="Email Communication: Urgent Procurement of Biometric Attendance Units",
-                date="2026-08-15 01:15 PM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Registrar Office",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/outlook/biometric_devices_requisition.txt",
-                file_type="Email Body",
-                format="Email Body",
-                attachment_count=0,
-                attachments_list=[],
-                suggested_department_name="Procurement",
-                suggested_department_id=2,
-                suggested_employee_name="Arjun Shah",
-                suggested_employee_id=202,
-                status="New / Received"
-            ),
-            # 17. Manual Upload Document (DOCX)
-            DocumentModel(
-                id=17,
-                title="Manual Upload: Visiting Professor Accommodation & Honorarium Note",
-                date="2026-08-15 01:30 PM",
-                mode="Manual Upload",
-                source="Dean of Faculty Affairs",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/manual/visiting_faculty_note.docx",
-                file_type="DOCX",
-                format="DOCX",
-                attachment_count=1,
-                attachments_list=["visiting_faculty_note.docx"],
-                suggested_department_name="Human Resources",
-                suggested_department_id=3,
-                suggested_employee_name="Rohit Singh",
-                suggested_employee_id=302,
-                status="New / Received"
-            ),
-            # 18. Water Filtration Maintenance
-            DocumentModel(
-                id=18,
-                title="Drinking Water Purification Plant Filter Replacement Proposal",
-                date="2026-08-15 01:45 PM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="Public Health Engineering Unit",
-                priority=PriorityEnum.MEDIUM.value,
-                file_path="data/incoming/outlook/water_filtration_proposal.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["water_filtration_proposal.pdf", "water_quality_test_report.pdf"],
-                suggested_department_name="Maintenance",
-                suggested_department_id=4,
-                suggested_employee_name="Kavita More",
-                suggested_employee_id=402,
-                status="New / Received"
-            ),
-            # 19. Wi-Fi Expansion
-            DocumentModel(
-                id=19,
-                title="Campus Wi-Fi 6 Access Point Density Expansion",
-                date="2026-08-15 02:00 PM",
-                mode=IngestionModeEnum.INTERNAL_OUTLOOK.value,
-                source="IT Telecommunications Division",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/outlook/wifi6_expansion_proposal.pdf",
-                file_type="PDF",
-                format="PDF",
-                attachment_count=2,
-                attachments_list=["wifi6_expansion_proposal.pdf", "building_heatmaps.pdf"],
-                suggested_department_name="IT",
-                suggested_department_id=5,
-                suggested_employee_name="Siddhant Joshi",
-                suggested_employee_id=503,
-                status="New / Received"
-            ),
-            # 20. Scanned Fire Safety Audit
-            DocumentModel(
-                id=20,
-                title="Physical Scanned Invoice: Annual Fire Extinguisher Refilling & Safety Audit",
-                date="2026-08-15 02:15 PM",
-                mode="Physical Scan / Optical Ingest",
-                source="Campus Safety Office",
-                priority=PriorityEnum.HIGH.value,
-                file_path="data/incoming/scans/fire_safety_audit.pdf",
+                file_path="data/incoming/scans/security_infrastructure_upgrade.pdf",
                 file_type="Scanned PDF",
                 format="PDF",
-                attachment_count=3,
-                attachments_list=["fire_safety_audit.pdf", "extinguisher_inventory.xlsx", "statutory_fire_noc.pdf"],
-                suggested_department_name="Maintenance",
-                suggested_department_id=4,
-                suggested_employee_name="Omkar Shinde",
-                suggested_employee_id=405,
-                status="New / Received"
+                attachment_count=1,
+                attachments_list=["security_infrastructure_upgrade.pdf"],
+                suggested_department_name="Finance",
+                suggested_department_id=1,
+                suggested_employee_name="Rahul Sharma",
+                suggested_employee_id=101,
+                director_remark="Approved. Expedite procurement and assign to Rahul Sharma for immediate execution.",
+                has_prior_director_remark=True,
+                status="Received"
+            ),
+            DocumentModel(
+                id=5,
+                title="High-Priority Enterprise Server Maintenance & Firewall Compliance",
+                date=f"{now_day} 10:30 AM",
+                mode="Internet / Web Portal",
+                source="Cyber Security Directorate",
+                priority=PriorityEnum.HIGH.value,
+                deadline=deadline_7d,
+                file_path="data/incoming/outlook/server_maintenance_compliance.pdf",
+                file_type="PDF",
+                format="PDF",
+                attachment_count=2,
+                attachments_list=["server_maintenance_compliance.pdf", "firewall_rules.xlsx"],
+                suggested_department_name="Technical",
+                suggested_department_id=5,
+                status="Received"
             ),
         ]
 
@@ -588,7 +543,16 @@ class MockRepository(BaseRepository):
         source: Optional[str] = None,
         search: Optional[str] = None
     ) -> List[DocumentModel]:
-        results = list(self._documents)
+        # Enforce canonical document identity: exactly one record per unique ID / reference
+        seen_ids = set()
+        unique_documents: List[DocumentModel] = []
+        for d in self._documents:
+            ident = d.id if d.id is not None else d.reference_no
+            if ident not in seen_ids:
+                seen_ids.add(ident)
+                unique_documents.append(d)
+
+        results = list(unique_documents)
 
         # 1. Enforce Strict Role-Based and Department-Based Scoping from Authenticated Session
         if self._current_user:
@@ -643,12 +607,88 @@ class MockRepository(BaseRepository):
         return None
 
     def create_document(self, document: DocumentModel, file_path: Optional[str] = None) -> DocumentModel:
+        """
+        Creates or updates a document in the registered collection.
+        If a document with the same ID or reference number already exists, updates it in place
+        to guarantee exactly one canonical record per document.
+        """
+        # 1. Check if document already exists by ID or by reference_no in _documents
+        existing_doc = None
         if document.id is not None:
+            existing_doc = next((d for d in self._documents if d.id == document.id), None)
+        if not existing_doc and document.reference_no:
+            existing_doc = next((d for d in self._documents if d.reference_no == document.reference_no), None)
+
+        if existing_doc:
+            # Update existing document record in place
+            if document.title:
+                existing_doc.title = document.title
+            if document.date:
+                existing_doc.date = document.date
+            if document.mode:
+                existing_doc.mode = document.mode
+            if document.source:
+                existing_doc.source = document.source
+            if document.priority:
+                existing_doc.priority = document.priority
+            if document.deadline is not None:
+                existing_doc.deadline = document.deadline
+            if document.format:
+                existing_doc.format = document.format
+            if document.file_type:
+                existing_doc.file_type = document.file_type
+            if file_path or document.file_path:
+                existing_doc.file_path = file_path or document.file_path
+            if document.ocr_text:
+                existing_doc.ocr_text = document.ocr_text
+            if document.target_department_id is not None:
+                existing_doc.target_department_id = document.target_department_id
+            if document.target_department_name:
+                existing_doc.target_department_name = document.target_department_name
+            if document.assigned_employee_id is not None:
+                existing_doc.assigned_employee_id = document.assigned_employee_id
+            if document.assigned_employee_name:
+                existing_doc.assigned_employee_name = document.assigned_employee_name
+            if document.suggested_department_id is not None:
+                existing_doc.suggested_department_id = document.suggested_department_id
+            if document.suggested_department_name:
+                existing_doc.suggested_department_name = document.suggested_department_name
+            if document.suggested_employee_id is not None:
+                existing_doc.suggested_employee_id = document.suggested_employee_id
+            if document.suggested_employee_name:
+                existing_doc.suggested_employee_name = document.suggested_employee_name
+            if document.director_remark:
+                existing_doc.director_remark = document.director_remark
+            if document.has_prior_director_remark:
+                existing_doc.has_prior_director_remark = document.has_prior_director_remark
+            if document.has_director_routing_instruction:
+                existing_doc.has_director_routing_instruction = document.has_director_routing_instruction
+            if document.attachment_count:
+                existing_doc.attachment_count = document.attachment_count
+            if document.attachments_list:
+                existing_doc.attachments_list = document.attachments_list
+            existing_doc.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            # Remove from incoming inbox queue if present
+            if document.id is not None:
+                self.remove_inbox_item(document.id)
+            if existing_doc.id is not None and existing_doc.id != document.id:
+                self.remove_inbox_item(existing_doc.id)
+
+            from services.event_bus import event_bus
+            event_bus.notify_document_updated(existing_doc)
+            return existing_doc
+
+        # 2. Brand new document registration
+        if document.id is not None and not any(d.id == document.id for d in self._documents):
             doc_id = document.id
+            if doc_id >= self._next_doc_id:
+                self._next_doc_id = doc_id
         else:
             self._next_doc_id += 1
             doc_id = self._next_doc_id
-        ref_no = document.reference_no or f"CDTRS-2026-{doc_id:03d}"
+
+        ref_no = document.reference_no or f"CDTRS-2026-{doc_id:04d}"
 
         new_doc = DocumentModel(
             id=doc_id,
@@ -672,9 +712,12 @@ class MockRepository(BaseRepository):
             suggested_employee_id=document.suggested_employee_id,
             suggested_employee_name=document.suggested_employee_name,
             has_director_routing_instruction=document.has_director_routing_instruction,
+            has_prior_director_remark=document.has_prior_director_remark,
             file_path=file_path or document.file_path,
             file_type=document.file_type or "PDF",
-            format=document.format or "PDF"
+            format=document.format or "PDF",
+            attachment_count=document.attachment_count,
+            attachments_list=document.attachments_list
         )
         self._documents.append(new_doc)
         self._log_event(doc_id, action="Document Ingested", from_role="DS", remarks=f"Document {ref_no} registered into repository.")
@@ -687,6 +730,9 @@ class MockRepository(BaseRepository):
                 category="ORIGINAL",
                 source=new_doc.source or "Initial Intake"
             )
+
+        if document.id is not None:
+            self.remove_inbox_item(document.id)
 
         from services.event_bus import event_bus
         event_bus.notify_document_created(new_doc)
@@ -726,6 +772,13 @@ class MockRepository(BaseRepository):
         doc = self.get_document(document_id)
         if not doc:
             raise ValueError(f"Document #{document_id} not found.")
+
+        # Ensure document is in registered collection _documents and not duplicate
+        if not any(d.id == doc.id for d in self._documents):
+            self._documents.append(doc)
+
+        # Remove from incoming queue if it was an inbox item
+        self.remove_inbox_item(document_id)
 
         self._next_route_id += 1
         route = DocumentRouteModel(
@@ -831,7 +884,8 @@ class MockRepository(BaseRepository):
         return doc
 
     def return_to_ds(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
-        if remarks:
+        doc = self.get_document(document_id)
+        if remarks and (not doc or not doc.director_remark):
             self.save_director_remark(document_id, remarks)
         return self.route_document(
             document_id=document_id,

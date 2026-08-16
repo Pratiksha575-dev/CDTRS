@@ -94,8 +94,8 @@ class AttachmentModel:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AttachmentModel":
         uploaded_by_val = (
-            data.get("uploaded_by_user_id")
-            or data.get("uploaded_by")
+            data.get("uploaded_by")
+            or data.get("uploaded_by_user_id")
             or data.get("attached_by_id")
             or data.get("uploaded_by_id")
             or 0
@@ -105,18 +105,26 @@ class AttachmentModel:
             or data.get("attached_by_name")
         )
         created_at_val = (
-            data.get("created_at")
-            or data.get("uploaded_at")
+            str(data.get("created_at") or data.get("uploaded_at") or "")
         )
+        raw_cat = data.get("category") or data.get("attachment_type") or "ORIGINAL"
+        cat_str = str(raw_cat).upper()
+        if cat_str in ("PROGRESS_ATTACHMENT", "WORKFLOW"):
+            category_val = "WORKFLOW"
+        elif cat_str in ("ORIGINAL", "EMAIL_ATTACHMENT", "SUPPORTING_DOCUMENT"):
+            category_val = "ORIGINAL"
+        else:
+            category_val = "WORKFLOW" if data.get("progress_update_id") else "ORIGINAL"
+
         return cls(
             id=data.get("id"),
             document_id=data.get("document_id", 0),
             progress_update_id=data.get("progress_update_id"),
             file_name=data.get("file_name", "attachment"),
-            file_path=data.get("file_path", ""),
+            file_path=data.get("file_path") or data.get("storage_key") or "",
             file_type=data.get("file_type") or (data.get("file_name", "").rsplit(".", 1)[-1].upper() if "." in data.get("file_name", "") else "PDF"),
             file_size=data.get("file_size"),
-            category=data.get("category", "ORIGINAL"),
+            category=category_val,
             source=data.get("source"),
             uploaded_by=uploaded_by_val,
             uploaded_by_name=uploaded_by_name_val,

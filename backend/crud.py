@@ -345,7 +345,7 @@ def get_documents(db: Session) -> List[models.Document]:
 def get_inbox(db: Session, user: models.User) -> List[models.Document]:
     """
     Hard-enforced backend scoping:
-    - DS: Documents currently requiring DS action (current_stage = DS, status != CLOSED)
+    - DS: All documents they created or are current owner of
     - DIRECTOR: Only documents routed to Director (current_stage = DIRECTOR and current_owner = user)
     - HOD: Only documents routed to HOD's department (current_stage = HOD and target_dept = user.department_id)
     - EMPLOYEE: Only documents actively assigned to user or directly routed to user
@@ -354,8 +354,10 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
         return (
             db.query(models.Document)
             .filter(
-                models.Document.current_stage == WorkflowStage.DS,
-                models.Document.status != DocumentStatus.CLOSED
+                or_(
+                    models.Document.created_by == user.id,
+                    models.Document.current_owner_id == user.id
+                )
             )
             .order_by(models.Document.updated_at.desc())
             .all()
@@ -399,11 +401,12 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
         return (
             db.query(models.Document)
             .filter(
-                models.Document.current_stage == WorkflowStage.EMPLOYEE,
-                models.Document.status != DocumentStatus.CLOSED,
                 or_(
                     models.Document.doc_id.in_(assigned_doc_ids),
-                    models.Document.current_owner_id == user.id
+                    and_(
+                        models.Document.current_owner_id == user.id,
+                        models.Document.current_stage == WorkflowStage.EMPLOYEE
+                    )
                 )
             )
             .order_by(models.Document.updated_at.desc())
@@ -1463,24 +1466,22 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
 
 
 # =========================================================
-# COMPREHENSIVE SEED DATA (5 Departments, 10 Employees, 20 Test Documents)
+# COMPREHENSIVE SEED DATA (Includes 2 HODs for Isolation Testing)
 # =========================================================
 
 def seed_data(db: Session) -> None:
     """
     Populates the database with:
-    - 5 Departments: Administration, Finance, Procurement, Human Resources, Technical
-    - 1 HOD per department
-    - At least 2 employees per department (10 total staff members)
-    - DS and Director executive accounts
-    - 20 realistic test documents initially at DS Inbox (unrouted) covering all test scenarios
+    - 4 Departments: Administration, Finance, Procurement, Technical
+    - 2 distinct HODs from different departments (Finance & Procurement) for isolation testing
+    - Multiple employees across both departments
+    - DS and Director accounts
     """
     # 1. Departments
     depts_data = [
         {"name": "Administration", "code": "ADMIN"},
         {"name": "Finance", "code": "FIN"},
         {"name": "Procurement", "code": "PROC"},
-        {"name": "Human Resources", "code": "HR"},
         {"name": "Technical", "code": "TECH"},
     ]
 
@@ -1496,23 +1497,11 @@ def seed_data(db: Session) -> None:
         else:
             dept_map[d["name"]] = existing.id
 
-    # 2. Employees (Records - At least 2 per department)
+    # 2. Employees (Records)
     employees_data = [
-        # Finance
-        {"code": "EMP-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Senior Accounts Officer"},
-        {"code": "EMP-002", "name": "Amit Patel", "dept": "Finance", "designation": "Financial Analyst"},
-        # Procurement
-        {"code": "EMP-003", "name": "Priya Verma", "dept": "Procurement", "designation": "Procurement Specialist"},
-        {"code": "EMP-004", "name": "Vikram Singh", "dept": "Procurement", "designation": "Contracts Officer"},
-        # Human Resources
-        {"code": "EMP-005", "name": "Neha Gupta", "dept": "Human Resources", "designation": "HR Operations Officer"},
-        {"code": "EMP-006", "name": "Rohit Verma", "dept": "Human Resources", "designation": "Training Coordinator"},
-        # Technical
-        {"code": "EMP-007", "name": "Anil Kumar", "dept": "Technical", "designation": "Lead Systems Engineer"},
-        {"code": "EMP-008", "name": "Siddharth Roy", "dept": "Technical", "designation": "Network Architect"},
-        # Administration
-        {"code": "EMP-009", "name": "Pooja Sharma", "dept": "Administration", "designation": "Executive Assistant"},
-        {"code": "EMP-010", "name": "Suresh Menon", "dept": "Administration", "designation": "Records Custodian"},
+        {"code": "EMP-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Accounts Officer"},
+        {"code": "EMP-002", "name": "Priya Verma", "dept": "Procurement", "designation": "Procurement Specialist"},
+        {"code": "EMP-003", "name": "Anil Kumar", "dept": "Technical", "designation": "Systems Engineer"},
     ]
 
     emp_map = {}
@@ -1532,9 +1521,8 @@ def seed_data(db: Session) -> None:
         else:
             emp_map[emp_d["code"]] = existing.id
 
-    # 3. Users (Executive, HODs, and Department Employees)
+    # 3. Users (Accounts)
     users_data = [
-        # Executive
         {
             "username": "ds_user",
             "password": "cdtrs@ds",
@@ -1551,7 +1539,6 @@ def seed_data(db: Session) -> None:
             "department_id": None,
             "employee_id": None
         },
-        # Department HODs
         {
             "username": "hod_finance",
             "password": "cdtrs@hod",
@@ -1569,23 +1556,6 @@ def seed_data(db: Session) -> None:
             "employee_id": None
         },
         {
-            "username": "hod_hr",
-            "password": "cdtrs@hod",
-            "full_name": "Head of Human Resources",
-            "role": UserRole.HOD,
-            "department_id": dept_map["Human Resources"],
-            "employee_id": None
-        },
-        {
-            "username": "hod_tech",
-            "password": "cdtrs@hod",
-            "full_name": "Head of Technical Division",
-            "role": UserRole.HOD,
-            "department_id": dept_map["Technical"],
-            "employee_id": None
-        },
-        # Finance Employees
-        {
             "username": "emp_rahul",
             "password": "cdtrs@emp",
             "full_name": "Rahul Sharma",
@@ -1594,67 +1564,15 @@ def seed_data(db: Session) -> None:
             "employee_id": emp_map.get("EMP-001")
         },
         {
-            "username": "emp_amit",
-            "password": "cdtrs@emp",
-            "full_name": "Amit Patel",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Finance"],
-            "employee_id": emp_map.get("EMP-002")
-        },
-        # Procurement Employees
-        {
             "username": "emp_priya",
             "password": "cdtrs@emp",
             "full_name": "Priya Verma",
             "role": UserRole.EMPLOYEE,
             "department_id": dept_map["Procurement"],
-            "employee_id": emp_map.get("EMP-003")
-        },
-        {
-            "username": "emp_vikram",
-            "password": "cdtrs@emp",
-            "full_name": "Vikram Singh",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Procurement"],
-            "employee_id": emp_map.get("EMP-004")
-        },
-        # HR Employees
-        {
-            "username": "emp_neha",
-            "password": "cdtrs@emp",
-            "full_name": "Neha Gupta",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Human Resources"],
-            "employee_id": emp_map.get("EMP-005")
-        },
-        {
-            "username": "emp_rohit",
-            "password": "cdtrs@emp",
-            "full_name": "Rohit Verma",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Human Resources"],
-            "employee_id": emp_map.get("EMP-006")
-        },
-        # Technical Employees
-        {
-            "username": "emp_anil",
-            "password": "cdtrs@emp",
-            "full_name": "Anil Kumar",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Technical"],
-            "employee_id": emp_map.get("EMP-007")
-        },
-        {
-            "username": "emp_siddharth",
-            "password": "cdtrs@emp",
-            "full_name": "Siddharth Roy",
-            "role": UserRole.EMPLOYEE,
-            "department_id": dept_map["Technical"],
-            "employee_id": emp_map.get("EMP-008")
-        },
+            "employee_id": emp_map.get("EMP-002")
+        }
     ]
 
-    user_map = {}
     for u in users_data:
         existing = get_user_by_username(db, u["username"])
         if not existing:
@@ -1669,7 +1587,6 @@ def seed_data(db: Session) -> None:
             db.add(user)
             db.commit()
             db.refresh(user)
-            user_map[u["username"]] = user.id
 
             # Link employee back to user
             if u["employee_id"]:
@@ -1677,324 +1594,5 @@ def seed_data(db: Session) -> None:
                 if db_emp and not db_emp.user_id:
                     db_emp.user_id = user.id
                     db.commit()
-        else:
-            user_map[u["username"]] = existing.id
 
-    ds_user_id = user_map.get("ds_user")
-
-    # 4. 20 Realistic Test Documents (All initially at DS stage / status RECEIVED)
-    docs_data = [
-        # Scenario 1: DS -> Director candidate (Executive Policy Review)
-        {
-            "ref": "CDTRS-2026-0001",
-            "title": "National Higher Education Policy Compliance Audit Directive",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 8, 30),
-            "mode": "Government Mail",
-            "source": "Ministry of Education",
-            "priority": Priority.HIGH,
-            "desc": "Statutory audit directive regarding institution compliance with revised national guidelines.",
-            "sugg_dept": "Administration",
-            "sugg_emp": None,
-        },
-        # Scenario 2: DS -> Director -> DS -> HOD candidate (Annual Budget Allocation)
-        {
-            "ref": "CDTRS-2026-0002",
-            "title": "Annual Capital Budget Allocation & Fiscal Grant Directive",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 15),
-            "mode": "Government Mail",
-            "source": "Ministry of Finance",
-            "priority": Priority.HIGH,
-            "desc": "Grant authorization letter allocating capital expenditure funds for FY 2026-27.",
-            "sugg_dept": "Finance",
-            "sugg_emp": None,
-        },
-        # Scenario 3: DS -> Director -> DS -> Employee candidate (Confidential Audit Investigation)
-        {
-            "ref": "CDTRS-2026-0003",
-            "title": "Confidential Special Audit of Laboratory Procurement Invoices",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 8, 25),
-            "mode": "Government Mail",
-            "source": "Comptroller & Auditor General",
-            "priority": Priority.HIGH,
-            "desc": "Special investigative audit regarding vendor quotation irregularities.",
-            "sugg_dept": "Finance",
-            "sugg_emp": "emp_rahul",
-        },
-        # Scenario 4: DS -> HOD directly candidate (Quarterly Procurement Requisition)
-        {
-            "ref": "CDTRS-2026-0004",
-            "title": "Quarterly Stationery & Consumable Requisitions Batch Q3",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 9, 1),
-            "mode": "Internal Outlook",
-            "source": "Central Stores Division",
-            "priority": Priority.MEDIUM,
-            "desc": "Bulk purchase requisition for departmental stationery and printing supplies.",
-            "sugg_dept": "Procurement",
-            "sugg_emp": None,
-        },
-        # Scenario 5: DS -> Employee directly candidate (Network Server Maintenance Task)
-        {
-            "ref": "CDTRS-2026-0005",
-            "title": "Data Center Core Switch Firmware Security Patching",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 8, 22),
-            "mode": "Internal Outlook",
-            "source": "Cyber Security Operations Center",
-            "priority": Priority.HIGH,
-            "desc": "Critical CVE patch deployment schedule for backbone network switches.",
-            "sugg_dept": "Technical",
-            "sugg_emp": "emp_anil",
-        },
-        # Scenario 6: Director Remark naming Department ("Forward to Finance")
-        {
-            "ref": "CDTRS-2026-0006",
-            "title": "Inter-Institutional Research Endowment Fund Dispersal",
-            "date": date(2026, 8, 14),
-            "deadline": date(2026, 9, 10),
-            "mode": "Government Mail",
-            "source": "Department of Science and Technology",
-            "priority": Priority.MEDIUM,
-            "desc": "Joint research funding grant release notification requiring departmental financial reconciliation.",
-            "sugg_dept": "Finance",
-            "sugg_emp": None,
-        },
-        # Scenario 7: Director Remark naming Employee ("Assign to Priya Verma")
-        {
-            "ref": "CDTRS-2026-0007",
-            "title": "High-Performance Computing Cluster Global Tender Notice",
-            "date": date(2026, 8, 14),
-            "deadline": date(2026, 9, 5),
-            "mode": "Government Mail",
-            "source": "National Supercomputing Mission",
-            "priority": Priority.HIGH,
-            "desc": "Global e-tender floated for 100 TFLOPS research computing infrastructure.",
-            "sugg_dept": "Procurement",
-            "sugg_emp": "emp_priya",
-        },
-        # Scenario 8: Department specified, employee not specified (HR Training Proposal)
-        {
-            "ref": "CDTRS-2026-0008",
-            "title": "Administrative Staff Digital Governance Capacity Building Workshop",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 20),
-            "mode": "Internal Outlook",
-            "source": "National Institute of Public Administration",
-            "priority": Priority.LOW,
-            "desc": "Proposal for 3-day online training module for non-teaching administrative personnel.",
-            "sugg_dept": "Human Resources",
-            "sugg_emp": None,
-        },
-        # Scenario 9: Direct Employee Assignment scenario (Tax Compliance Filing)
-        {
-            "ref": "CDTRS-2026-0009",
-            "title": "GST Monthly Return & TDS Reconciliation Statement",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 8, 20),
-            "mode": "Manual Upload",
-            "source": "Central Board of Indirect Taxes",
-            "priority": Priority.HIGH,
-            "desc": "Monthly statutory tax filing documentation for verification.",
-            "sugg_dept": "Finance",
-            "sugg_emp": "emp_rahul",
-        },
-        # Scenario 10: Department-Only Routing (Lab Equipment Procurement)
-        {
-            "ref": "CDTRS-2026-0010",
-            "title": "Advanced Materials Characterization Lab Equipment Procurement",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 30),
-            "mode": "Internal Outlook",
-            "source": "Department of Metallurgy",
-            "priority": Priority.MEDIUM,
-            "desc": "Indents for X-ray diffraction and spectrometer procurement.",
-            "sugg_dept": "Procurement",
-            "sugg_emp": None,
-        },
-        # Scenario 11: No Routing Info / General Intake (Public Grievance)
-        {
-            "ref": "CDTRS-2026-0011",
-            "title": "Public Grievance Portal Dispatch: Campus Access Road Repair",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 10),
-            "mode": "Government Mail",
-            "source": "Centralized Public Grievance Redress System",
-            "priority": Priority.LOW,
-            "desc": "Citizen grievance registered regarding municipal access road maintenance.",
-            "sugg_dept": None,
-            "sugg_emp": None,
-        },
-        # Scenario 12: High-Confidence OCR Suggested Routing (IT Network)
-        {
-            "ref": "CDTRS-2026-0012",
-            "title": "Campus Wi-Fi 6 Access Point Density Expansion Project",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 9, 15),
-            "mode": "Internal Outlook",
-            "source": "Campus Network Committee",
-            "priority": Priority.MEDIUM,
-            "desc": "Technical evaluation and site survey report for high-density wireless deployment.",
-            "sugg_dept": "Technical",
-            "sugg_emp": "emp_siddharth",
-        },
-        # Scenario 13: High Priority Urgent Dispatch (Statutory Safety)
-        {
-            "ref": "CDTRS-2026-0013",
-            "title": "Immediate Safety Notice: Annual Fire Extinguisher Re-certification",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 8, 19),
-            "mode": "Manual Upload",
-            "source": "State Fire & Rescue Services",
-            "priority": Priority.HIGH,
-            "desc": "Mandatory statutory compliance notice requiring extinguisher pressure testing within 72 hours.",
-            "sugg_dept": "Technical",
-            "sugg_emp": None,
-        },
-        # Scenario 14: Strict Deadline Dispatch (Grant Utilization)
-        {
-            "ref": "CDTRS-2026-0014",
-            "title": "UGC Special Grant Utilization Certificate Submission Deadline",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 8, 25),
-            "mode": "Government Mail",
-            "source": "University Grants Commission",
-            "priority": Priority.HIGH,
-            "desc": "Final reminder to submit audited expenditure statements for 2025-26 development funds.",
-            "sugg_dept": "Finance",
-            "sugg_emp": "emp_amit",
-        },
-        # Scenario 15: Progress Follow-up Candidate (Solar Power Grid)
-        {
-            "ref": "CDTRS-2026-0015",
-            "title": "Rooftop Solar Photovoltaic Grid Synchronization Phase II",
-            "date": date(2026, 8, 14),
-            "deadline": date(2026, 9, 30),
-            "mode": "Internal Outlook",
-            "source": "Renewable Energy Cell",
-            "priority": Priority.MEDIUM,
-            "desc": "Net metering approval and grid tie-in milestone progress documentation.",
-            "sugg_dept": "Technical",
-            "sugg_emp": "emp_anil",
-        },
-        # Scenario 16: Swift Closure Candidate (Informational Circular)
-        {
-            "ref": "CDTRS-2026-0016",
-            "title": "Gazette Notification: Revised Public Holidays Schedule 2026",
-            "date": date(2026, 8, 15),
-            "deadline": None,
-            "mode": "Government Mail",
-            "source": "Department of Personnel and Training",
-            "priority": Priority.LOW,
-            "desc": "Informational circular notifying national and restricted holidays for academic calendar.",
-            "sugg_dept": "Administration",
-            "sugg_emp": None,
-        },
-        # Scenario 17: Government Mail Source (Ministry Circular)
-        {
-            "ref": "CDTRS-2026-0017",
-            "title": "Department of Biotechnology Research Grant Renewal Letter",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 12),
-            "mode": "Government Mail",
-            "source": "Department of Biotechnology",
-            "priority": Priority.MEDIUM,
-            "desc": "Sanction order renewing extramural research funding for Life Sciences.",
-            "sugg_dept": "Finance",
-            "sugg_emp": None,
-        },
-        # Scenario 18: Outlook / Internal Mail Source (Inter-Departmental Reallocation)
-        {
-            "ref": "CDTRS-2026-0018",
-            "title": "Inter-Departmental Space Reallocation in New Academic Block",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 9, 8),
-            "mode": "Internal Outlook",
-            "source": "Dean of Infrastructure",
-            "priority": Priority.MEDIUM,
-            "desc": "Request for faculty cabin and research scholar seating distribution.",
-            "sugg_dept": "Human Resources",
-            "sugg_emp": "emp_neha",
-        },
-        # Scenario 19: Manual Upload Ingest (Physical Scanned Audit Query)
-        {
-            "ref": "CDTRS-2026-0019",
-            "title": "Physical Scanned Query: Audit Para on Capital Works Depreciation",
-            "date": date(2026, 8, 16),
-            "deadline": date(2026, 8, 28),
-            "mode": "Manual Upload",
-            "source": "State Accountant General",
-            "priority": Priority.HIGH,
-            "desc": "Physical scan of audit observation regarding asset capitalization schedules.",
-            "sugg_dept": "Finance",
-            "sugg_emp": "emp_rahul",
-        },
-        # Scenario 20: Attachment-Ready Multi-File Dispatch (ERP Software Tender)
-        {
-            "ref": "CDTRS-2026-0020",
-            "title": "Enterprise Resource Planning (ERP) Upgrade Vendor Contract",
-            "date": date(2026, 8, 15),
-            "deadline": date(2026, 9, 25),
-            "mode": "Internal Outlook",
-            "source": "Software Purchase Committee",
-            "priority": Priority.HIGH,
-            "desc": "Service level agreement and contract milestones for university-wide ERP migration.",
-            "sugg_dept": "Procurement",
-            "sugg_emp": "emp_vikram",
-        },
-    ]
-
-    for d_data in docs_data:
-        existing = db.query(models.Document).filter(models.Document.reference_no == d_data["ref"]).first()
-        if not existing:
-            doc = models.Document(
-                reference_no=d_data["ref"],
-                title=d_data["title"],
-                description=d_data["desc"],
-                received_date=d_data["date"],
-                deadline=d_data["deadline"],
-                source=d_data["source"],
-                mode=d_data["mode"],
-                priority=d_data["priority"],
-                status=DocumentStatus.RECEIVED,
-                current_stage=WorkflowStage.DS,
-                current_owner_id=ds_user_id,
-                target_department_id=None,  # Unrouted initially
-                created_by=ds_user_id,
-                ocr_status=OCRStatus.COMPLETED,
-                version=1
-            )
-            db.add(doc)
-            db.commit()
-            db.refresh(doc)
-
-            # Workflow history
-            _add_workflow_history(
-                db=db,
-                document_id=doc.doc_id,
-                user_id=ds_user_id,
-                action="DOCUMENT_RECEIVED",
-                from_role="DS",
-                to_role=None,
-                details=f"Intake dispatch registered as {doc.reference_no}"
-            )
-
-            # Routing suggestion (Advisory only)
-            sugg_dept_id = dept_map.get(d_data["sugg_dept"]) if d_data["sugg_dept"] else None
-            sugg_emp_id = user_map.get(d_data["sugg_emp"]) if d_data["sugg_emp"] else None
-            suggestion = models.RoutingSuggestion(
-                document_id=doc.doc_id,
-                suggested_department_id=sugg_dept_id,
-                suggested_employee_id=sugg_emp_id,
-                routing_confidence=0.88 if sugg_dept_id else 0.50,
-                routing_reason=f"Content analysis and metadata inference for {d_data.get('sugg_dept') or 'General Admin'}",
-                routing_source=RoutingSource.DOCUMENT_CONTENT,
-                is_director_instruction=False,
-                generated_at=datetime.utcnow()
-            )
-            db.add(suggestion)
-            db.commit()
-
-    print("Phase 2 comprehensive seed data inserted successfully.")
+    print("Seed data inserted successfully.")

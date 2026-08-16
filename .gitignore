@@ -2,20 +2,40 @@
 .venv/
 venv/
 env/
+ENV/
 
-# Python cache
+# Python bytecode and cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
 
-# VS Code
+# Packaging / build outputs
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# IDE and editor settings
 .vscode/
+.idea/
+*.swp
+*.swo
 
-# OS files
+# Operating System files
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Environment / secrets
+# Environment variables / secrets
 .env
-data/cache/
+.env.local
+.env.*.local
+*.log
 
-data/cache/
+# Local test artifacts & databases
+scratch/*.db
+scratch/*.pdf
+scratch/test_uploads/

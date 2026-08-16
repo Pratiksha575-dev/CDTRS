@@ -129,33 +129,23 @@ class InboxPage(QWidget):
         self.table.setRowCount(len(self.documents))
 
         for row, doc in enumerate(self.documents):
-            source_val = doc.source if isinstance(doc, DocumentModel) else (doc.get("source") if isinstance(doc, dict) else None)
-            source = source_val or "External Dispatch"
-
+            source = (doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "External"
+            sender = (doc.created_by if isinstance(doc, DocumentModel) and doc.created_by else (doc.source if isinstance(doc, DocumentModel) else doc.get("sender"))) or "Internal"
             # Generate clean sender label
-            src_str = str(source_val or "")
-            if "Finance" in src_str:
+            if "Finance" in source:
                 sender_label = "comptroller.audit@gov.in"
-            elif "IT Cell" in src_str or "Technical" in src_str:
+            elif "IT Cell" in source:
                 sender_label = "it.procurement@domain.org"
-            elif "Security" in src_str:
+            elif "Security" in source:
                 sender_label = "security.directorate@gov.in"
-            elif "HR" in src_str or "Human" in src_str:
-                sender_label = "personnel.directorate@gov.in"
             else:
                 sender_label = "directorate.general@gov.in"
 
-            title_val = doc.title if isinstance(doc, DocumentModel) else (doc.get("title") if isinstance(doc, dict) else None)
-            title = title_val or "Untitled Document"
-
-            mode_val = doc.mode if isinstance(doc, DocumentModel) else (doc.get("mode") if isinstance(doc, dict) else None)
-            mode = mode_val or "Government Mail"
-
-            fmt_val = doc.format or doc.file_type if isinstance(doc, DocumentModel) else (doc.get("format") or doc.get("file_type") if isinstance(doc, dict) else None)
-            fmt = fmt_val or "PDF"
+            title = (doc.title if isinstance(doc, DocumentModel) else doc.get("title")) or ""
+            mode = (doc.mode if isinstance(doc, DocumentModel) else doc.get("mode")) or "Government Mail"
+            fmt = (doc.format or doc.file_type if isinstance(doc, DocumentModel) else doc.get("format", doc.get("file_type"))) or "PDF"
             
-            att_cnt = doc.attachment_count if isinstance(doc, DocumentModel) else (doc.get("attachment_count", 0) if isinstance(doc, dict) else 0)
-            att_cnt = att_cnt or 0
+            att_cnt = (doc.attachment_count if isinstance(doc, DocumentModel) else doc.get("attachment_count")) or 0
             if att_cnt > 1:
                 att_str = f"📎 {att_cnt} attachments"
             elif att_cnt == 1:
@@ -163,21 +153,18 @@ class InboxPage(QWidget):
             else:
                 att_str = "No attachments"
 
-            received_val = doc.date if isinstance(doc, DocumentModel) else (doc.get("date") if isinstance(doc, dict) else None)
-            received = received_val or (doc.received_date if isinstance(doc, DocumentModel) else (doc.get("received_date") if isinstance(doc, dict) else None)) or "Today"
+            received = (doc.date if isinstance(doc, DocumentModel) else doc.get("date")) or "Today"
+            status = (doc.status if isinstance(doc, DocumentModel) else doc.get("status")) or "New / Received"
 
-            status_val = doc.status if isinstance(doc, DocumentModel) else (doc.get("status") if isinstance(doc, dict) else None)
-            status = status_val or "Received"
-
-            self.table.setItem(row, 0, QTableWidgetItem(source))
-            self.table.setItem(row, 1, QTableWidgetItem(sender_label))
-            self.table.setItem(row, 2, QTableWidgetItem(title))
-            self.table.setItem(row, 3, QTableWidgetItem(mode))
-            self.table.setItem(row, 4, QTableWidgetItem(fmt))
-            self.table.setItem(row, 5, QTableWidgetItem(att_str))
+            self.table.setItem(row, 0, QTableWidgetItem(str(source)))
+            self.table.setItem(row, 1, QTableWidgetItem(str(sender_label)))
+            self.table.setItem(row, 2, QTableWidgetItem(str(title)))
+            self.table.setItem(row, 3, QTableWidgetItem(str(mode)))
+            self.table.setItem(row, 4, QTableWidgetItem(str(fmt or "PDF")))
+            self.table.setItem(row, 5, QTableWidgetItem(str(att_str)))
             self.table.setItem(row, 6, QTableWidgetItem(str(received)))
 
-            status_item = QTableWidgetItem(status)
+            status_item = QTableWidgetItem(str(status))
             status_item.setForeground(Qt.darkBlue)
             self.table.setItem(row, 7, status_item)
 

@@ -81,31 +81,15 @@ class RoutingService:
 
     def analyze_director_remark(self, remark: str) -> Dict[str, Any]:
         """
-        Analyzes Director remark text for explicit routing instructions (departments, staff names).
-        Produces a suggestion for DS confirmation without auto-executing the routing.
+        Analyzes Director remark text for explicit routing/assignment instructions.
+        Strictly differentiates between a general review comment (e.g. 'Reviewed', 'Please check')
+        and an explicit delegation/assignment directive (e.g. 'Route to Finance', 'Assign to Rahul Sharma').
         """
-        t = (remark or "").lower()
+        t = f" {(remark or '').lower().strip()} "
         dept = None
         dept_id = None
         emp = None
         emp_id = None
-
-        # Department detection
-        if "procurement" in t:
-            dept = "Procurement"
-            dept_id = 2
-        elif "finance" in t:
-            dept = "Finance"
-            dept_id = 1
-        elif "human resource" in t or "hr" in t or "security" in t:
-            dept = "Human Resources"
-            dept_id = 3
-        elif "maintenance" in t:
-            dept = "Maintenance"
-            dept_id = 4
-        elif "it cell" in t or "it department" in t or " it " in f" {t} " or t.startswith("it ") or t.endswith(" it"):
-            dept = "IT"
-            dept_id = 5
 
         # Employee detection across all 5 departments
         emp_database = [
@@ -166,23 +150,50 @@ class RoutingService:
             ("yash", "Yash Deshmukh", 505, "IT", 5),
         ]
 
+        # 1. Check for specific individual employee name
         for token, full_name, e_id, d_name, d_id in emp_database:
-            if token in t:
+            if f" {token} " in t or f" {token}," in t or f" {token}." in t or f" {token}:" in t:
                 emp = full_name
                 emp_id = e_id
-                if not dept:
-                    dept = d_name
-                    dept_id = d_id
+                dept = d_name
+                dept_id = d_id
                 break
 
-        has_instruction = bool(dept or emp)
+        # 2. Check for explicit routing/assignment action intent
+        routing_action_markers = (
+            "assign", "route", "send", "forward", "refer", "hand over",
+            "action by", "directed to", "to be handled by", "delegate",
+            "task", "expedite", "for action", "for implementation", "for audit"
+        )
+        has_routing_intent = any(marker in t for marker in routing_action_markers) or (emp is not None)
+
+        # 3. Department detection (only if routing intent is present or explicit department instruction)
+        if has_routing_intent and not dept:
+            if "procurement" in t or "purchase" in t or "tender" in t:
+                dept = "Procurement"
+                dept_id = 2
+            elif "finance" in t or "accounts" in t:
+                dept = "Finance"
+                dept_id = 1
+            elif "human resource" in t or " hr " in t or "hr department" in t or "hr dept" in t:
+                dept = "Human Resources"
+                dept_id = 3
+            elif "maintenance" in t or "facility" in t:
+                dept = "Maintenance"
+                dept_id = 4
+            elif "it department" in t or "it dept" in t or "it cell" in t or "information technology" in t or "tech department" in t:
+                dept = "IT"
+                dept_id = 5
+
+        # Must have both routing intent AND an identified department or employee
+        has_instruction = bool(has_routing_intent and (dept or emp))
         conf = 96 if (dept and emp) else (92 if (dept or emp) else 0)
         return {
             "has_routing_instruction": has_instruction,
-            "suggested_department": dept,
-            "suggested_department_id": dept_id,
-            "suggested_employee": emp,
-            "suggested_employee_id": emp_id,
+            "suggested_department": dept if has_instruction else None,
+            "suggested_department_id": dept_id if has_instruction else None,
+            "suggested_employee": emp if has_instruction else None,
+            "suggested_employee_id": emp_id if has_instruction else None,
             "confidence": conf,
             "source": "Director Remark" if has_instruction else None
         }

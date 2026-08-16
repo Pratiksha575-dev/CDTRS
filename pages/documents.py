@@ -42,7 +42,10 @@ class DocumentsPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.load_documents()
+        if not getattr(self, "_preserve_filters_once", False):
+            self.load_documents()
+        else:
+            self._preserve_filters_once = False
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
@@ -234,6 +237,53 @@ class DocumentsPage(QWidget):
             return datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
         except Exception:
             return None
+
+    def set_filters(
+        self,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        deadline: Optional[str] = None,
+        department: Optional[str] = None,
+        search: Optional[str] = None
+    ):
+        """Pre-selects filter dropdowns and applies filtering."""
+        self._preserve_filters_once = True
+        self.all_documents = document_service.get_documents()
+
+        if status:
+            idx = self.status_filter.findText(status, Qt.MatchContains)
+            if idx >= 0:
+                self.status_filter.setCurrentIndex(idx)
+        else:
+            self.status_filter.setCurrentIndex(0)
+
+        if priority:
+            idx = self.priority_filter.findText(priority, Qt.MatchContains)
+            if idx >= 0:
+                self.priority_filter.setCurrentIndex(idx)
+        else:
+            self.priority_filter.setCurrentIndex(0)
+
+        if deadline:
+            idx = self.deadline_filter.findText(deadline, Qt.MatchContains)
+            if idx >= 0:
+                self.deadline_filter.setCurrentIndex(idx)
+        else:
+            self.deadline_filter.setCurrentIndex(0)
+
+        if department:
+            idx = self.department_filter.findText(department, Qt.MatchContains)
+            if idx >= 0:
+                self.department_filter.setCurrentIndex(idx)
+        else:
+            self.department_filter.setCurrentIndex(0)
+
+        if search is not None:
+            self.search_input.setText(search)
+        else:
+            self.search_input.clear()
+
+        self.apply_filters()
 
     def clear_filters(self):
         self.search_input.clear()

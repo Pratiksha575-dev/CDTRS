@@ -36,7 +36,7 @@ class DashboardPage(QWidget):
     """
 
     view_requested = Signal(object, str)
-    navigate_requested = Signal(str)  # Emits target page name (e.g. "Inbox", "Documents")
+    navigate_requested = Signal(str, object)  # Emits target page name (e.g. "Inbox", "Documents") and filter dictionary
 
     def __init__(self, role: str = "Director Secretary"):
         super().__init__()
@@ -97,10 +97,22 @@ class DashboardPage(QWidget):
         self.kpi_grid.setSpacing(12)
 
         if self.role == RoleEnum.DIRECTOR.value:
-            self.card_dir_new = self._create_kpi_card("Awaiting Initial Review", "0", "#0F172A")
-            self.card_dir_followup = self._create_kpi_card("Progress Follow-ups", "0", "#0284C7")
-            self.card_dir_reviewed = self._create_kpi_card("Total Reviewed / Returned", "0", "#059669")
-            self.card_dir_critical = self._create_kpi_card("Critical / High Priority", "0", "#E11D48")
+            self.card_dir_new = self._create_kpi_card(
+                "Awaiting Initial Review", "0", "#0F172A",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_dir_followup = self._create_kpi_card(
+                "Progress Follow-ups", "0", "#0284C7",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_dir_reviewed = self._create_kpi_card(
+                "Total Reviewed / Returned", "0", "#059669",
+                callback=lambda: self.navigate_requested.emit("Reviewed Documents", {})
+            )
+            self.card_dir_critical = self._create_kpi_card(
+                "Critical / High Priority", "0", "#E11D48",
+                callback=lambda: self.navigate_requested.emit("Documents", {"priority": "High Priority"})
+            )
 
             self.kpi_grid.addWidget(self.card_dir_new["frame"], 0, 0)
             self.kpi_grid.addWidget(self.card_dir_followup["frame"], 0, 1)
@@ -108,10 +120,22 @@ class DashboardPage(QWidget):
             self.kpi_grid.addWidget(self.card_dir_critical["frame"], 0, 3)
 
         elif self.role in (RoleEnum.HOD.value, "HOD"):
-            self.card_hod_unassigned = self._create_kpi_card("Awaiting Employee Assignment", "0", "#D97706")
-            self.card_hod_assigned = self._create_kpi_card("Assigned / In Progress", "0", "#0284C7")
-            self.card_hod_progress = self._create_kpi_card("Progress Updates Received", "0", "#059669")
-            self.card_hod_critical = self._create_kpi_card("Critical / High Priority", "0", "#E11D48")
+            self.card_hod_unassigned = self._create_kpi_card(
+                "Awaiting Employee Assignment", "0", "#D97706",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_hod_assigned = self._create_kpi_card(
+                "Assigned / In Progress", "0", "#0284C7",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_hod_progress = self._create_kpi_card(
+                "Progress Updates Received", "0", "#059669",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_hod_critical = self._create_kpi_card(
+                "Critical / High Priority", "0", "#E11D48",
+                callback=lambda: self.navigate_requested.emit("Documents", {"priority": "High Priority"})
+            )
 
             self.kpi_grid.addWidget(self.card_hod_unassigned["frame"], 0, 0)
             self.kpi_grid.addWidget(self.card_hod_assigned["frame"], 0, 1)
@@ -119,10 +143,22 @@ class DashboardPage(QWidget):
             self.kpi_grid.addWidget(self.card_hod_critical["frame"], 0, 3)
 
         elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
-            self.card_emp_active = self._create_kpi_card("Active Assigned Tasks", "0", "#0F172A")
-            self.card_emp_pending = self._create_kpi_card("New / Pending Progress", "0", "#D97706")
-            self.card_emp_progress = self._create_kpi_card("Progress Updates Submitted", "0", "#059669")
-            self.card_emp_critical = self._create_kpi_card("Critical / High Priority", "0", "#E11D48")
+            self.card_emp_active = self._create_kpi_card(
+                "Active Assigned Tasks", "0", "#0F172A",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_emp_pending = self._create_kpi_card(
+                "New / Pending Progress", "0", "#D97706",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_emp_progress = self._create_kpi_card(
+                "Progress Updates Submitted", "0", "#059669",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_emp_critical = self._create_kpi_card(
+                "Critical / High Priority", "0", "#E11D48",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
 
             self.kpi_grid.addWidget(self.card_emp_active["frame"], 0, 0)
             self.kpi_grid.addWidget(self.card_emp_pending["frame"], 0, 1)
@@ -130,12 +166,30 @@ class DashboardPage(QWidget):
             self.kpi_grid.addWidget(self.card_emp_critical["frame"], 0, 3)
 
         else:
-            self.card_intake = self._create_kpi_card("New Incoming", "0", "#0284C7")
-            self.card_director_rev = self._create_kpi_card("Awaiting Director Review", "0", "#6366F1")
-            self.card_director_done = self._create_kpi_card("Returned by Director", "0", "#D97706")
-            self.card_hod = self._create_kpi_card("Under HOD Processing", "0", "#0D9488")
-            self.card_progress = self._create_kpi_card("Progress Updates", "0", "#2563EB")
-            self.card_closed = self._create_kpi_card("Closed Documents", "0", "#059669")
+            self.card_intake = self._create_kpi_card(
+                "New Incoming", "0", "#0284C7",
+                callback=lambda: self.navigate_requested.emit("Inbox", {})
+            )
+            self.card_director_rev = self._create_kpi_card(
+                "Awaiting Director Review", "0", "#6366F1",
+                callback=lambda: self.navigate_requested.emit("Documents", {"status": "Under Director Review"})
+            )
+            self.card_director_done = self._create_kpi_card(
+                "Returned by Director", "0", "#D97706",
+                callback=lambda: self.navigate_requested.emit("Documents", {"status": "Director Review Completed"})
+            )
+            self.card_hod = self._create_kpi_card(
+                "Under HOD Processing", "0", "#0D9488",
+                callback=lambda: self.navigate_requested.emit("Documents", {"status": "Under HOD Processing"})
+            )
+            self.card_progress = self._create_kpi_card(
+                "Progress Updates", "0", "#2563EB",
+                callback=lambda: self.navigate_requested.emit("Documents", {"status": "Progress Updated"})
+            )
+            self.card_closed = self._create_kpi_card(
+                "Closed Documents", "0", "#059669",
+                callback=lambda: self.navigate_requested.emit("Documents", {"status": "Closed"})
+            )
 
             self.kpi_grid.addWidget(self.card_intake["frame"], 0, 0)
             self.kpi_grid.addWidget(self.card_director_rev["frame"], 0, 1)
@@ -170,7 +224,7 @@ class DashboardPage(QWidget):
             "New Incoming Documents",
             "0 documents awaiting processing",
             "View Inbox →",
-            lambda: self.navigate_requested.emit("Inbox"),
+            lambda: self.navigate_requested.emit("Inbox", {}),
             accent_color="#0284C7"
         )
         # Action Card 2: Returned by Director
@@ -178,7 +232,7 @@ class DashboardPage(QWidget):
             "Documents Returned by Director",
             "0 documents requiring routing",
             "View Documents →",
-            lambda: self.navigate_requested.emit("Documents"),
+            lambda: self.navigate_requested.emit("Documents", {"status": "Director Review Completed"}),
             accent_color="#D97706"
         )
         # Action Card 3: Progress Follow-up
@@ -186,7 +240,7 @@ class DashboardPage(QWidget):
             "Progress / Follow-up Requiring Attention",
             "0 updates requiring attention",
             "View Documents →",
-            lambda: self.navigate_requested.emit("Documents"),
+            lambda: self.navigate_requested.emit("Documents", {"status": "Progress Updated"}),
             accent_color="#2563EB"
         )
         # Action Card 4: Upcoming Deadlines
@@ -194,7 +248,7 @@ class DashboardPage(QWidget):
             "Upcoming Deadlines",
             "0 active documents registered",
             "View Documents →",
-            lambda: self.navigate_requested.emit("Documents"),
+            lambda: self.navigate_requested.emit("Documents", {"deadline": "Due Within 7 Days"}),
             accent_color="#059669"
         )
 
@@ -251,10 +305,14 @@ class DashboardPage(QWidget):
         btn_bar.addWidget(self.view_btn)
         main_layout.addLayout(btn_bar)
 
-    def _create_kpi_card(self, title: str, value: str, accent_color: str) -> dict:
+    def _create_kpi_card(self, title: str, value: str, accent_color: str, callback=None) -> dict:
         frame = QFrame()
         frame.setObjectName("contentCard")
         frame.setStyleSheet(f"QFrame#contentCard {{ border-left: 4px solid {accent_color}; background-color: #FFFFFF; border-radius: 6px; border-top: 1px solid #E2E8F0; border-right: 1px solid #E2E8F0; border-bottom: 1px solid #E2E8F0; }}")
+
+        if callback:
+            frame.setCursor(Qt.PointingHandCursor)
+            frame.mousePressEvent = lambda event: callback()
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(16, 14, 16, 14)

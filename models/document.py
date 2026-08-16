@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from models.enums import DocumentStatusEnum, PriorityEnum, WorkflowStageEnum
+
 
 @dataclass
 class DocumentModel:
@@ -45,7 +47,6 @@ class DocumentModel:
     created_by: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
-    version: int = 1
 
     # --- Backward-Compatibility Properties for UI Components ---
 
@@ -84,17 +85,23 @@ class DocumentModel:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DocumentModel":
         """Factory constructor ensuring strict type casting from API/JSON dictionaries."""
+        raw_date = data.get("date") or data.get("received_date") or data.get("received")
+        raw_deadline = data.get("deadline")
+        raw_status = data.get("status", "Received")
+        raw_priority = data.get("priority", "Medium")
+        raw_stage = data.get("current_stage") or data.get("stage", "DS")
+
         return cls(
-            id=data.get("id"),
+            id=data.get("id") or data.get("doc_id"),
             reference_no=data.get("reference_no") or data.get("reference"),
             title=data.get("title") or data.get("subject", ""),
-            date=data.get("date") or data.get("received"),
+            date=str(raw_date) if raw_date is not None else None,
             mode=data.get("mode") or data.get("ingestion_mode", "Government Mail"),
             source=data.get("source"),
-            priority=data.get("priority", "Medium"),
-            deadline=data.get("deadline"),
-            status=data.get("status", "Received"),
-            current_stage=data.get("current_stage") or data.get("stage", "DS"),
+            priority=PriorityEnum.normalize(str(raw_priority)),
+            deadline=str(raw_deadline) if raw_deadline is not None else None,
+            status=DocumentStatusEnum.normalize(str(raw_status)),
+            current_stage=str(raw_stage).upper(),
             director_remark=data.get("director_remark") or data.get("director_remarks"),
             hod_remark=data.get("hod_remark") or data.get("hod_remarks"),
             current_owner_id=data.get("current_owner_id"),
@@ -109,20 +116,19 @@ class DocumentModel:
             suggested_department_name=data.get("suggested_department_name"),
             suggested_employee_id=data.get("suggested_employee_id"),
             suggested_employee_name=data.get("suggested_employee_name"),
-            has_director_routing_instruction=data.get("has_director_routing_instruction", False),
+            has_director_routing_instruction=bool(data.get("has_director_routing_instruction", False)),
             director_routing_raw_text=data.get("director_routing_raw_text"),
-            routing_instruction_confidence=data.get("routing_instruction_confidence", 0),
+            routing_instruction_confidence=int(data.get("routing_instruction_confidence", 0)),
             file_path=data.get("file_path"),
             file_type=data.get("file_type") or data.get("format"),
             format=data.get("format") or data.get("file_type", "PDF"),
             ocr_text=data.get("ocr_text"),
-            has_prior_director_remark=data.get("has_prior_director_remark", False),
-            attachment_count=data.get("attachment_count", 0),
-            attachments_list=data.get("attachments_list", []),
+            has_prior_director_remark=bool(data.get("has_prior_director_remark", False)),
+            attachment_count=int(data.get("attachment_count", 0)),
+            attachments_list=data.get("attachments_list") or [],
             created_by=data.get("created_by"),
-            created_at=data.get("created_at"),
-            updated_at=data.get("updated_at"),
-            version=data.get("version", 1),
+            created_at=str(data.get("created_at")) if data.get("created_at") else None,
+            updated_at=str(data.get("updated_at")) if data.get("updated_at") else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -170,5 +176,4 @@ class DocumentModel:
             "created_by": self.created_by,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "version": self.version,
         }

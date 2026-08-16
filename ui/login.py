@@ -1,12 +1,11 @@
-import sys
-
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QLabel,
     QLineEdit,
     QFrame,
-    QPushButton
+    QPushButton,
+    QMessageBox
 )
 
 from PySide6.QtCore import Qt
@@ -79,9 +78,21 @@ class LoginWindow(QWidget):
         username=self.username_input.text().strip()
         password=self.password_input.text()
 
-        user=authenticate(username,password)
-        if user:
+        if not username or not password:
+            QMessageBox.warning(self, "Input Required", "Please enter both username and password.")
+            return
 
+        try:
+            user=authenticate(username,password)
+        except Exception as ex:
+            QMessageBox.critical(
+                self,
+                "Connection Error",
+                f"Could not connect to the backend server:\n\n{str(ex)}\n\nPlease ensure the backend server is running or check the API URL in config/settings.py."
+            )
+            return
+
+        if user:
             print("Login Successful")
             print("Username:", user["username"])
             print("Role:", user["role"])
@@ -93,4 +104,6 @@ class LoginWindow(QWidget):
 
             self.main_window.show()
             self.close()
+        else:
+            QMessageBox.warning(self, "Login Failed", "Invalid username or password. Please try again.")
 

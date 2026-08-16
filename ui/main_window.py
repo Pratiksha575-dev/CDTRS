@@ -169,11 +169,22 @@ class MainWindow(QMainWindow):
                     lambda k=hist_key: self._navigate_to(self.history_page, k)
                 )
 
-    def _handle_dashboard_navigate(self, target_page_name: str):
+    def _handle_dashboard_navigate(self, target_page_name: str, filters: Optional[dict] = None):
         if target_page_name == "Inbox":
-            self._navigate_to(self.inbox_page, "Inbox")
+            if self.role == RoleEnum.DIRECTOR.value:
+                self._navigate_to(self.director_inbox_page, "Inbox")
+            elif self.role in (RoleEnum.HOD.value, "HOD"):
+                self._navigate_to(self.hod_inbox_page, "Department Tasks" if "Department Tasks" in self.sidebar.buttons else "Inbox")
+            elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
+                self._navigate_to(self.employee_tasks_page, "My Tasks" if "My Tasks" in self.sidebar.buttons else "Inbox")
+            else:
+                self._navigate_to(self.inbox_page, "Inbox")
+        elif target_page_name in ("Reviewed Documents", "Reviewed"):
+            self._navigate_to(self.director_reviewed_page, "Reviewed Documents")
         elif target_page_name in ("Documents", "All Documents"):
-            self._navigate_to(self.documents_page, "Documents")
+            self._navigate_to(self.documents_page, "Documents" if "Documents" in self.sidebar.buttons else "All Documents")
+            if filters and hasattr(self.documents_page, "set_filters"):
+                self.documents_page.set_filters(**filters)
 
     def _navigate_to(self, target_widget: QWidget, menu_key: str):
         # Clean up any active DocumentViewer if navigating away to top-level tabs

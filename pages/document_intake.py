@@ -312,7 +312,7 @@ class DocumentIntakePage(QWidget):
 
         # Run OCR extraction
         res = ocr_service.process_incoming_document(file_path, incoming_item={"title": fname, "source": "Manual Upload", "mode": "Manual Upload"})
-        self._populate_extracted_data(res)
+        self._populate_extracted_data(res, file_path=file_path)
 
     def load_document(self, doc_dict_or_model: Union[DocumentModel, Dict[str, Any]]):
         """Pre-populates intake form and runs OCR extraction when opened from Inbox."""
@@ -341,32 +341,33 @@ class DocumentIntakePage(QWidget):
             self.incoming_attachments_list = raw_data.get("attachments_list", [])
             self.incoming_attachment_count = raw_data.get("attachment_count", len(self.incoming_attachments_list))
 
+        raw_file_path = raw_data.get("file_path", "")
         # Run OCR and routing analysis
         ocr_result = ocr_service.process_incoming_document(
-            file_path=raw_data.get("file_path", ""),
+            file_path=raw_file_path,
             incoming_item=raw_data
         )
 
-        self._populate_extracted_data(ocr_result)
+        self._populate_extracted_data(ocr_result, file_path=raw_file_path)
 
-    def _populate_extracted_data(self, ocr_result: Dict[str, Any]):
-        self.extracted_ocr_text = ocr_result.get("extracted_text") or ""
-        self.title_input.setText(ocr_result.get("title") or "")
+    def _populate_extracted_data(self, ocr_result: Dict[str, Any], file_path: Optional[str] = None):
+        self.extracted_ocr_text = ocr_result.get("extracted_text", "")
+        self.title_input.setText(ocr_result.get("title", ""))
         self.ref_input.setText(f"CDTRS-2026-{self.current_inbox_item_id or 101:03d}")
-        self.date_input.setText(ocr_result.get("date") or datetime.now().strftime("%Y-%m-%d"))
+        self.date_input.setText(ocr_result.get("date", datetime.now().strftime("%Y-%m-%d")))
 
         # Ingestion Mode
-        mode_val = ocr_result.get("mode") or IngestionModeEnum.GOVERNMENT_MAIL.value
+        mode_val = ocr_result.get("mode", IngestionModeEnum.GOVERNMENT_MAIL.value)
         idx = self.mode_input.findText(mode_val)
         if idx >= 0:
             self.mode_input.setCurrentIndex(idx)
         else:
             self.mode_input.setCurrentText(mode_val)
 
-        self.source_input.setText(ocr_result.get("source") or "")
+        self.source_input.setText(ocr_result.get("source", ""))
 
         # Format
-        fmt_val = ocr_result.get("format") or "PDF"
+        fmt_val = ocr_result.get("format", "PDF")
         f_idx = self.format_input.findText(fmt_val)
         if f_idx >= 0:
             self.format_input.setCurrentIndex(f_idx)
@@ -374,10 +375,10 @@ class DocumentIntakePage(QWidget):
             self.format_input.setCurrentText(fmt_val)
 
         # Priority
-        priority_val = PriorityEnum.normalize(ocr_result.get("priority") or "Medium")
+        priority_val = PriorityEnum.normalize(ocr_result.get("priority", "Medium"))
         self.priority_input.setCurrentText(priority_val)
 
-        self.deadline_input.setText(ocr_result.get("deadline") or "")
+        self.deadline_input.setText(ocr_result.get("deadline", ""))
 
         # Routing Intelligence Dropdowns (Editable)
         dept = ocr_result.get("suggested_department", "Not Specified")
@@ -421,9 +422,18 @@ class DocumentIntakePage(QWidget):
 
         self._update_action_button_text()
 
-        # Update preview label
-        self.selected_file = ocr_result.get("file_path") or (f"data/incoming/{self.title_input.text()}.pdf")
-        self.preview_label.setText(f"Dispatch File Loaded:\n{self.title_input.text()}\n\nMode: {mode_val} | Format: {fmt_val}")
+        # Update preview and selected file path
+        if file_path and os.path.exists(file_path):
+            self.selected_file = file_path
+        elif ocr_result.get("file_path") and os.path.exists(ocr_result.get("file_path")):
+            self.selected_file = ocr_result.get("file_path")
+        elif self.selected_file and os.path.exists(self.selected_file):
+            pass # Retain valid selected file
+        else:
+            self.selected_file = ocr_result.get("file_path") or f"data/incoming/{self.title_input.text()}"
+
+        display_name = os.path.basename(self.selected_file) if self.selected_file else self.title_input.text()
+        self.preview_label.setText(f"Dispatch File Loaded:\n{display_name}\n\nMode: {mode_val} | Format: {fmt_val}")
 
     def save_and_confirm_routing(self):
         title = self.title_input.text().strip()
@@ -441,6 +451,9 @@ class DocumentIntakePage(QWidget):
         dept_id_map = {"Finance": 1, "Procurement": 2, "Human Resources": 3, "HR": 3, "Maintenance": 4, "IT": 5}
         target_dept_id = dept_id_map.get(dept_text) if dept_text else None
         emp_id = self.emp_combo.currentData()
+
+        # Determine real physical upload path if exists on disk
+        actual_upload_path = self.selected_file if (self.selected_file and os.path.exists(self.selected_file)) else None
 
         # Prepare DocumentModel
         doc_model = DocumentModel(
@@ -471,7 +484,7 @@ class DocumentIntakePage(QWidget):
 
         try:
             # 1. Create canonical document
-            created_doc = document_service.create_document(doc_model, file_path=self.selected_file)
+            created_doc = document_service.create_document(doc_model, file_path=actual_upload_path)
 
             # 2. Perform Routing Decision
             if self.bypass_director_check.isChecked():

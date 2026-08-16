@@ -1,528 +1,377 @@
-# CDTRS Frontend – Project Status & Development README
+# Centralised Document Tracking and Routing System (CDTRS)
+
+**CDTRS** is an enterprise-grade desktop document workflow, routing, and lifecycle tracking system built with **Python**, **PySide6 (Qt 6 Widgets)**, and modern layered architecture. 
+
+It provides an end-to-end operational pipeline for intake, executive review, departmental delegation, execution tracking, and audit logging across administrative organizations.
+
+---
 
 ## 1. Project Overview
 
-**CDTRS (Centralised Document Tracking and Routing System)** is a role-based document management and workflow system.
+In large organizations, official communications, policy directives, inter-departmental notices, and procurement sanctions move across multiple administrative tiers. Physical handling or ad-hoc emails often result in lost accountability, missed deadlines, and lack of traceability.
 
-The frontend is being developed using:
+CDTRS solves this by establishing a unified, role-based desktop interface with real-time lifecycle tracking, deadline monitoring, and clear delegation paths.
 
-- Python
-- PySide6 / Qt Widgets
-- QSS
-
-The backend and database are being developed separately by the teammate. The current frontend uses mock data and service-layer placeholders so that real backend/OCR integration can be added later.
-
-The system is designed for four main roles:
-
-- Master
-- Director
-- HOD
-- Employee
-
-The application uses **one common role-based interface**, rather than separate applications for every role.
+### Primary User Roles:
+- **Director Secretary (DS):** Handles document intake (scans, emails, dispatches), metadata extraction (OCR/NLP hints), executive routing to the Director, departmental routing to HODs or staff, action reminders, and final document closure.
+- **The Director:** Performs executive reviews, reviews follow-ups, records administrative instructions/remarks, and returns documents to the DS for execution.
+- **Head of Department (HOD):** Manages departmental workload, delegates actionable documents to specific department employees, monitors task progress, and submits progress updates.
+- **Department Employee:** Receives direct task assignments, manages assigned deliverables, uploads attachments, and submits structured progress reports.
 
 ---
 
-## 2. Current Frontend Structure
+## 2. Current Project Status
+
+The CDTRS desktop frontend is fully developed, tested, and integrated:
+
+- **Desktop UI & Theming:** Complete PySide6 graphical interface with custom QSS typography, KPI metric tiles, and operational action cards.
+- **Pluggable Repository Architecture:** Supports both **Live REST API Mode** (connecting to the FastAPI cloud backend) and **Mock Mode** (in-memory demonstration dataset).
+- **Authentication & Role-Based Shell:** Central login window with JWT session management, role-based sidebars, and clean user error dialogs.
+- **Document Intake & OCR Intelligence:** Dual intake pipeline (queue dispatches or physical file uploads) with OCR text extraction, pre-reviewed directive detection, and automated department/employee suggestions.
+- **Advisory Routing Intelligence:** Context-aware suggestion banner that detects explicit delegation targets in Director remarks without unauthorized auto-routing.
+- **Departmental Delegation & Progress Workflow:** Full task assignment workflow, 2-step progress updates, and multipart file attachment handling.
+- **Deadlines & Action Reminders:** High-priority tracking, 7-day cutoff filters, overdue warnings, and downstream reminder dispatch.
+- **Workflow History & Audit Trail:** Chronological document-centric timeline recording all lifecycle actions, actors, timestamps, and remarks.
+
+---
+
+## 3. Architecture
+
+CDTRS is built on a clean **layered repository architecture** ensuring strict separation of concerns between user interface, business logic, domain modeling, and data transport.
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                    UI & Presentation Layer                  │
+│       ui/ (LoginWindow, MainWindow, Sidebar)                │
+│       pages/ (Dashboard, Inbox, Intake, Documents, History)  │
+│       components/ (DocumentViewer, Tables, Dialogs)         │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     Service / Domain Layer                  │
+│   services/ (auth, document, routing, ocr, workflow, etc.)  │
+│   models/   (DocumentModel, UserModel, Enums, Serialization)│
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Repository Abstraction Layer              │
+│                     repositories/base.py                    │
+│                  repositories/provider.py                   │
+├──────────────────────────────┬──────────────────────────────┤
+│                              │                              │
+│  [API Mode]                  │  [Mock Mode]                 │
+│  repositories/api_repository │  repositories/mock_repository│
+│             │                │              │               │
+│             ▼                │              ▼               │
+│  api/client.py               │   In-Memory Golden Dataset   │
+│             │                │   (Zero Network Needed)      │
+│             ▼                │                              │
+│  FastAPI Cloud Backend       │                              │
+│  (https://cdtrs.onrender.com)│                              │
+└──────────────────────────────┴──────────────────────────────┘
+```
+
+### Why This Separation Matters:
+- **Repository-Agnostic UI:** UI components and services communicate exclusively with the `BaseRepository` interface. Switching between live cloud API mode and local offline Mock mode requires zero changes to the UI or business logic.
+- **Robust Adapter Pattern:** `APIRepository` cleanly handles REST serialization, multipart uploads, route code translation, and backend aliases without leaking backend implementation details into the presentation layer.
+
+---
+
+## 4. Frontend Structure
 
 ```text
 CDTRS/
+├── api/                       # REST API client & networking
+│   ├── client.py              # HTTP client with Windows SSL support (pip_system_certs)
+│   ├── endpoints.py           # Centralized REST route constants (/api/v1/...)
+│   └── exceptions.py          # Structured API error hierarchy
 │
-├── main.py
+├── backend/                   # FastAPI backend source code & schemas
+│   ├── crud.py                # Database operations & routing intelligence
+│   ├── database.py            # SQLAlchemy database engine & session maker
+│   ├── main.py                # FastAPI endpoints & middleware
+│   ├── models.py              # SQLAlchemy database ORM models
+│   └── schemas.py             # Pydantic request/response schemas
 │
-├── ui/
-│   ├── login.py
-│   ├── main_window.py
-│   └── sidebar.py
+├── components/                # Reusable PySide6 UI widgets
+│   ├── document_info.py       # Metadata information panel
+│   ├── document_preview.py    # Document content & attachment preview
+│   ├── document_table.py      # Standard registered documents table
+│   ├── document_viewer.py     # Document viewer with actions & routing banner
+│   ├── priority_badge.py      # High/Medium/Low colored status badges
+│   ├── routing_dialogs.py     # Route to Director, HOD, and Staff dialogs
+│   └── state_widgets.py       # Empty state & loading illustrations
 │
-├── pages/
-│   ├── dashboard.py
-│   ├── inbox.py
-│   ├── document_intake.py
-│   ├── documents.py
-│   ├── priority.py
-│   ├── history.py
-│   └── director_inbox.py
+├── config/                    # Configuration management
+│   └── settings.py            # Environment variable parsing & settings dataclass
 │
-├── components/
-│   ├── document_table.py
-│   ├── document_viewer.py
-│   ├── document_preview.py
-│   ├── document_info.py
-│   ├── workflow_history.py
-│   └── history_table.py
+├── models/                    # Data models & Enums
+│   ├── attachment.py          # DocumentAttachment domain model
+│   ├── document.py            # DocumentModel domain model
+│   ├── enums.py               # RoleEnum, DocumentStatusEnum, PriorityEnum, etc.
+│   ├── progress_update.py     # ProgressUpdateModel domain model
+│   ├── user.py                # UserModel domain model
+│   ├── work_assignment.py     # WorkAssignmentModel domain model
+│   └── workflow_event.py      # WorkflowEventModel audit event model
 │
-├── services/
-│   ├── auth_service.py
-│   ├── document_service.py
-│   ├── ocr_service.py
-│   ├── routing_service.py
-│   ├── workflow_service.py
-│   └── api_client.py
+├── pages/                     # Application pages
+│   ├── dashboard.py           # Role-specific operational dashboards
+│   ├── director_inbox.py      # Director executive review queue
+│   ├── director_reviewed.py   # Director reviewed documents archive
+│   ├── document_intake.py     # Registration & OCR text extraction form
+│   ├── documents.py           # Central searchable repository with filters
+│   ├── employee_tasks.py      # Employee active tasks & progress submissions
+│   ├── history.py             # System audit trail & chronological timeline
+│   ├── hod_inbox.py           # Departmental tasks & staff delegation
+│   └── inbox.py               # DS raw incoming dispatches queue
 │
-├── data/
-│   └── mock_data.py
+├── repositories/              # Data access adapters
+│   ├── api_repository.py      # Live REST API implementation
+│   ├── base.py                # BaseRepository abstract interface
+│   ├── mock_repository.py     # Standalone in-memory golden reference repository
+│   └── provider.py            # Singleton repository factory
 │
-└── theme.qss
+├── services/                  # Business logic services
+│   ├── auth_service.py        # Login, logout & session state
+│   ├── document_service.py    # Document querying & creation
+│   ├── event_bus.py           # Reactive signal event bus
+│   ├── notification_service.py# Deadline reminders & user notifications
+│   ├── ocr_service.py         # Text extraction & NLP suggestion heuristics
+│   ├── progress_service.py    # Progress updates & deliverables
+│   ├── routing_service.py     # Routing directives & NLP remark analysis
+│   └── workflow_service.py    # Workflow transitions & audit logs
+│
+├── styles/                    # Visual design & theming
+│   └── theme.qss              # Master stylesheet (colors, typography, cards)
+│
+├── ui/                        # Application window shells
+│   ├── login.py               # Secure login window with error dialogs
+│   ├── main_window.py         # Main window container with dynamic stack
+│   └── sidebar.py             # Role-specialized navigation sidebar
+│
+├── scratch/                   # Automated test scripts & verification suites
+├── main.py                    # Application launch entry point
+├── requirements.txt           # Python package requirements
+├── SETUP_GUIDE.md             # Complete step-by-step Windows setup guide
+└── README.md                  # This technical overview document
 ```
 
-### Main responsibilities
+---
 
-- `main.py` – starts the application.
-- `ui/login.py` – login and authentication.
-- `ui/main_window.py` – main window, role-based navigation and page routing.
-- `ui/sidebar.py` – role-based sidebar.
-- `pages/` – complete application pages for different workflow stages.
-- `components/` – reusable document, table, viewer and history components.
-- `services/` – authentication, document, OCR, routing, workflow and API logic.
-- `data/mock_data.py` – temporary mock documents and workflow data.
-- `theme.qss` – application styling.
+## 5. Backend Integration
+
+In **API Mode** (`CDTRS_DATA_SOURCE=api`), the desktop application connects to the deployed FastAPI cloud backend:
+
+- **Live Render Backend URL:** `https://cdtrs.onrender.com/api/v1`
+- **Health Check Endpoint:** `https://cdtrs.onrender.com/health`
+
+### Adapter Responsibilities in `APIRepository`:
+1. **Dynamic Route Construction:** Automatically handles standard REST paths without path duplication.
+2. **Payload Normalization:** Translates camelCase/snake_case and frontend keys to backend schemas (`assigned_to_user_id`, `submitted_by_user_id`, `uploaded_by_user_id`).
+3. **Multipart Uploads:** Supports binary file uploads with MIME-type inference (`application/pdf`, `image/png`, `application/msword`).
+4. **2-Step Progress Handling:** Submits progress metadata via `POST /documents/{id}/progress` and uploads accompanying deliverable attachments via `POST /documents/{id}/attachments`.
+5. **Windows Native SSL Trust:** Uses `pip_system_certs` to inherit Windows native certificate stores, avoiding SSL errors in enterprise environments.
 
 ---
 
-# 3. Completed So Far
+## 6. Mock Mode (Offline Development & Testing)
 
-## Authentication & Navigation
+In **Mock Mode** (`CDTRS_DATA_SOURCE=mock`), the application runs entirely in-memory using `MockRepository`.
 
-- Login screen
-- Role-based login
-- Master and Director dashboards
-- Logout
-- Role-based sidebar
-- Page navigation using `QStackedWidget`
-
-## Master Module
-
-The following pages are implemented:
-
-### Dashboard
-Role-aware Master dashboard.
-
-### Inbox
-Displays incoming documents and provides a **Process Document** action.
-
-### Document Intake
-Implemented:
-
-- Document selection
-- PDF / PNG / JPG / JPEG support
-- Document preview area
-- Document information form
-- Source/mode selection
-- Deadline and remarks fields
-- OCR extracted-text section
-- Routing suggestion
-- Department/employee/confidence display
-- Accept Routing
-- Save & Forward to Director
-
-### Documents
-Implemented:
-
-- Document table
-- Status filtering
-- Department filtering
-- Source filtering
-- Clear filters
-- View Document
-
-### Document Viewer
-Reusable viewer containing:
-
-- Document title/reference
-- Document preview area
-- Document information
-- Workflow history
-- Role-based viewer support
-
-### Priority / Deadlines
-Implemented:
-
-- Priority/deadline listing
-- Filters
-- View document
-- Reminder-related mock actions
-
-### History / Audit
-Implemented:
-
-- System-wide activity history
-- User/action filtering
-- Document references
-- Workflow activity information
+- **No backend or database connection required.**
+- Provides a canonical **5-document demonstration dataset** reflecting diverse workflow states (blank-slate intake, department suggestions, direct staff suggestions, pre-reviewed directives, and urgent deadlines).
+- Serves as the behavioral benchmark for frontend testing and UI validation.
 
 ---
 
-# 4. Master → Director Workflow
-
-The most important cross-role workflow currently works:
+## 7. User Roles & Workflow
 
 ```text
-Master
-   ↓
-Master Inbox
-   ↓
-Process Document
-   ↓
-Document Intake
-   ↓
-Routing
-   ↓
-Accept Routing
-   ↓
-Save & Forward to Director
-   ↓
-Workflow Service
-   ↓
-Document state updated
-   ↓
-Director
-   ↓
-Director Inbox
-   ↓
-Forwarded document appears
+                        ┌──────────────────────────────┐
+                        │   Incoming Dispatch / Upload │
+                        └──────────────┬───────────────┘
+                                       │
+                                       ▼
+                        ┌──────────────────────────────┐
+                        │    Director Secretary (DS)   │
+                        │    • Intakes & OCR Indexes   │
+                        └──────┬────────────────┬──────┘
+                               │                │ (If pre-reviewed or direct)
+        (Standard Executive)   │                │
+                               ▼                │
+                 ┌───────────────────────────┐  │
+                 │   The Director Review     │  │
+                 │   • Enters Director Remark│  │
+                 │   • Returns to DS         │  │
+                 └─────────────┬─────────────┘  │
+                               │                │
+                               ▼                │
+                 ┌───────────────────────────┐  │
+                 │   DS Routes to Dept/Staff │◄─┘
+                 └─────────────┬─────────────┘
+                               │
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+┌─────────────────────────────┐  ┌─────────────────────────────┐
+│  Head of Department (HOD)   │  │  Direct Employee Assignment │
+│  • Delegates to Employee    │  │  • Directly Assigned by DS  │
+└──────────────┬──────────────┘  └──────────────┬──────────────┘
+               │                                │
+               └───────────────┬────────────────┘
+                               ▼
+                ┌─────────────────────────────┐
+                │   Employee Task Execution   │
+                │   • Works on deliverable    │
+                │   • Submits Progress Update │
+                │   • Uploads Attachment      │
+                └──────────────┬──────────────┘
+                               │
+                               ▼
+                ┌─────────────────────────────┐
+                │   Progress Follow-up Review │
+                │   (DS / Director if needed) │
+                └──────────────┬──────────────┘
+                               │
+                               ▼
+                ┌─────────────────────────────┐
+                │      Document Closure       │
+                │      • Lifecycle Completed  │
+                └─────────────────────────────┘
 ```
 
-This confirms that the frontend can already represent a document moving from one role to another.
+### Advisory Suggestion Banner:
+When a document returns to the DS from Director review:
+- If the Director remark **explicitly delegates** to a department or staff member (e.g. *"Route to Finance"* or *"Assign to Rahul Sharma"*), the **Yellow Advisory Banner** appears with detected destinations and a one-click direct routing shortcut.
+- If the Director writes a **general review** comment without naming a department or employee (e.g. *"Reviewed and approved"*), the yellow banner is suppressed and standard DS options are displayed.
 
 ---
 
-# 5. Director Module – Current Status
+## 8. Authentication
 
-Currently implemented:
-
-- Director login
-- Director dashboard
-- Director Inbox
-- Reception of documents forwarded by Master
-- Shared Document Viewer foundation
-
-### Still required
-
-Director needs the actual review workflow:
-
-```text
-Director Inbox
-      ↓
-Open Document
-      ↓
-Review
-      ↓
-Add Director Remark
-      ↓
-Decision
-      ↓
-Next Workflow Stage
-```
-
-The exact decision actions must follow the project/SRS requirements and backend workflow.
+- **Session Management:** Centralized in `services.auth_service`.
+- **JWT Storage:** Access tokens stored securely in memory for API requests.
+- **Error Dialogs:** Invalid credentials or network connection failures produce clean `QMessageBox` popups without crashing.
+- **Safe Session Cleanup:** Logging out clears the current user session and disconnects background event handlers before returning to the login window.
 
 ---
 
-# 6. HOD & Employee – Pending
+## 9. Document Management Features
 
-These modules have not yet been completed.
-
-### HOD
-
-Planned:
-
-- HOD Dashboard
-- HOD Inbox
-- Document review
-- Remarks
-- Employee assignment
-- Workflow/status updates
-- History
-
-### Employee
-
-Planned:
-
-- Employee Dashboard
-- Assigned documents/tasks
-- Document viewing
-- Work/update actions
-- Completion/submission
-- History
+- **DS Raw Inbox (`pages/inbox.py`):** Unprocessed incoming dispatches awaiting metadata registration.
+- **Document Processing / Intake (`pages/document_intake.py`):** Structured form with file preview, OCR extraction, priority selection, deadline picker, and bypass checks.
+- **Registered Documents Repository (`pages/documents.py`):** Search by keyword, filter by status, priority, department, or 7-day deadlines, and send action reminders.
+- **Document Details Viewer (`components/document_viewer.py`):** Comprehensive view showing metadata, status badges, OCR text, remarks history, progress updates, attached files, and role-appropriate action buttons.
+- **Workflow History & Audit Trail (`pages/history.py`):** Chronological timeline of all system events organized by document card with role filtering and full-text search.
 
 ---
 
-# 7. OCR & Document Processing
+## 10. Role-Specific Dashboards
 
-OCR is **not yet actually integrated**.
-
-The frontend already contains an OCR service hook and an Extracted Text section.
-
-Intended workflow:
-
-```text
-Incoming PDF/Image
-       ↓
-OCR
-       ↓
-Extracted Text
-       ↓
-Metadata / information extraction
-       ↓
-Master reviews
-       ↓
-Save
-       ↓
-Database
-```
-
-Actual OCR engine/service and extraction logic are still pending.
+- **Director Secretary:** Operational overview showing *New Incoming*, *Awaiting Director Review*, *Returned by Director*, *Under HOD Processing*, *Progress Updates*, and *Closed Documents*, along with actionable shortcut cards.
+- **Director:** Executive overview showing *Awaiting Initial Review*, *Progress Follow-ups*, *Total Reviewed*, and *Critical Priority*.
+- **HOD:** Departmental overview showing *Awaiting Employee Assignment*, *Assigned / In Progress*, *Progress Updates Received*, and *Critical Priority*.
+- **Employee:** Personal workload overview showing *Active Assigned Tasks*, *New / Pending Progress*, and *Progress Updates Submitted*.
 
 ---
 
-# 8. Document Sources
+## 11. Configuration Reference
 
-The system is intended to handle documents arriving through multiple sources, such as:
+Configuration is managed via environment variables in [config/settings.py](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/config/settings.py):
 
-- Outlook / Email
-- Intranet
-- Fax
-- Physical/scanned documents
-
-The frontend is designed around **one unified document workflow**, regardless of source.
-
-The source is stored/displayed as document metadata.
-
-Actual Outlook, intranet, fax and ingestion integrations are pending backend implementation.
+| Variable | Default Value | Description |
+|:---|:---|:---|
+| `CDTRS_DATA_SOURCE` | `api` | Data provider mode: `api` (live backend) or `mock` (in-memory) |
+| `CDTRS_API_URL` | `https://cdtrs.onrender.com/api/v1` | Base URL for REST API communication |
+| `CDTRS_API_TIMEOUT` | `15.0` | HTTP request timeout in seconds |
+| `CDTRS_APP_NAME` | `CDTRS` | Application title display |
+| `CDTRS_APP_VERSION` | `2.0.0` | Application version string |
 
 ---
 
-# 9. Routing
+## 12. Quick Installation & Setup
 
-Routing is currently a mock/service placeholder.
+For complete, step-by-step Windows installation instructions, please refer to:
+👉 **[SETUP_GUIDE.md](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/SETUP_GUIDE.md)**
 
-The current UI supports:
+### Quick Start (PowerShell):
+```powershell
+# 1. Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
-- Suggest Routing
-- Department
-- Employee
-- Confidence
-- Accept Routing
+# 2. Install dependencies
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
-Future routing will use document/OCR information to suggest the appropriate department/employee through the actual backend/service.
-
----
-
-# 10. Database & Backend Integration
-
-The frontend has a service/API structure prepared for backend integration.
-
-Current API client uses:
-
-```text
-http://127.0.0.1:8000
-```
-
-with generic GET/POST/PATCH support.
-
-Most current data is still mock data.
-
-### Pending backend integration
-
-Replace mock implementations with actual backend calls for:
-
-- Authentication
-- Documents
-- Inbox
-- Workflow transitions
-- Assignments
-- History/Audit
-- OCR
-- File storage
-- Notifications
-
-The frontend should communicate through the service/API layer rather than directly accessing the database.
-
----
-
-# 11. Current Mock Data Issue
-
-There is currently some inconsistency between mock document structures.
-
-For example, one part may use:
-
-```python
-{"id": 1, "title": "Budget Approval Request"}
-```
-
-while another uses:
-
-```python
-{"reference": "CDTRS-2026-001", "subject": "Budget Approval Request"}
-```
-
-A temporary matching mechanism was added so the Master → Director workflow can work.
-
-This should be cleaned up during backend integration by using **one canonical document ID/reference** across the entire system.
-
-The same document should be shared by:
-
-```text
-Inbox
-Document Intake
-Documents
-Priority
-Document Viewer
-Workflow History
-Director Inbox
-HOD
-Employee
-Database
+# 3. Launch application
+python main.py
 ```
 
 ---
 
-# 12. Workflow History
+## 13. Running the Application
 
-Two levels of history are currently represented.
-
-### Document Workflow History
-
-Shown inside the Document Viewer.
-
-It represents the history of **that selected document only**.
-
-Example:
-
-```text
-Document received
-Master processed
-Routing accepted
-Forwarded to Director
-Director reviewed
-...
-```
-
-### System History / Audit
-
-Shown in the History page.
-
-It represents activities across multiple documents/users and can be filtered.
-
-Eventually both should use the backend's workflow/audit data.
-
----
-
-# 13. Current Technical Limitations
-
-The following are still mock or incomplete:
-
-- Real database persistence
-- Real OCR
-- Real document storage
-- Real PDF/image preview
-- Real routing logic
-- Real notifications/reminders
-- Outlook/intranet/fax ingestion
-- Director decision workflow
-- HOD workflow
-- Employee workflow
-- Final end-to-end testing
-
-Mock workflow state currently exists in application memory, so it is not persistent across application restarts.
-
----
-
-# 14. Recommended Next Development Steps
-
-Development should continue in this order:
-
-### Phase 1 – Director
-
-1. Complete Director Inbox
-2. Open forwarded document
-3. Director review UI
-4. Director remark
-5. Correct decision actions according to SRS
-6. Update workflow history
-7. Forward to next stage
-
-### Phase 2 – HOD
-
-1. HOD Dashboard
-2. HOD Inbox
-3. Review
-4. Remarks
-5. Assignment to Employee
-6. Workflow updates
-
-### Phase 3 – Employee
-
-1. Employee Dashboard
-2. My Tasks
-3. Document view
-4. Work/update
-5. Completion
-6. History
-
-### Phase 4 – Data Model
-
-Unify the document and workflow models so the entire application uses one canonical document identity.
-
-### Phase 5 – Backend Integration
-
-Connect the existing service layer to the teammate's actual backend/database.
-
-### Phase 6 – OCR & External Services
-
-Integrate:
-
-- OCR
-- File storage
-- PDF/image preview
-- Outlook/intranet/fax ingestion
-- Notifications/reminders
-
-### Phase 7 – Final Testing
-
-Test the complete workflow:
-
-```text
-Document Received
-      ↓
-Master
-      ↓
-Director
-      ↓
-HOD
-      ↓
-Employee
-      ↓
-Completion
-      ↓
-History / Audit
+The executable entry point for the desktop application is:
+```powershell
+python main.py
 ```
 
 ---
 
-# 15. Overall Current Status
+## 14. Testing & Verification
 
-```text
-Authentication & Navigation     ✅ Complete
-Master UI                       ✅ Mostly Complete
-Document Intake                 ✅ UI Complete / Services Mock
-Documents & Viewer              ✅ Complete at Mock Level
-Priority / Deadlines             ✅ UI Complete / Actions Mock
-History / Audit                 ✅ UI Complete / Data Mock
-Master → Director Workflow      ✅ Working
-Director Review                 🔄 Next
-HOD Workflow                    ⏳ Pending
-Employee Workflow               ⏳ Pending
-Database Integration            ⏳ Pending
-OCR Integration                 ⏳ Pending
-External Ingestion              ⏳ Pending
-Notifications                   ⏳ Pending
-Final Testing                   ⏳ Pending
+Automated test suites are located in the `scratch/` directory:
+
+```powershell
+# 1. Verify Canonical 5-Document Dataset & Full Workflow Lifecycles:
+python scratch/test_canonical_5_dataset.py
+
+# 2. Verify UI Pages Rendering & Dashboard Assertions:
+python scratch/test_ui_pages_canonical.py
+
+# 3. Verify Filters, History & Remark Intelligence Classification:
+python scratch/test_user_requested_fixes.py
+
+# 4. Verify Live REST API Adapter (22 API operations):
+python scratch/test_api_adapter_integration.py
 ```
 
-## Current Project State
+---
 
-The frontend foundation and primary Master workflow are established. The application can already demonstrate a document being received by Master, processed, routed and forwarded to Director.
+## 15. Dependencies
 
-The immediate goal is to complete the **Director → HOD → Employee workflow**, then replace mock services with the teammate's real backend/database and integrate OCR, document storage and external document sources.
+All third-party package requirements are specified in **[requirements.txt](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/requirements.txt)**:
+- `PySide6` (GUI framework)
+- `requests` (HTTP client)
+- `pip_system_certs` (Windows SSL certificate trust)
+- `python-dotenv` (Configuration)
+- `fastapi`, `uvicorn`, `pydantic`, `sqlalchemy`, `python-jose`, `passlib`, `bcrypt`, `python-multipart` (Backend modeling & integration testing)
+
+---
+
+## 16. Development Principles
+
+1. **Keep UI Layer Decoupled:** UI components must never make raw HTTP calls or query databases directly. All interactions go through `services` and `BaseRepository`.
+2. **Preserve Mock Reference:** `MockRepository` is the golden behavioral standard. Always ensure mock mode tests pass alongside API mode tests.
+3. **No Hardcoded Endpoints in Pages:** API routes are centralized in `api/endpoints.py`.
+4. **Never Commit Virtual Environments:** `.venv/`, `__pycache__/`, and `.env` files are strictly excluded via `.gitignore`.
+
+---
+
+## 17. Recommended Development Workflow
+
+1. Download/clone repository into a clean directory.
+2. Set up virtual environment and install `requirements.txt`.
+3. Test in **Mock Mode** (`$env:CDTRS_DATA_SOURCE="mock"`) for offline UI/workflow feature development.
+4. Test in **API Mode** (`$env:CDTRS_DATA_SOURCE="api"`) against the Render backend.
+5. Run the automated test suite before distributing updates.
+
+---
+
+## 18. Documentation Map
+
+- **[README.md](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/README.md):** Complete project architecture, workflow overview, and technical reference.
+- **[SETUP_GUIDE.md](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/SETUP_GUIDE.md):** Step-by-step Windows setup, installation, troubleshooting, and execution guide.
+- **[requirements.txt](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/requirements.txt):** Python package dependencies.

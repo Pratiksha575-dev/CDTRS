@@ -1,8 +1,7 @@
 class Endpoints:
     """
     Centralized registry of backend API endpoint paths for CDTRS V2.
-    Paths are structured as capability placeholders and can be centrally updated
-    when the backend developer provides the finalized OpenAPI/Swagger contract.
+    All paths are relative to the client base_url (/api/v1).
     """
 
     # --- Authentication ---
@@ -15,6 +14,12 @@ class Endpoints:
     USER_DETAIL = lambda user_id: f"/users/{user_id}"
     DEPARTMENTS_LIST = "/departments"
     DEPARTMENT_EMPLOYEES = lambda dept_id: f"/departments/{dept_id}/employees"
+    EMPLOYEES_LIST = "/employees"
+
+    # --- Mail & Intake Pipeline ---
+    INTAKE_LIST = "/intake"
+    INTAKE_MANUAL_UPLOAD = "/intake/manual-upload"
+    INTAKE_PROCESS = lambda intake_id: f"/intake/{intake_id}/process"
 
     # --- Documents Lifecycle ---
     DOCUMENTS_INBOX = "/documents/inbox"
@@ -32,6 +37,7 @@ class Endpoints:
     # --- Remarks ---
     DIRECTOR_REMARK = lambda doc_id: f"/documents/{doc_id}/director-remark"
     HOD_REMARK = lambda doc_id: f"/documents/{doc_id}/hod-remark"
+    DOCUMENT_REMARKS_HISTORY = lambda doc_id: f"/documents/{doc_id}/remarks"
 
     # --- Work Assignment (HOD -> Employee Delegation) ---
     DOCUMENT_ASSIGN = lambda doc_id: f"/documents/{doc_id}/assign"
@@ -43,38 +49,33 @@ class Endpoints:
     # --- Attachments ---
     ATTACHMENT_UPLOAD = lambda doc_id: f"/documents/{doc_id}/attachments"
     ATTACHMENT_LIST = lambda doc_id: f"/documents/{doc_id}/attachments"
+    ATTACHMENT_DETAIL = lambda attach_id: f"/attachments/{attach_id}"
     ATTACHMENT_DOWNLOAD = lambda attach_id: f"/attachments/{attach_id}/download"
 
     # --- Workflow History ---
     DOCUMENT_HISTORY = lambda doc_id: f"/documents/{doc_id}/history"
 
-    # --- Remarks History ---
-    DOCUMENT_REMARKS = lambda doc_id: f"/documents/{doc_id}/remarks"
+    # --- OCR & Verification Pipeline ---
+    OCR_PROCESS = lambda doc_id: f"/documents/{doc_id}/process-ocr"
+    OCR_GET = lambda doc_id: f"/documents/{doc_id}/ocr"
+    OCR_VERIFY = lambda doc_id: f"/documents/{doc_id}/verify-field"
+    OCR_REANALYZE = lambda doc_id: f"/documents/{doc_id}/reanalyze"
 
-    # --- Intake & Mail Ingestion ---
-    INTAKE_LIST = "/intake"
-    INTAKE_MANUAL_UPLOAD = "/intake/manual-upload"
-    INTAKE_PROCESS = lambda intake_id: f"/intake/{intake_id}/process"
-
-    # --- OCR & Field Verification ---
-    DOCUMENT_OCR = lambda doc_id: f"/documents/{doc_id}/ocr"
-    DOCUMENT_PROCESS_OCR = lambda doc_id: f"/documents/{doc_id}/process-ocr"
-    DOCUMENT_VERIFY_FIELD = lambda doc_id: f"/documents/{doc_id}/verify-field"
-
-    # --- Routing Suggestions ---
-    DOCUMENT_ROUTING_SUGGESTION = lambda doc_id: f"/documents/{doc_id}/routing-suggestion"
-    DOCUMENT_ANALYZE_ROUTING = lambda doc_id: f"/documents/{doc_id}/analyze-routing"
-
-    # --- Notifications ---
-    NOTIFICATIONS_LIST = "/notifications"
-    NOTIFICATIONS_UNREAD = "/notifications/unread"
-    NOTIFICATION_MARK_READ = lambda notif_id: f"/notifications/{notif_id}/read"
+    # --- Routing Intelligence ---
+    ROUTING_ANALYZE = lambda doc_id: f"/documents/{doc_id}/analyze-routing"
+    ROUTING_SUGGESTION = lambda doc_id: f"/documents/{doc_id}/routing-suggestion"
 
     # --- Reminders ---
     REMINDERS_LIST = "/reminders"
     REMINDERS_CHECK = "/reminders/check"
     REMINDER_MARK_READ = lambda rem_id: f"/reminders/{rem_id}/read"
 
-    # --- Dashboard ---
-    DASHBOARD_STATS = "/dashboard"
+    # --- Notifications ---
+    NOTIFICATIONS_LIST = "/notifications"
+    NOTIFICATIONS_UNREAD = "/notifications/unread"
+    NOTIFICATION_MARK_READ = lambda notif_id: f"/notifications/{notif_id}/read"
+    NOTIFICATIONS_MARK_ALL_READ = "/notifications/read-all"
 
+    # --- Dashboard & Events ---
+    DASHBOARD_STATS = "/dashboard"
+    EVENTS_RECENT = "/events/recent"

@@ -442,10 +442,36 @@ class DocumentViewer(QWidget):
             self.info.set_document(self.document)
 
             # 3. Update Director Routing Suggestion Card
+            # The yellow advisory card must ONLY appear if the Director Remark (or prior directive)
+            # actually explicitly mentions a specific target department or employee name.
+            has_sugg_target = bool(
+                getattr(self.document, "suggested_department_name", None)
+                or getattr(self.document, "suggested_employee_name", None)
+            )
+
+            # If not already attached, dynamically analyze the director remark
+            if not has_sugg_target and self.document.director_remark:
+                from services.routing_service import routing_service
+                analysis = routing_service.analyze_director_remark(self.document.director_remark)
+                if analysis.get("has_routing_instruction"):
+                    has_sugg_target = True
+                    if not getattr(self.document, "suggested_department_name", None):
+                        self.document.suggested_department_name = analysis.get("suggested_department")
+                        self.document.suggested_department_id = analysis.get("suggested_department_id")
+                    if not getattr(self.document, "suggested_employee_name", None):
+                        self.document.suggested_employee_name = analysis.get("suggested_employee")
+                        self.document.suggested_employee_id = analysis.get("suggested_employee_id")
+                    self.document.has_director_routing_instruction = True
+
             show_sugg = (
                 self.role in (RoleEnum.DIRECTOR_SECRETARY.value, "Master", "DS", "Director Secretary")
-                and getattr(self.document, "has_director_routing_instruction", False)
                 and self.document.current_stage == WorkflowStageEnum.DS.value
+                and has_sugg_target
+                and (
+                    getattr(self.document, "has_director_routing_instruction", False)
+                    or getattr(self.document, "has_prior_director_remark", False)
+                    or bool(self.document.director_remark)
+                )
             )
             self.suggestion_card.setVisible(show_sugg)
             if show_sugg:
@@ -671,10 +697,21 @@ class DocumentViewer(QWidget):
             return
 
         if stage == WorkflowStageEnum.DS.value:
-            route_dir_btn = QPushButton("Route to Director")
-            route_dir_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-            route_dir_btn.clicked.connect(self._ds_route_to_director)
-            self.action_bar.addWidget(route_dir_btn)
+            has_pre_review = bool(
+                (getattr(doc, "has_prior_director_remark", False) or getattr(doc, "has_director_routing_instruction", False) or bool(doc.director_remark))
+                and (getattr(doc, "suggested_department_name", None) or getattr(doc, "suggested_employee_name", None))
+            )
+
+            if has_pre_review:
+                direct_route_btn = QPushButton("Route Directly to Suggested Department/Employee")
+                direct_route_btn.setStyleSheet("background-color: #D97706; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
+                direct_route_btn.clicked.connect(self._ds_apply_suggested_routing)
+                self.action_bar.addWidget(direct_route_btn)
+            else:
+                route_dir_btn = QPushButton("Route to Director")
+                route_dir_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
+                route_dir_btn.clicked.connect(self._ds_route_to_director)
+                self.action_bar.addWidget(route_dir_btn)
 
             route_hod_btn = QPushButton("Route to HOD")
             route_hod_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
@@ -939,7 +976,7 @@ class DocumentViewer(QWidget):
         try:
             doc_id = self.document.id or 0
             if getattr(self.document, "suggested_employee_id", None) or getattr(self.document, "suggested_employee_name", None):
-                emp_id = getattr(self.document, "suggested_employee_id", None) or (5 if "Rahul" in (getattr(self.document, "suggested_employee_name", "") or "") else 8)
+                emp_id = getattr(self.document, "suggested_employee_id", None) or (101 if "Rahul" in (getattr(self.document, "suggested_employee_name", "") or "") else 201)
                 updated_doc = routing_service.route_to_employee(doc_id, employee_id=emp_id)
                 QMessageBox.information(
                     self,

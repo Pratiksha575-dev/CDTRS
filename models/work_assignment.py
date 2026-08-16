@@ -22,13 +22,13 @@ class WorkAssignmentModel:
         return cls(
             id=data.get("id"),
             document_id=data.get("document_id", 0),
-            assigned_by_id=data.get("assigned_by_id", 0),
+            assigned_by_id=data.get("assigned_by_id") or data.get("assigned_by_user_id", 0),
             assigned_by_name=data.get("assigned_by_name"),
-            assigned_to_id=data.get("assigned_to_id", 0),
+            assigned_to_id=data.get("assigned_to_id") or data.get("assigned_to_user_id", 0),
             assigned_to_name=data.get("assigned_to_name"),
             instructions=data.get("instructions"),
             is_active=data.get("is_active", True),
-            created_at=data.get("created_at")
+            created_at=str(data.get("created_at") or data.get("assigned_at") or "")
         )
 
     def to_dict(self) -> Dict[str, Any]:

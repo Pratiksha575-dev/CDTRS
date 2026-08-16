@@ -9,11 +9,10 @@ class Settings:
     Reads environment variables with sensible defaults.
     """
 
-    # Backend API Base URL (Never hardcoded in individual pages)
+    # 1. Set the Render backend URL:
     api_url: str = os.getenv("CDTRS_API_URL", "https://cdtrs.onrender.com/api/v1").rstrip("/")
-
-    # Data Source Mode: 'api' for real backend, 'mock' for local development/testing
-    data_source: str = os.getenv("CDTRS_DATA_SOURCE", "api").lower()
+    # 2. Set mode to "api":
+    data_source: str = os.getenv("CDTRS_DATA_SOURCE", "mock").lower()
 
     # Network Request Timeout in seconds
     api_timeout: float = float(os.getenv("CDTRS_API_TIMEOUT", "15.0"))

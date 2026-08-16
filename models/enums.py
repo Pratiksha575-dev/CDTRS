@@ -42,6 +42,32 @@ class DocumentStatusEnum(str, Enum):
     REVIEW_COMPLETED = "Review Completed"
     CLOSED = "Closed"
 
+    @classmethod
+    def normalize(cls, val: str) -> str:
+        if not val:
+            return cls.RECEIVED.value
+        s = val.strip()
+        # Direct match by value
+        for member in cls:
+            if member.value.lower() == s.lower():
+                return member.value
+            if member.name.lower() == s.lower():
+                return member.value
+        # Uppercase backend enum mapping
+        mapping = {
+            "RECEIVED": cls.RECEIVED.value,
+            "UNDER_DIRECTOR_REVIEW": cls.UNDER_DIRECTOR_REVIEW.value,
+            "DIRECTOR_REVIEW_COMPLETED": cls.DIRECTOR_REVIEW_COMPLETED.value,
+            "UNDER_HOD_PROCESSING": cls.UNDER_HOD_PROCESSING.value,
+            "ASSIGNED_FOR_EXECUTION": cls.ASSIGNED_FOR_EXECUTION.value,
+            "IN_PROGRESS": cls.IN_PROGRESS.value,
+            "PROGRESS_UPDATED": cls.PROGRESS_UPDATED.value,
+            "PROGRESS_FOLLOWUP_UNDER_REVIEW": cls.PROGRESS_FOLLOWUP_UNDER_REVIEW.value,
+            "REVIEW_COMPLETED": cls.REVIEW_COMPLETED.value,
+            "CLOSED": cls.CLOSED.value,
+        }
+        return mapping.get(s.upper(), val)
+
 
 class WorkflowStageEnum(str, Enum):
     """Internal workflow routing stages controlling operational ownership and permissions."""
