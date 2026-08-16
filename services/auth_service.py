@@ -16,10 +16,21 @@ class AuthService:
     def login(self, username: str, password: str) -> Optional[UserModel]:
         """Authenticates user credentials and establishes active session."""
         repo = get_repository()
-        return repo.authenticate(username, password)
+        user = repo.authenticate(username, password)
+        if user:
+            from config.settings import settings
+            if settings.is_api_mode:
+                from services.websocket_service import websocket_service
+                websocket_service.connect_client()
+        return user
 
     def logout(self) -> None:
         """Terminates active session."""
+        try:
+            from services.websocket_service import websocket_service
+            websocket_service.disconnect_client()
+        except Exception:
+            pass
         repo = get_repository()
         repo.logout()
 

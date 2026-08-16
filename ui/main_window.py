@@ -271,11 +271,25 @@ class MainWindow(QMainWindow):
                 self.previous_page.load_documents()
 
     # ====================================
-    # LOGOUT
+    # LOGOUT & CLEANUP
     # ====================================
 
     def logout(self):
+        try:
+            from services.auth_service import auth_service
+            auth_service.logout()
+        except Exception:
+            pass
         from ui.login import LoginWindow
         self.login_window = LoginWindow()
         self.login_window.show()
         self.close()
+
+    def closeEvent(self, event):
+        try:
+            from services.websocket_service import websocket_service
+            websocket_service.disconnect_client()
+        except Exception:
+            pass
+        self._cleanup_existing_viewer()
+        super().closeEvent(event)

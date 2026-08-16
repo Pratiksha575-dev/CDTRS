@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from api.client import api_client
 from api.endpoints import Endpoints
+from api.exceptions import APIException, ConflictError
 from models.attachment import AttachmentModel
 from models.document import DocumentModel
 from models.document_route import DocumentRouteModel
@@ -421,7 +422,12 @@ class APIRepository(BaseRepository):
             "remarks": remarks,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.post(Endpoints.DOCUMENT_CLOSE(document_id), json=payload)
+        try:
+            data = api_client.post(Endpoints.DOCUMENT_CLOSE(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.post(Endpoints.DOCUMENT_CLOSE(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     # =========================================================
@@ -444,7 +450,12 @@ class APIRepository(BaseRepository):
             "remarks": remarks,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
+        try:
+            data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     def save_director_remark(self, document_id: int, remark: str) -> DocumentModel:
@@ -452,7 +463,12 @@ class APIRepository(BaseRepository):
             "director_remark": remark,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.put(Endpoints.DIRECTOR_REMARK(document_id), json=payload)
+        try:
+            data = api_client.put(Endpoints.DIRECTOR_REMARK(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.put(Endpoints.DIRECTOR_REMARK(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     def return_to_ds(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
@@ -460,7 +476,12 @@ class APIRepository(BaseRepository):
             "remarks": remarks,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.post(Endpoints.DOCUMENT_RETURN_TO_DS(document_id), json=payload)
+        try:
+            data = api_client.post(Endpoints.DOCUMENT_RETURN_TO_DS(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.post(Endpoints.DOCUMENT_RETURN_TO_DS(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     def save_hod_remark(self, document_id: int, remark: str) -> DocumentModel:
@@ -468,7 +489,12 @@ class APIRepository(BaseRepository):
             "hod_remark": remark,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.put(Endpoints.HOD_REMARK(document_id), json=payload)
+        try:
+            data = api_client.put(Endpoints.HOD_REMARK(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.put(Endpoints.HOD_REMARK(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
@@ -476,7 +502,12 @@ class APIRepository(BaseRepository):
             "remarks": remarks,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.post(Endpoints.DOCUMENT_FOLLOW_UP(document_id), json=payload)
+        try:
+            data = api_client.post(Endpoints.DOCUMENT_FOLLOW_UP(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.post(Endpoints.DOCUMENT_FOLLOW_UP(document_id), json=payload)
         return self._map_doc_from_backend(data, fetch_enrichments=True)
 
     # =========================================================
@@ -494,7 +525,12 @@ class APIRepository(BaseRepository):
             "instructions": instructions,
             "expected_version": self._doc_versions.get(document_id)
         }
-        data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
+        try:
+            data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
+        except ConflictError:
+            self.get_document(document_id)
+            payload["expected_version"] = self._doc_versions.get(document_id)
+            data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
         return WorkAssignmentModel(
             id=data.get("id"),
             document_id=data.get("document_id"),
@@ -522,13 +558,14 @@ class APIRepository(BaseRepository):
         payload = {"description": description}
         data = api_client.post(Endpoints.PROGRESS_CREATE(document_id), json=payload)
 
+        user_id_val = data.get("submitted_by_user_id") or data.get("user_id") or 0
         progress_obj = ProgressUpdateModel(
             id=data.get("id"),
-            document_id=data.get("document_id"),
-            employee_id=data.get("submitted_by_user_id"),
-            employee_name=self._resolve_user_name(data.get("submitted_by_user_id")),
+            document_id=data.get("document_id", 0),
+            user_id=user_id_val,
+            user_name=self._resolve_user_name(user_id_val),
             description=data.get("description", ""),
-            timestamp=str(data.get("created_at")) if data.get("created_at") else None,
+            created_at=str(data.get("created_at")) if data.get("created_at") else None,
         )
 
         if attachment_file_path and os.path.exists(attachment_file_path):
@@ -546,13 +583,14 @@ class APIRepository(BaseRepository):
             data = api_client.get(Endpoints.PROGRESS_LIST(document_id))
             updates = []
             for p in data:
+                u_id = p.get("submitted_by_user_id") or p.get("user_id") or 0
                 updates.append(ProgressUpdateModel(
                     id=p.get("id"),
-                    document_id=p.get("document_id"),
-                    employee_id=p.get("submitted_by_user_id"),
-                    employee_name=self._resolve_user_name(p.get("submitted_by_user_id")),
+                    document_id=p.get("document_id", 0),
+                    user_id=u_id,
+                    user_name=self._resolve_user_name(u_id),
                     description=p.get("description", ""),
-                    timestamp=str(p.get("created_at")) if p.get("created_at") else None,
+                    created_at=str(p.get("created_at")) if p.get("created_at") else None,
                 ))
             return updates
         except Exception:
