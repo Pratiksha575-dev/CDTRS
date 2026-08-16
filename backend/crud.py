@@ -345,7 +345,7 @@ def get_documents(db: Session) -> List[models.Document]:
 def get_inbox(db: Session, user: models.User) -> List[models.Document]:
     """
     Hard-enforced backend scoping:
-    - DS: All documents they created or are current owner of
+    - DS: Documents currently requiring DS action (current_stage = DS, status != CLOSED)
     - DIRECTOR: Only documents routed to Director (current_stage = DIRECTOR and current_owner = user)
     - HOD: Only documents routed to HOD's department (current_stage = HOD and target_dept = user.department_id)
     - EMPLOYEE: Only documents actively assigned to user or directly routed to user
@@ -354,10 +354,8 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
         return (
             db.query(models.Document)
             .filter(
-                or_(
-                    models.Document.created_by == user.id,
-                    models.Document.current_owner_id == user.id
-                )
+                models.Document.current_stage == WorkflowStage.DS,
+                models.Document.status != DocumentStatus.CLOSED
             )
             .order_by(models.Document.updated_at.desc())
             .all()
@@ -401,12 +399,11 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
         return (
             db.query(models.Document)
             .filter(
+                models.Document.current_stage == WorkflowStage.EMPLOYEE,
+                models.Document.status != DocumentStatus.CLOSED,
                 or_(
                     models.Document.doc_id.in_(assigned_doc_ids),
-                    and_(
-                        models.Document.current_owner_id == user.id,
-                        models.Document.current_stage == WorkflowStage.EMPLOYEE
-                    )
+                    models.Document.current_owner_id == user.id
                 )
             )
             .order_by(models.Document.updated_at.desc())
@@ -2001,3 +1998,41 @@ def seed_data(db: Session) -> None:
             db.commit()
 
     print("Phase 2 comprehensive seed data inserted successfully.")
+
+
+def purge_old_verification_documents(db: Session, target_doc_ids: List[int]) -> Dict[str, Any]:
+    """
+    Controlled one-time maintenance operation.
+    Deletes documents in target_doc_ids and their dependent child records in FK-safe order
+    within a single atomic database transaction.
+    """
+    for doc_id in target_doc_ids:
+        if doc_id > 9:
+            raise ValueError(f"Safety violation: cannot delete curated document #{doc_id}")
+
+    try:
+        # FK-safe child table deletion order:
+        db.query(models.Notification).filter(models.Notification.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.Reminder).filter(models.Reminder.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.Attachment).filter(models.Attachment.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.ProgressUpdate).filter(models.ProgressUpdate.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.WorkAssignment).filter(models.WorkAssignment.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.DocumentRoute).filter(models.DocumentRoute.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.DocumentRemark).filter(models.DocumentRemark.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.DocumentOCR).filter(models.DocumentOCR.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.DocumentExtractedField).filter(models.DocumentExtractedField.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.RoutingSuggestion).filter(models.RoutingSuggestion.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        db.query(models.WorkflowHistory).filter(models.WorkflowHistory.document_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        
+        # Finally delete the documents
+        deleted_docs_count = db.query(models.Document).filter(models.Document.doc_id.in_(target_doc_ids)).delete(synchronize_session=False)
+        
+        db.commit()
+        return {
+            "success": True,
+            "deleted_documents": deleted_docs_count,
+            "target_ids": target_doc_ids
+        }
+    except Exception as ex:
+        db.rollback()
+        raise ex

@@ -39,10 +39,10 @@ class OCRService:
         """
         Extracts content from physical disk or message body and performs NLP metadata analysis.
         """
-        title = incoming_item.get("title", "") if incoming_item else ""
-        source = incoming_item.get("source", "Government Mail") if incoming_item else "Government Mail"
-        mode = incoming_item.get("mode", "Government Mail") if incoming_item else "Government Mail"
-        body_text = incoming_item.get("body", "") if incoming_item else ""
+        title = (incoming_item.get("title") if incoming_item else None) or ""
+        source = (incoming_item.get("source") if incoming_item else None) or "Government Mail"
+        mode = (incoming_item.get("mode") if incoming_item else None) or "Government Mail"
+        body_text = (incoming_item.get("body") if incoming_item else None) or ""
         today_str = datetime.now().strftime("%Y-%m-%d")
 
         # 1. Read real file content from disk if file exists

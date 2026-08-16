@@ -173,13 +173,13 @@ class EmployeeTasksPage(QWidget):
         self._displayed_docs = filtered
 
         for row, doc in enumerate(filtered):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title))
-            self.table.setItem(row, 2, QTableWidgetItem(doc.priority))
+            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
+            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
+            self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
             self.table.setItem(row, 3, QTableWidgetItem(doc.department or doc.source or "-"))
             self.table.setItem(row, 4, QTableWidgetItem(doc.deadline or "-"))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.status))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage))
+            self.table.setItem(row, 5, QTableWidgetItem(doc.status or "-"))
+            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage or "-"))
 
     def open_task(self):
         row = self.table.currentRow()

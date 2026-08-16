@@ -331,10 +331,22 @@ class APIRepository(BaseRepository):
     def get_inbox(self) -> List[DocumentModel]:
         """
         Retrieves role-scoped inbox queue from backend.
-        DS receives intake items; Director, HOD, and Employee receive stage-filtered items.
+        DS receives items currently requiring DS intake/routing action (stage DS).
+        Director, HOD, and Employee receive stage-filtered items.
         """
         data = api_client.get(Endpoints.DOCUMENTS_INBOX)
-        return [self._map_doc_from_backend(d, fetch_enrichments=False) for d in data]
+        docs = [self._map_doc_from_backend(d, fetch_enrichments=False) for d in data]
+        if self._current_user:
+            role_norm = (self._current_user.role or "").upper()
+            if role_norm in ("DS", "DIRECTOR SECRETARY", RoleEnum.DIRECTOR_SECRETARY.value.upper()):
+                docs = [d for d in docs if (d.current_stage or "").upper() == "DS" and (d.status or "").upper() != "CLOSED"]
+            elif role_norm in ("EMPLOYEE", RoleEnum.EMPLOYEE.value.upper()):
+                docs = [d for d in docs if (d.current_stage or "").upper() == "EMPLOYEE" and (d.status or "").upper() != "CLOSED"]
+            elif role_norm in ("HOD", RoleEnum.HOD.value.upper()):
+                docs = [d for d in docs if (d.current_stage or "").upper() == "HOD" and (d.status or "").upper() != "CLOSED"]
+            elif role_norm in ("DIRECTOR", RoleEnum.DIRECTOR.value.upper()):
+                docs = [d for d in docs if (d.current_stage or "").upper() == "DIRECTOR" and (d.status or "").upper() != "CLOSED"]
+        return docs
 
     def add_inbox_item(self, document: DocumentModel) -> DocumentModel:
         """Adds a raw intake message or document into the intake queue."""

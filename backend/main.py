@@ -1235,6 +1235,24 @@ def get_dashboard(
 
 
 # =========================================================
+# ONE-TIME MAINTENANCE OPERATION (CONTROLLED PURGE)
+# =========================================================
+
+@app.post(
+    f"{API_V1}/maintenance/purge-old-verification-documents",
+    tags=["Maintenance"],
+    summary="One-time maintenance: purge old verification documents (IDs 1-9)",
+)
+def maintenance_purge_endpoint(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.DS)),
+):
+    target_ids = list(range(1, 10))
+    result = crud.purge_old_verification_documents(db, target_ids)
+    return result
+
+
+# =========================================================
 # STARTUP HOOK & SEED DATA
 # =========================================================
 

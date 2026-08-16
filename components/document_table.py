@@ -51,23 +51,23 @@ class DocumentTable(QTableWidget):
 
         for row, doc in enumerate(documents):
             if isinstance(doc, DocumentModel):
-                ref = doc.reference
-                title = doc.title
-                prio = doc.priority
+                ref = doc.reference or "-"
+                title = doc.title or "Untitled"
+                prio = doc.priority or "Medium"
                 dept = doc.department or doc.target_department_name or "-"
                 emp = doc.assigned_employee_name or "-"
                 deadline = doc.deadline or "-"
-                status = doc.status
-                stage = doc.current_stage
+                status = doc.status or "-"
+                stage = doc.current_stage or "-"
             else:
-                ref = doc.get("reference", f"CDTRS-2026-{doc.get('id', 0):03d}")
-                title = doc.get("title", doc.get("subject", ""))
-                prio = doc.get("priority", "Medium")
-                dept = doc.get("department", "-")
-                emp = doc.get("assigned_employee_name", "-")
-                deadline = doc.get("deadline", "-")
-                status = doc.get("status", "")
-                stage = doc.get("current_stage", "")
+                ref = doc.get("reference") or f"CDTRS-2026-{doc.get('id', 0):03d}"
+                title = doc.get("title") or doc.get("subject") or "Untitled"
+                prio = doc.get("priority") or "Medium"
+                dept = doc.get("department") or "-"
+                emp = doc.get("assigned_employee_name") or "-"
+                deadline = doc.get("deadline") or "-"
+                status = doc.get("status") or "-"
+                stage = doc.get("current_stage") or "-"
 
             self.setItem(row, 0, QTableWidgetItem(str(ref)))
             self.setItem(row, 1, QTableWidgetItem(str(title)))

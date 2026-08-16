@@ -151,9 +151,9 @@ class HODInboxPage(QWidget):
         self._displayed_docs = filtered
 
         for row, doc in enumerate(filtered):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title))
-            self.table.setItem(row, 2, QTableWidgetItem(doc.priority))
+            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
+            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
+            self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
             
             emp_item = QTableWidgetItem(doc.assigned_employee_name or "— Unassigned —")
             if not doc.assigned_employee_name:
@@ -161,8 +161,8 @@ class HODInboxPage(QWidget):
             self.table.setItem(row, 3, emp_item)
 
             self.table.setItem(row, 4, QTableWidgetItem(doc.deadline or "-"))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.status))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage))
+            self.table.setItem(row, 5, QTableWidgetItem(doc.status or "-"))
+            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage or "-"))
 
     def open_document(self):
         row = self.table.currentRow()

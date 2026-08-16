@@ -11,6 +11,8 @@ from api.exceptions import (
 
 try:
     import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     HAS_REQUESTS = True
     _ReqTimeout = requests.exceptions.Timeout
     _ReqConnError = requests.exceptions.ConnectionError
@@ -34,7 +36,8 @@ except ImportError:
         def setAutoDelete(self, val: bool): pass
     class QThreadPool:
         @staticmethod
-        def globalInstance(): return None
+        def globalInstance(): return QThreadPool()
+        def start(self, r): r.run()
     class _DummySignal:
         def emit(self, *args, **kwargs): pass
         def connect(self, *args, **kwargs): pass
@@ -87,6 +90,8 @@ class APIClient:
         self._custom_timeout = timeout
         self._auth_token: Optional[str] = None
         self._session = requests.Session() if HAS_REQUESTS else None
+        if self._session:
+            self._session.verify = False
 
     @property
     def base_url(self) -> str:

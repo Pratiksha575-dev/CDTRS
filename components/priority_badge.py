@@ -24,10 +24,10 @@ class PriorityBadge(QLabel):
 
     def set_priority(self, priority):
 
-        self.priority = priority
+        self.priority = priority or "Medium"
 
         self.setText(
-            priority
+            self.priority
         )
 
         if priority == "Red":

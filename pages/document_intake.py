@@ -350,23 +350,23 @@ class DocumentIntakePage(QWidget):
         self._populate_extracted_data(ocr_result)
 
     def _populate_extracted_data(self, ocr_result: Dict[str, Any]):
-        self.extracted_ocr_text = ocr_result.get("extracted_text", "")
-        self.title_input.setText(ocr_result.get("title", ""))
+        self.extracted_ocr_text = ocr_result.get("extracted_text") or ""
+        self.title_input.setText(ocr_result.get("title") or "")
         self.ref_input.setText(f"CDTRS-2026-{self.current_inbox_item_id or 101:03d}")
-        self.date_input.setText(ocr_result.get("date", datetime.now().strftime("%Y-%m-%d")))
+        self.date_input.setText(ocr_result.get("date") or datetime.now().strftime("%Y-%m-%d"))
 
         # Ingestion Mode
-        mode_val = ocr_result.get("mode", IngestionModeEnum.GOVERNMENT_MAIL.value)
+        mode_val = ocr_result.get("mode") or IngestionModeEnum.GOVERNMENT_MAIL.value
         idx = self.mode_input.findText(mode_val)
         if idx >= 0:
             self.mode_input.setCurrentIndex(idx)
         else:
             self.mode_input.setCurrentText(mode_val)
 
-        self.source_input.setText(ocr_result.get("source", ""))
+        self.source_input.setText(ocr_result.get("source") or "")
 
         # Format
-        fmt_val = ocr_result.get("format", "PDF")
+        fmt_val = ocr_result.get("format") or "PDF"
         f_idx = self.format_input.findText(fmt_val)
         if f_idx >= 0:
             self.format_input.setCurrentIndex(f_idx)
@@ -374,10 +374,10 @@ class DocumentIntakePage(QWidget):
             self.format_input.setCurrentText(fmt_val)
 
         # Priority
-        priority_val = PriorityEnum.normalize(ocr_result.get("priority", "Medium"))
+        priority_val = PriorityEnum.normalize(ocr_result.get("priority") or "Medium")
         self.priority_input.setCurrentText(priority_val)
 
-        self.deadline_input.setText(ocr_result.get("deadline", ""))
+        self.deadline_input.setText(ocr_result.get("deadline") or "")
 
         # Routing Intelligence Dropdowns (Editable)
         dept = ocr_result.get("suggested_department", "Not Specified")

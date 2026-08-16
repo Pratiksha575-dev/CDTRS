@@ -157,18 +157,18 @@ class DirectorInboxPage(QWidget):
         self._displayed_docs = [item[0] for item in filtered]
 
         for row, (doc, r_type) in enumerate(filtered):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title))
+            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
+            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
             
             type_item = QTableWidgetItem(r_type)
             if r_type == "Progress Follow-up":
                 type_item.setForeground(Qt.blue)
             self.table.setItem(row, 2, type_item)
 
-            self.table.setItem(row, 3, QTableWidgetItem(doc.priority))
+            self.table.setItem(row, 3, QTableWidgetItem(doc.priority or "-"))
             self.table.setItem(row, 4, QTableWidgetItem(doc.source or "-"))
             self.table.setItem(row, 5, QTableWidgetItem(doc.deadline or "-"))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.status))
+            self.table.setItem(row, 6, QTableWidgetItem(doc.status or "-"))
 
     # ====================================
     # VIEW / REVIEW DOCUMENT

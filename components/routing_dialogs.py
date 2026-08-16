@@ -40,7 +40,7 @@ class RouteToHODDialog(QDialog):
         title = QLabel("Route Document to Department Head (HOD)")
         title.setStyleSheet("font-size: 15px; font-weight: 600; color: #0F172A;")
         
-        subtitle = QLabel(f"Document: {self.document.title}")
+        subtitle = QLabel(f"Document: {self.document.title or 'Untitled'}")
         subtitle.setStyleSheet("color: #64748B; font-size: 12px;")
         subtitle.setWordWrap(True)
 
@@ -51,13 +51,16 @@ class RouteToHODDialog(QDialog):
         form.setSpacing(10)
 
         self.dept_combo = QComboBox()
-        self.dept_combo.addItems([
-            "Finance",
-            "Procurement",
-            "HR",
-            "Maintenance",
-            "IT"
-        ])
+        repo = get_repository()
+        depts = repo.get_departments()
+        for d in depts:
+            self.dept_combo.addItem(d.name, d.id)
+        if not depts:
+            self.dept_combo.addItem("Administration", 1)
+            self.dept_combo.addItem("Finance", 2)
+            self.dept_combo.addItem("Human Resources", 3)
+            self.dept_combo.addItem("Technical", 4)
+            self.dept_combo.addItem("Procurement", 5)
         
         target_dept = self.document.target_department_name or self.document.suggested_department_name
         if target_dept:
@@ -93,10 +96,10 @@ class RouteToHODDialog(QDialog):
 
     def get_data(self) -> Dict[str, Any]:
         dept_name = self.dept_combo.currentText()
-        dept_id_map = {"Finance": 1, "Procurement": 2, "HR": 3, "Maintenance": 4, "IT": 5}
+        dept_id = self.dept_combo.currentData() or 1
         return {
             "department_name": dept_name,
-            "department_id": dept_id_map.get(dept_name, 1),
+            "department_id": dept_id,
             "remarks": None
         }
 
@@ -124,7 +127,7 @@ class RouteToEmployeeDialog(QDialog):
         title = QLabel("Direct Route to Employee")
         title.setStyleSheet("font-size: 15px; font-weight: 600; color: #0F172A;")
         
-        subtitle = QLabel(f"Document: {self.document.title}\n(Direct routing when staff is explicitly identified)")
+        subtitle = QLabel(f"Document: {self.document.title or 'Untitled'}\n(Direct routing when staff is explicitly identified)")
         subtitle.setStyleSheet("color: #64748B; font-size: 12px;")
         subtitle.setWordWrap(True)
 
@@ -210,7 +213,7 @@ class HODAssignEmployeeDialog(QDialog):
         title.setStyleSheet("font-size: 15px; font-weight: 600; color: #0F172A;")
         
         dept_name = self.document.target_department_name or "Department"
-        subtitle = QLabel(f"Document: {self.document.title}\nDepartment: {dept_name}")
+        subtitle = QLabel(f"Document: {self.document.title or 'Untitled'}\nDepartment: {dept_name}")
         subtitle.setStyleSheet("color: #64748B; font-size: 12px;")
         subtitle.setWordWrap(True)
 
@@ -370,7 +373,7 @@ class SendReminderDialog(QDialog):
         title = QLabel("Send Document Action Reminder")
         title.setStyleSheet("font-size: 15px; font-weight: 600; color: #0F172A;")
         
-        subtitle = QLabel(f"Document: {self.document.title}\nDeadline: {self.document.deadline or 'Not specified'}")
+        subtitle = QLabel(f"Document: {self.document.title or 'Untitled'}\nDeadline: {self.document.deadline or 'Not specified'}")
         subtitle.setStyleSheet("color: #64748B; font-size: 12px;")
         subtitle.setWordWrap(True)
 

@@ -51,16 +51,16 @@ class DocumentAuditCard(QFrame):
         header = QHBoxLayout()
         header.setSpacing(12)
 
-        ref_lbl = QLabel(self.doc.reference)
+        ref_lbl = QLabel(self.doc.reference or "-")
         ref_lbl.setStyleSheet("font-weight: bold; color: #0F172A; font-size: 14px;")
 
-        title_lbl = QLabel(self.doc.title)
+        title_lbl = QLabel(self.doc.title or "Untitled")
         title_lbl.setStyleSheet("color: #334155; font-size: 13px;")
 
         dept_lbl = QLabel(f"• {self.doc.department or self.doc.target_department_name or 'General'}")
         dept_lbl.setStyleSheet("color: #64748B; font-size: 12px;")
 
-        stage_lbl = QLabel(f"[{self.doc.current_stage}]")
+        stage_lbl = QLabel(f"[{self.doc.current_stage or 'DS'}]")
         stage_lbl.setStyleSheet("color: #2563EB; font-weight: 600; font-size: 11px;")
 
         header.addWidget(ref_lbl)
@@ -90,11 +90,11 @@ class DocumentAuditCard(QFrame):
             time_lbl.setFixedWidth(120)
             time_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-family: monospace;")
 
-            actor_lbl = QLabel(f"{ev.performed_by_name} ({ev.from_role})")
+            actor_lbl = QLabel(f"{ev.performed_by_name or 'System'} ({ev.from_role or 'System'})")
             actor_lbl.setFixedWidth(180)
             actor_lbl.setStyleSheet("color: #0F172A; font-weight: 600; font-size: 12px;")
 
-            action_lbl = QLabel(ev.action)
+            action_lbl = QLabel(ev.action or "-")
             action_lbl.setFixedWidth(200)
             action_lbl.setStyleSheet("color: #1E293B; font-weight: bold; font-size: 12px;")
 

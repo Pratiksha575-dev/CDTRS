@@ -416,12 +416,12 @@ class DashboardPage(QWidget):
         self.table.setRowCount(len(display_list))
         self._displayed_docs = display_list
         for row, doc in enumerate(display_list):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title))
-            self.table.setItem(row, 2, QTableWidgetItem(doc.priority))
+            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
+            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
+            self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
             self.table.setItem(row, 3, QTableWidgetItem(doc.department or doc.source or "-"))
-            self.table.setItem(row, 4, QTableWidgetItem(doc.status))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.current_stage))
+            self.table.setItem(row, 4, QTableWidgetItem(doc.status or "-"))
+            self.table.setItem(row, 5, QTableWidgetItem(doc.current_stage or "-"))
 
     def _handle_view_selected(self):
         if hasattr(self, "table"):

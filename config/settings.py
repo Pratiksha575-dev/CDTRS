@@ -10,10 +10,10 @@ class Settings:
     """
 
     # Backend API Base URL (Never hardcoded in individual pages)
-    api_url: str = os.getenv("CDTRS_API_URL", "http://127.0.0.1:8000/api/v1").rstrip("/")
+    api_url: str = os.getenv("CDTRS_API_URL", "https://cdtrs.onrender.com/api/v1").rstrip("/")
 
     # Data Source Mode: 'api' for real backend, 'mock' for local development/testing
-    data_source: str = os.getenv("CDTRS_DATA_SOURCE", "mock").lower()
+    data_source: str = os.getenv("CDTRS_DATA_SOURCE", "api").lower()
 
     # Network Request Timeout in seconds
     api_timeout: float = float(os.getenv("CDTRS_API_TIMEOUT", "15.0"))
