@@ -52,7 +52,7 @@ class LiveEventManager:
             "event_type": event_type,
             "document_id": document_id,
             "user_id": user_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "payload": payload or {}
         }
         self._recent_events.append(event)
@@ -88,7 +88,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -121,7 +121,23 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
 
 
 def get_user_by_username(db: Session, username: str) -> Optional[models.User]:
-    return db.query(models.User).filter(models.User.username == username).first()
+    if not username:
+        return None
+    u = username.strip().lower()
+    alias_map = {
+        "ds": "ds_user",
+        "master": "ds_user",
+        "hod": "hod_finance",
+        "employee": "emp_rahul",
+        "rahul": "emp_rahul",
+        "priya": "emp_priya",
+    }
+    resolved = alias_map.get(u, u)
+    return (
+        db.query(models.User)
+        .filter((models.User.username == resolved) | (models.User.username == username) | (models.User.username == u))
+        .first()
+    )
 
 
 def get_user_by_id(db: Session, user_id: int) -> Optional[models.User]:
@@ -218,7 +234,7 @@ def create_incoming_message(db: Session, intake: schemas.IntakeCreate, has_attac
         sender_name=intake.sender_name,
         sender_email=intake.sender_email,
         subject=intake.subject,
-        received_at=intake.received_at or datetime.utcnow(),
+        received_at=intake.received_at or datetime.now(),
         body_reference=intake.body_reference,
         has_attachments=has_attachments,
         processing_status=MessageProcessingStatus.NEW
@@ -266,7 +282,7 @@ def process_intake_to_document(db: Session, msg_id: int, proc_req: schemas.Intak
 # =========================================================
 
 def _generate_reference_no(db: Session) -> str:
-    year = datetime.utcnow().year
+    year = datetime.now().year
     prefix = f"CDTRS-{year}-"
     count = (
         db.query(func.count(models.Document.doc_id))
@@ -354,12 +370,10 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
         return (
             db.query(models.Document)
             .filter(
-                or_(
-                    models.Document.created_by == user.id,
-                    models.Document.current_owner_id == user.id
-                )
+                models.Document.current_stage == WorkflowStage.DS,
+                models.Document.status == DocumentStatus.RECEIVED
             )
-            .order_by(models.Document.updated_at.desc())
+            .order_by(models.Document.created_at.desc())
             .all()
         )
 
@@ -418,29 +432,35 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
 
 def is_document_accessible(db: Session, doc: models.Document, user: models.User) -> bool:
     """Check if the user is authorized to view this document and its attachments/history."""
-    if user.role == UserRole.DS:
+    if user.role in (UserRole.DS, UserRole.DIRECTOR):
         return True
-    elif user.role == UserRole.DIRECTOR:
-        # Director can view documents routed to them or that have ever been reviewed by Director
-        has_route = db.query(models.DocumentRoute).filter(
-            models.DocumentRoute.document_id == doc.doc_id,
-            or_(
-                models.DocumentRoute.to_user_id == user.id,
-                models.DocumentRoute.from_user_id == user.id
-            )
-        ).first()
-        return (doc.current_owner_id == user.id or has_route is not None)
     elif user.role == UserRole.HOD:
-        # HOD can view documents targeted to their department
         return (user.department_id is not None and doc.target_department_id == user.department_id)
     elif user.role == UserRole.EMPLOYEE:
-        # Employee can view assigned or directly owned documents
         has_assignment = db.query(models.WorkAssignment).filter(
             models.WorkAssignment.document_id == doc.doc_id,
             models.WorkAssignment.assigned_to_user_id == user.id
         ).first()
         return (doc.current_owner_id == user.id or has_assignment is not None)
     return False
+
+
+def get_accessible_documents_for_user(db: Session, user: models.User) -> List[models.Document]:
+    """Returns all documents accessible to the given user based on their role and department."""
+    if user.role in (UserRole.DS, UserRole.DIRECTOR):
+        return db.query(models.Document).order_by(models.Document.created_at.desc()).all()
+    elif user.role == UserRole.HOD:
+        if not user.department_id:
+            return []
+        return (
+            db.query(models.Document)
+            .filter(models.Document.target_department_id == user.department_id)
+            .order_by(models.Document.updated_at.desc())
+            .all()
+        )
+    elif user.role == UserRole.EMPLOYEE:
+        return get_inbox(db, user)
+    return []
 
 
 # =========================================================
@@ -468,6 +488,24 @@ def route_document(db: Session, doc_id: int, route_req: schemas.RouteRequest, cu
         new_stage = WorkflowStage.EMPLOYEE
         new_status = DocumentStatus.ASSIGNED_FOR_EXECUTION
         new_owner = route_req.to_user_id
+        if route_req.to_user_id:
+            target_user = db.query(models.User).filter(models.User.id == route_req.to_user_id).first()
+            if target_user and target_user.department_id:
+                doc.target_department_id = target_user.department_id
+
+            db.query(models.WorkAssignment).filter(
+                models.WorkAssignment.document_id == doc_id,
+                models.WorkAssignment.is_active == True
+            ).update({"is_active": False})
+
+            assign_entry = models.WorkAssignment(
+                document_id=doc_id,
+                assigned_by_user_id=current_user.id,
+                assigned_to_user_id=route_req.to_user_id,
+                instructions=route_req.remarks,
+                is_active=True
+            )
+            db.add(assign_entry)
 
     elif route_req.route_type == RouteType.FOLLOW_UP_TO_DIRECTOR:
         new_stage = WorkflowStage.DIRECTOR
@@ -479,7 +517,7 @@ def route_document(db: Session, doc_id: int, route_req: schemas.RouteRequest, cu
     doc.current_stage = new_stage
     doc.status = new_status
     doc.current_owner_id = new_owner
-    doc.updated_at = datetime.utcnow()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     # Record Route entry
@@ -496,6 +534,17 @@ def route_document(db: Session, doc_id: int, route_req: schemas.RouteRequest, cu
     db.refresh(doc)
 
     # Workflow history
+    if route_req.route_type == RouteType.INITIAL_DIRECTOR_REVIEW:
+        route_detail = route_req.remarks or "Forwarded for Executive Review"
+    elif route_req.route_type == RouteType.POST_REVIEW_TO_HOD:
+        route_detail = route_req.remarks or f"Destination: {doc.target_department_name or 'Department'} (For departmental processing)"
+    elif route_req.route_type == RouteType.POST_REVIEW_TO_EMPLOYEE:
+        route_detail = route_req.remarks or f"Direct Staff Delegation: {doc.assigned_employee_name or 'Staff'}"
+    elif route_req.route_type == RouteType.FOLLOW_UP_TO_DIRECTOR:
+        route_detail = route_req.remarks or "Progress follow-up forwarded to Director for Executive Review"
+    else:
+        route_detail = route_req.remarks or "Document routed"
+
     event = _add_workflow_history(
         db=db,
         document_id=doc_id,
@@ -503,7 +552,7 @@ def route_document(db: Session, doc_id: int, route_req: schemas.RouteRequest, cu
         action=f"ROUTED_{route_req.route_type.value}",
         from_role=current_user.role.value,
         to_role=new_stage.value,
-        details=route_req.remarks
+        details=route_detail
     )
 
     # Send Notification to recipient
@@ -543,7 +592,7 @@ def save_director_remark(db: Session, doc_id: int, remark: str, current_user: mo
         return None
 
     doc.director_remark = remark
-    doc.updated_at = datetime.utcnow()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     # Add to DocumentRemark history table
@@ -565,7 +614,7 @@ def save_director_remark(db: Session, doc_id: int, remark: str, current_user: mo
         action="DIRECTOR_REMARK_SAVED",
         from_role="DIRECTOR",
         to_role=None,
-        details="Director remark updated"
+        details=f'Director Remark: "{remark}"'
     )
 
     # Automatically generate/update routing intelligence suggestions based on Director remark
@@ -583,7 +632,19 @@ def return_to_ds(db: Session, doc_id: int, ds_user_id: int, remarks: Optional[st
     doc.current_stage = WorkflowStage.DS
     doc.status = DocumentStatus.DIRECTOR_REVIEW_COMPLETED
     doc.current_owner_id = ds_user_id
-    doc.updated_at = datetime.utcnow()
+    if remarks:
+        doc.director_remark = remarks
+        remark_entry = models.DocumentRemark(
+            document_id=doc_id,
+            author_user_id=current_user.id,
+            role=UserRole.DIRECTOR,
+            remark_text=remarks,
+            remark_type=RemarkType.DIRECTOR
+        )
+        db.add(remark_entry)
+        generate_routing_suggestion(db, doc_id, include_director_remark=True)
+
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     db_route = models.DocumentRoute(
@@ -591,12 +652,13 @@ def return_to_ds(db: Session, doc_id: int, ds_user_id: int, remarks: Optional[st
         from_user_id=current_user.id,
         to_user_id=ds_user_id,
         route_type=RouteType.RETURN_TO_DS,
-        remarks=remarks,
+        remarks=remarks or doc.director_remark,
     )
     db.add(db_route)
     db.commit()
     db.refresh(doc)
 
+    ret_details = remarks or (f'Director Review Completed: "{doc.director_remark}"' if doc.director_remark else "Returned to Director Secretary with review comments")
     event = _add_workflow_history(
         db=db,
         document_id=doc_id,
@@ -604,7 +666,7 @@ def return_to_ds(db: Session, doc_id: int, ds_user_id: int, remarks: Optional[st
         action="RETURNED_TO_DS",
         from_role="DIRECTOR",
         to_role="DS",
-        details=remarks
+        details=ret_details
     )
 
     _create_notification(
@@ -626,7 +688,7 @@ def save_hod_remark(db: Session, doc_id: int, remark: str, current_user: models.
         return None
 
     doc.hod_remark = remark
-    doc.updated_at = datetime.utcnow()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     remark_entry = models.DocumentRemark(
@@ -647,7 +709,7 @@ def save_hod_remark(db: Session, doc_id: int, remark: str, current_user: models.
         action="HOD_REMARK_SAVED",
         from_role="HOD",
         to_role=None,
-        details="HOD remark updated"
+        details=f'HOD Remark: "{remark}"'
     )
 
     return doc
@@ -678,11 +740,14 @@ def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequ
     doc.current_stage = WorkflowStage.EMPLOYEE
     doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
     doc.current_owner_id = assign_req.assigned_to_user_id
-    doc.updated_at = datetime.utcnow()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     db.commit()
     db.refresh(assignment)
+
+    assignee_name = assignment.assigned_to.full_name if (assignment.assigned_to and assignment.assigned_to.full_name) else (doc.assigned_employee_name or "Staff")
+    assign_detail = f"Delegated to {assignee_name}: {assign_req.instructions or 'Standard departmental execution'}"
 
     event = _add_workflow_history(
         db=db,
@@ -691,7 +756,7 @@ def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequ
         action="EMPLOYEE_ASSIGNED",
         from_role="HOD",
         to_role="EMPLOYEE",
-        details=assign_req.instructions
+        details=assign_detail
     )
 
     _create_notification(
@@ -719,8 +784,8 @@ def create_progress_update(db: Session, doc_id: int, prog: schemas.ProgressCreat
     )
     db.add(db_progress)
 
-    doc.status = DocumentStatus.IN_PROGRESS
-    doc.updated_at = datetime.utcnow()
+    doc.status = DocumentStatus.PROGRESS_UPDATED
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     db.commit()
@@ -733,7 +798,7 @@ def create_progress_update(db: Session, doc_id: int, prog: schemas.ProgressCreat
         action="PROGRESS_UPDATED",
         from_role="EMPLOYEE",
         to_role=None,
-        details=prog.description[:200]
+        details=f'Progress Report: "{prog.description}"'
     )
 
     # Notify DS creator
@@ -764,7 +829,7 @@ def follow_up_to_director(db: Session, doc_id: int, director_user: models.User,
     doc.current_stage = WorkflowStage.DIRECTOR
     doc.status = DocumentStatus.PROGRESS_UPDATED
     doc.current_owner_id = director_user.id
-    doc.updated_at = datetime.utcnow()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     db_route = models.DocumentRoute(
@@ -785,7 +850,7 @@ def follow_up_to_director(db: Session, doc_id: int, director_user: models.User,
         action="FOLLOW_UP_TO_DIRECTOR",
         from_role="DS",
         to_role="DIRECTOR",
-        details=remarks
+        details=remarks or "Progress follow-up forwarded to Director for Executive Review"
     )
 
     _create_notification(
@@ -808,8 +873,8 @@ def close_document(db: Session, doc_id: int, remarks: Optional[str],
 
     doc.status = DocumentStatus.CLOSED
     doc.current_stage = WorkflowStage.CLOSED
-    doc.closed_at = datetime.utcnow()
-    doc.updated_at = datetime.utcnow()
+    doc.closed_at = datetime.now()
+    doc.updated_at = datetime.now()
     doc.version += 1
 
     db.commit()
@@ -822,7 +887,7 @@ def close_document(db: Session, doc_id: int, remarks: Optional[str],
         action="DOCUMENT_CLOSED",
         from_role="DS",
         to_role="CLOSED",
-        details=remarks
+        details=remarks or "Document lifecycle finalized and closed successfully."
     )
 
     return doc
@@ -937,7 +1002,7 @@ def trigger_ocr_processing(db: Session, doc_id: int) -> Optional[models.Document
     ocr_record.extracted_text = extracted_text
     ocr_record.confidence = 0.94
     ocr_record.ocr_status = OCRStatus.COMPLETED
-    ocr_record.processed_at = datetime.utcnow()
+    ocr_record.processed_at = datetime.now()
     doc.ocr_status = OCRStatus.COMPLETED
 
     # Extract standard structured fields
@@ -1002,7 +1067,7 @@ def verify_extracted_field(db: Session, doc_id: int, field_name: str, verified_v
 
     field.verified_value = verified_value
     field.verified_by = user.id
-    field.verified_at = datetime.utcnow()
+    field.verified_at = datetime.now()
 
     # If title was verified, update canonical document
     doc = get_document(db, doc_id)
@@ -1097,7 +1162,7 @@ def generate_routing_suggestion(db: Session, doc_id: int, include_director_remar
             routing_reason=reason,
             routing_source=source,
             is_director_instruction=is_director_instruction,
-            generated_at=datetime.utcnow()
+            generated_at=datetime.now()
         )
         db.add(suggestion)
     else:
@@ -1109,7 +1174,7 @@ def generate_routing_suggestion(db: Session, doc_id: int, include_director_remar
             suggestion.routing_reason = reason
             suggestion.routing_source = source
             suggestion.is_director_instruction = is_director_instruction
-            suggestion.generated_at = datetime.utcnow()
+            suggestion.generated_at = datetime.now()
 
     db.commit()
     db.refresh(suggestion)
@@ -1182,7 +1247,7 @@ def generate_reminders(db: Session) -> List[models.Reminder]:
                     recipient_user_id=recipient_id,
                     reason=reason,
                     due_at=datetime.combine(doc.deadline, datetime.min.time()) if doc.deadline else None,
-                    sent_at=datetime.utcnow(),
+                    sent_at=datetime.now(),
                     is_read=False,
                     deduplication_key=dedup_key
                 )
@@ -1229,6 +1294,16 @@ def _add_workflow_history(
     to_role: Optional[str] = None,
     details: Optional[str] = None
 ) -> models.WorkflowHistory:
+    # Deduplicate consecutive identical entries on the same document
+    last_entry = (
+        db.query(models.WorkflowHistory)
+        .filter(models.WorkflowHistory.document_id == document_id)
+        .order_by(models.WorkflowHistory.id.desc())
+        .first()
+    )
+    if last_entry and last_entry.action == action and last_entry.details == details:
+        return last_entry
+
     entry = models.WorkflowHistory(
         document_id=document_id,
         performed_by_user_id=user_id,
@@ -1472,10 +1547,10 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
 def seed_data(db: Session) -> None:
     """
     Populates the database with:
-    - 4 Departments: Administration, Finance, Procurement, Technical
-    - 2 distinct HODs from different departments (Finance & Procurement) for isolation testing
-    - Multiple employees across both departments
+    - All canonical departments: Administration, Finance, Procurement, Technical, HR, Maintenance
+    - HODs and employees across departments
     - DS and Director accounts
+    - The 5 canonical demonstration documents with initial audit histories
     """
     # 1. Departments
     depts_data = [
@@ -1483,6 +1558,8 @@ def seed_data(db: Session) -> None:
         {"name": "Finance", "code": "FIN"},
         {"name": "Procurement", "code": "PROC"},
         {"name": "Technical", "code": "TECH"},
+        {"name": "HR", "code": "HR"},
+        {"name": "Maintenance", "code": "MAINT"},
     ]
 
     dept_map = {}
@@ -1502,6 +1579,8 @@ def seed_data(db: Session) -> None:
         {"code": "EMP-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Accounts Officer"},
         {"code": "EMP-002", "name": "Priya Verma", "dept": "Procurement", "designation": "Procurement Specialist"},
         {"code": "EMP-003", "name": "Anil Kumar", "dept": "Technical", "designation": "Systems Engineer"},
+        {"code": "EMP-004", "name": "Sneha Deshmukh", "dept": "HR", "designation": "HR Officer"},
+        {"code": "EMP-005", "name": "Ramesh Pawar", "dept": "Maintenance", "designation": "Facility Supervisor"},
     ]
 
     emp_map = {}
@@ -1556,6 +1635,22 @@ def seed_data(db: Session) -> None:
             "employee_id": None
         },
         {
+            "username": "hod_tech",
+            "password": "cdtrs@hod",
+            "full_name": "Head of Technical & IT",
+            "role": UserRole.HOD,
+            "department_id": dept_map["Technical"],
+            "employee_id": None
+        },
+        {
+            "username": "hod_hr",
+            "password": "cdtrs@hod",
+            "full_name": "Head of Human Resources",
+            "role": UserRole.HOD,
+            "department_id": dept_map["HR"],
+            "employee_id": None
+        },
+        {
             "username": "emp_rahul",
             "password": "cdtrs@emp",
             "full_name": "Rahul Sharma",
@@ -1570,9 +1665,18 @@ def seed_data(db: Session) -> None:
             "role": UserRole.EMPLOYEE,
             "department_id": dept_map["Procurement"],
             "employee_id": emp_map.get("EMP-002")
+        },
+        {
+            "username": "emp_anil",
+            "password": "cdtrs@emp",
+            "full_name": "Anil Kumar",
+            "role": UserRole.EMPLOYEE,
+            "department_id": dept_map["Technical"],
+            "employee_id": emp_map.get("EMP-003")
         }
     ]
 
+    user_objs = {}
     for u in users_data:
         existing = get_user_by_username(db, u["username"])
         if not existing:
@@ -1594,5 +1698,104 @@ def seed_data(db: Session) -> None:
                 if db_emp and not db_emp.user_id:
                     db_emp.user_id = user.id
                     db.commit()
+            user_objs[u["username"]] = user
+        else:
+            user_objs[u["username"]] = existing
+
+    # 4. Canonical 5 Demonstration Documents (if documents table is empty)
+    ds_user_obj = user_objs.get("ds_user")
+    ds_id = ds_user_obj.id if ds_user_obj else 1
+
+    if db.query(models.Document).count() == 0:
+        now_dt = datetime.now()
+        deadline_7d = now_dt + timedelta(days=7)
+
+        docs_seed = [
+            {
+                "reference_no": "CDTRS-2026-0001",
+                "title": "National Higher Education Accreditation & Governance Compliance Directive",
+                "source": "Ministry of Higher Education",
+                "mode": SourceType.GOVERNMENT_MAIL,
+                "priority": Priority.MEDIUM,
+                "deadline": None,
+                "director_remark": None,
+                "target_dept_id": None
+            },
+            {
+                "reference_no": "CDTRS-2026-0002",
+                "title": "Q3 Financial Audit & Capital Grant Disbursement Notice",
+                "source": "State Audit Bureau",
+                "mode": SourceType.OUTLOOK,
+                "priority": Priority.HIGH,
+                "deadline": None,
+                "director_remark": None,
+                "target_dept_id": dept_map.get("Finance")
+            },
+            {
+                "reference_no": "CDTRS-2026-0003",
+                "title": "Statutory Vendor Tax Clearance & Procurement Verification",
+                "source": "Central Board of Direct Taxes",
+                "mode": SourceType.MANUAL,
+                "priority": Priority.HIGH,
+                "deadline": None,
+                "director_remark": None,
+                "target_dept_id": dept_map.get("Finance")
+            },
+            {
+                "reference_no": "CDTRS-2026-0004",
+                "title": "Urgent Campus Security Infrastructure Upgrade Order (Pre-Reviewed)",
+                "source": "Office of the Director",
+                "mode": SourceType.MANUAL,
+                "priority": Priority.HIGH,
+                "deadline": None,
+                "director_remark": "Approved. Assign to Rahul Sharma for budget allocation.",
+                "target_dept_id": dept_map.get("Finance")
+            },
+            {
+                "reference_no": "CDTRS-2026-0005",
+                "title": "Critical Cybersecurity Firewall Patch & Server Migration Order",
+                "source": "State Cyber Security Agency",
+                "mode": SourceType.MANUAL,
+                "priority": Priority.HIGH,
+                "deadline": deadline_7d,
+                "director_remark": None,
+                "target_dept_id": dept_map.get("Technical")
+            }
+        ]
+
+        for d in docs_seed:
+            doc_obj = models.Document(
+                reference_no=d["reference_no"],
+                title=d["title"],
+                description=d["title"],
+                received_date=now_dt,
+                deadline=d["deadline"],
+                source=d["source"],
+                mode=d["mode"],
+                priority=d["priority"],
+                status=DocumentStatus.RECEIVED,
+                current_stage=WorkflowStage.DS,
+                current_owner_id=ds_id,
+                created_by=ds_id,
+                target_department_id=d.get("target_dept_id"),
+                director_remark=d["director_remark"],
+                ocr_status=OCRStatus.COMPLETED,
+                ocr_text=f"Official extracted text content for {d['title']}. Reference: {d['reference_no']}.",
+                version=1
+            )
+            db.add(doc_obj)
+            db.commit()
+            db.refresh(doc_obj)
+
+            # Insert initial audit history
+            _add_workflow_history(
+                db=db,
+                document_id=doc_obj.doc_id,
+                user_id=ds_id,
+                action="DOCUMENT_RECEIVED",
+                from_role="DS",
+                to_role="DS",
+                details=f"Document ingested and registered as {doc_obj.reference_no}"
+            )
 
     print("Seed data inserted successfully.")

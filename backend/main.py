@@ -287,11 +287,11 @@ def create_user(
     f"{API_V1}/users",
     response_model=List[schemas.UserResponse],
     tags=["Users"],
-    summary="List all users (DS only)",
+    summary="List all users",
 )
 def get_users(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
 ):
     return crud.get_users(db)
 
@@ -523,13 +523,13 @@ async def create_document(
     f"{API_V1}/documents",
     response_model=List[schemas.DocumentListResponse],
     tags=["Documents"],
-    summary="DS: Get all documents",
+    summary="Get documents accessible to current user",
 )
 def get_documents(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
 ):
-    return crud.get_documents(db)
+    return crud.get_accessible_documents_for_user(db, current_user)
 
 
 @app.get(
@@ -1240,10 +1240,13 @@ def get_dashboard(
 
 @app.on_event("startup")
 def on_startup():
-    if os.getenv("SEED_DB", "false").lower() == "true":
-        from database import SessionLocal
-        db = SessionLocal()
-        try:
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        user_count = db.query(models.User).count()
+        if user_count == 0 or os.getenv("SEED_DB", "false").lower() == "true":
             crud.seed_data(db)
-        finally:
-            db.close()
+    except Exception as e:
+        print(f"Startup database check: {e}")
+    finally:
+        db.close()

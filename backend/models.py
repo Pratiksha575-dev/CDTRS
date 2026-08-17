@@ -13,6 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from typing import Optional
 import enum
 
 from database import Base
@@ -123,7 +124,7 @@ class Department(Base):
     name = Column(String(100), unique=True, nullable=False)
     code = Column(String(20), unique=True, nullable=True)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     users      = relationship("User", back_populates="department")
@@ -165,8 +166,8 @@ class User(Base):
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     employee_id = Column(Integer, nullable=True)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Relationships
     department      = relationship("Department", back_populates="users")
@@ -192,11 +193,11 @@ class IncomingMessage(Base):
     sender_name = Column(String(150), nullable=True)
     sender_email = Column(String(255), nullable=True)
     subject = Column(String(500), nullable=True)
-    received_at = Column(DateTime, default=datetime.utcnow)
+    received_at = Column(DateTime, default=datetime.now)
     body_reference = Column(Text, nullable=True)
     has_attachments = Column(Boolean, default=False)
     processing_status = Column(SAEnum(MessageProcessingStatus, name="msg_status_enum"), default=MessageProcessingStatus.NEW, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     documents   = relationship("Document", back_populates="source_message")
@@ -236,8 +237,8 @@ class Document(Base):
     director_remark = Column(Text, nullable=True)
     hod_remark = Column(Text, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     closed_at = Column(DateTime, nullable=True)
 
     # Relationships
@@ -257,6 +258,31 @@ class Document(Base):
     remarks_history    = relationship("DocumentRemark", back_populates="document", cascade="all, delete-orphan")
     reminders          = relationship("Reminder", back_populates="document", cascade="all, delete-orphan")
 
+    @property
+    def target_department_name(self) -> Optional[str]:
+        if self.target_department:
+            return self.target_department.name
+        return None
+
+    @property
+    def assigned_employee_name(self) -> Optional[str]:
+        for a in self.assignments:
+            if a.is_active and a.assigned_to:
+                return a.assigned_to.full_name
+        if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner:
+            return self.current_owner.full_name
+        return None
+
+    @property
+    def assigned_employee_id(self) -> Optional[int]:
+        for a in self.assignments:
+            if a.is_active and a.assigned_to_user_id:
+                return a.assigned_to_user_id
+        if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner_id:
+            return self.current_owner_id
+        return None
+
+
 
 # =========================================================
 # DOCUMENT ROUTES (DS Decisions)
@@ -272,7 +298,7 @@ class DocumentRoute(Base):
     to_department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     route_type = Column(SAEnum(RouteType, name="route_type_enum"), nullable=False)
     remarks = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     document      = relationship("Document", back_populates="routes")
@@ -294,7 +320,7 @@ class WorkAssignment(Base):
     assigned_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     instructions = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
-    assigned_at = Column(DateTime, default=datetime.utcnow)
+    assigned_at = Column(DateTime, default=datetime.now)
     completed_at = Column(DateTime, nullable=True)
 
     # Relationships
@@ -314,12 +340,16 @@ class ProgressUpdate(Base):
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
     submitted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     description = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     document     = relationship("Document", back_populates="progress_updates")
     submitted_by = relationship("User", foreign_keys=[submitted_by_user_id])
     attachments  = relationship("Attachment", back_populates="progress_update")
+
+    @property
+    def user_name(self) -> Optional[str]:
+        return self.submitted_by.full_name if self.submitted_by else None
 
 
 # =========================================================
@@ -340,7 +370,7 @@ class Attachment(Base):
     checksum = Column(String(64), nullable=True)  # SHA-256 integrity hash
     attachment_type = Column(SAEnum(AttachmentType, name="att_type_enum"), default=AttachmentType.ORIGINAL, nullable=False)
     source_message_id = Column(Integer, ForeignKey("incoming_messages.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     document        = relationship("Document", back_populates="attachments")
@@ -362,8 +392,8 @@ class DocumentRemark(Base):
     role = Column(SAEnum(UserRole, name="user_role_remark"), nullable=False)
     remark_text = Column(Text, nullable=False)
     remark_type = Column(SAEnum(RemarkType, name="remark_type_enum"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Relationships
     document = relationship("Document", back_populates="remarks_history")
@@ -428,7 +458,7 @@ class RoutingSuggestion(Base):
     routing_reason = Column(Text, nullable=False)
     routing_source = Column(SAEnum(RoutingSource, name="routing_source_enum"), default=RoutingSource.DOCUMENT_CONTENT, nullable=False)
     is_director_instruction = Column(Boolean, default=False)  # Highlighted alert for DS
-    generated_at = Column(DateTime, default=datetime.utcnow)
+    generated_at = Column(DateTime, default=datetime.now)
     confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     confirmed_at = Column(DateTime, nullable=True)
 
@@ -451,7 +481,7 @@ class Reminder(Base):
     recipient_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     reason = Column(SAEnum(ReminderReason, name="reminder_reason_enum"), nullable=False)
     due_at = Column(DateTime, nullable=True)
-    sent_at = Column(DateTime, default=datetime.utcnow)
+    sent_at = Column(DateTime, default=datetime.now)
     is_read = Column(Boolean, default=False)
     deduplication_key = Column(String(200), unique=True, nullable=False, index=True)
 
@@ -474,11 +504,25 @@ class WorkflowHistory(Base):
     from_role = Column(String(50), nullable=True)
     to_role = Column(String(50), nullable=True)
     details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     document     = relationship("Document", back_populates="workflow_history")
     performed_by = relationship("User", foreign_keys=[performed_by_user_id])
+
+    @property
+    def performed_by_name(self) -> Optional[str]:
+        if self.performed_by:
+            return self.performed_by.full_name
+        return self.from_role or "System"
+
+    @property
+    def user(self) -> Optional[str]:
+        return self.performed_by_name
+
+    @property
+    def remarks(self) -> Optional[str]:
+        return self.details
 
 
 # =========================================================
@@ -494,7 +538,7 @@ class AuditLog(Base):
     entity_type = Column(String(50), nullable=True)
     entity_id = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
 
 # =========================================================
@@ -511,7 +555,7 @@ class Notification(Base):
     title = Column(String(200), nullable=False)
     message = Column(Text, nullable=False)
     is_read = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     user     = relationship("User", back_populates="notifications")

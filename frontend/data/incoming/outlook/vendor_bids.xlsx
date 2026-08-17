@@ -1,0 +1,5 @@
+# Mock Spreadsheet: Vendor Commercial Bid Summary
+Vendor,Bid_Amount_INR,Delivery_Weeks,Technical_Score
+TechCorp Solutions,4500000,4,92.5
+ComputeGrid Infra,4200000,6,88.0
+Apex Systems,4800000,3,94.0

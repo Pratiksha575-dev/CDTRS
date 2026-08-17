@@ -18,7 +18,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg2://postgres:your_password@localhost:5432/cdtrs"
+    "postgresql+psycopg2://postgres:fctd@localhost:5432/cdtrs"
 )
 
 # Cloud providers (e.g. Render, Railway, Neon, Supabase) often provide URLs starting with "postgres://"

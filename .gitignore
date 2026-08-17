@@ -31,11 +31,16 @@ desktop.ini
 
 # Environment variables / secrets
 .env
+*.env
+frontend/.env
+backend/.env
 .env.local
 .env.*.local
 *.log
 
-# Local test artifacts & databases
+# Backend uploads & local databases
+backend/uploads/
+*.db
 scratch/*.db
 scratch/*.pdf
 scratch/test_uploads/

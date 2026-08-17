@@ -152,45 +152,56 @@ class DocumentCreate(BaseModel):
 
 
 class DocumentResponse(BaseModel):
-    doc_id:              int
-    reference_no:        str
-    title:               str
-    description:         Optional[str] = None
-    received_date:       date
-    deadline:            Optional[date] = None
-    source:              Optional[str] = None
-    mode:                str
-    priority:            Priority
-    status:              DocumentStatus
-    current_stage:       WorkflowStage
-    current_owner_id:    Optional[int] = None
-    target_department_id: Optional[int] = None
-    created_by:          int
-    source_message_id:   Optional[int] = None
-    ocr_status:          OCRStatus
-    version:             int
-    director_remark:     Optional[str] = None
-    hod_remark:          Optional[str] = None
-    created_at:          datetime
-    updated_at:          datetime
-    closed_at:           Optional[datetime] = None
+    doc_id:                 int
+    reference_no:           str
+    title:                  str
+    description:            Optional[str] = None
+    received_date:          date
+    deadline:               Optional[date] = None
+    source:                 Optional[str] = None
+    mode:                   str
+    priority:               Priority
+    status:                 DocumentStatus
+    current_stage:          WorkflowStage
+    current_owner_id:       Optional[int] = None
+    target_department_id:   Optional[int] = None
+    target_department_name: Optional[str] = None
+    assigned_employee_name: Optional[str] = None
+    assigned_employee_id:   Optional[int] = None
+    created_by:             int
+    source_message_id:      Optional[int] = None
+    ocr_status:             OCRStatus
+    version:                int
+    director_remark:        Optional[str] = None
+    hod_remark:             Optional[str] = None
+    created_at:             datetime
+    updated_at:             datetime
+    closed_at:              Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class DocumentListResponse(BaseModel):
-    doc_id:        int
-    reference_no:  str
-    title:         str
-    priority:      Priority
-    status:        DocumentStatus
-    current_stage: WorkflowStage
-    ocr_status:    OCRStatus
-    version:       int
-    received_date: date
-    deadline:      Optional[date] = None
-    created_at:    datetime
-    updated_at:    datetime
+    doc_id:                 int
+    reference_no:           str
+    title:                  str
+    description:            Optional[str] = None
+    source:                 Optional[str] = None
+    priority:               Priority
+    status:                 DocumentStatus
+    current_stage:          WorkflowStage
+    target_department_id:   Optional[int] = None
+    target_department_name: Optional[str] = None
+    assigned_employee_name: Optional[str] = None
+    assigned_employee_id:   Optional[int] = None
+    director_remark:        Optional[str] = None
+    hod_remark:             Optional[str] = None
+    ocr_status:             OCRStatus
+    version:                int
+    received_date:          date
+    deadline:               Optional[date] = None
+    created_at:             datetime
+    updated_at:             datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -278,6 +289,7 @@ class ProgressResponse(BaseModel):
     id:                   int
     document_id:          int
     submitted_by_user_id: int
+    user_name:            Optional[str] = None
     description:          str
     created_at:           datetime
 
@@ -412,9 +424,12 @@ class WorkflowHistoryResponse(BaseModel):
     id:                  int
     document_id:         int
     performed_by_user_id: int
+    performed_by_name:   Optional[str] = None
+    user:                Optional[str] = None
     action:              str
     from_role:           Optional[str] = None
     to_role:             Optional[str] = None
+    remarks:             Optional[str] = None
     details:             Optional[str] = None
     created_at:          datetime
 

@@ -1,272 +1,259 @@
-# CDTRS — Windows Quick Setup & Execution Guide
+# CDTRS — Complete Windows Setup & Multi-PC Deployment Guide
 
-This guide walks you through downloading, setting up, and running the **CDTRS (Centralised Document Tracking and Routing System)** desktop application on any Windows 10 / 11 PC.
-
----
-
-## 1. Requirements
-
-Before starting, ensure you have:
-- **Operating System:** Windows 10 or Windows 11 (64-bit).
-- **Python:** Python **3.10**, **3.11**, **3.12**, or **3.13** installed from [python.org](https://www.python.org/downloads/) *(Ensure **"Add python.exe to PATH"** was checked during installation)*.
-- **Git:** *(Optional)* Only needed if cloning via Git. Not required if downloading as a ZIP.
-- **Internet Connection:** Required for installing dependencies and for connecting to the deployed Render backend API.
-- **Database:** **No local PostgreSQL installation is required.** By default, the application connects directly to the live deployed cloud backend on Render.
+Comprehensive guide for setting up, configuring, and executing the **CDTRS (Centralised Document Tracking and Routing System)** across single and multi-machine network environments.
 
 ---
 
-## 2. Download from GitHub as ZIP
+## 1. Project Directory Structure
 
-1. Open the CDTRS GitHub repository in your web browser.
-2. Click the green **`<> Code`** button at the top-right of the repository page.
-3. Click **`Download ZIP`**.
-4. Right-click the downloaded `.zip` file and select **Extract All...**.
-5. Choose a destination folder (e.g., `C:\Users\<YourUsername>\Desktop\CDTRS`).
-6. Open the extracted folder and verify that you are in the **root project directory** (the folder containing `main.py`).
+The project is cleanly divided into decoupled **`frontend/`** (PySide6 Desktop Application) and **`backend/`** (FastAPI REST Server & PostgreSQL / SQLite Engine) modules:
 
-### Expected Project Directory Structure
 ```text
 CDTRS/
-├── api/                   # REST API client, endpoint definitions & exceptions
-├── backend/               # FastAPI backend source & schemas
-├── components/            # Reusable PySide6 UI widgets (table, viewer, badges)
-├── config/                # Centralized settings & environment resolution
-├── data/                  # Canonical incoming files and sample documents
-├── models/                # Typed domain models, enums & serialization
-├── pages/                 # Role-specific application pages & views
-├── repositories/          # Repository abstraction (APIRepository & MockRepository)
-├── scratch/               # Automated regression & integration test scripts
-├── services/              # Business logic (auth, routing, OCR, workflow, notifications)
-├── styles/                # Global QSS styling (theme.qss)
-├── ui/                    # Login window, main shell window, and sidebar
-├── .gitignore             # Git ignore rules for clean repository sharing
-├── main.py                # Main application executable entry point
-├── README.md              # Complete technical architecture & project documentation
-├── requirements.txt       # Project dependencies
-└── SETUP_GUIDE.md         # This setup guide
+├── backend/                             # FastAPI Backend Service
+│   ├── main.py                          # FastAPI Application Server & Route Endpoints
+│   ├── models.py                        # SQLAlchemy Database Models & Relationships
+│   ├── crud.py                          # Workflow Engine, Event Logging & State Operations
+│   ├── schemas.py                       # Pydantic Validation & Serialization Schemas
+│   ├── database.py                      # Database Engine, Session Maker & Base
+│   ├── seed.py                          # Database Table Creation & User Seeding Script
+│   ├── clear_documents.py               # Clean Slate Test Database Reset Script
+│   ├── requirements.txt                 # Backend Python Dependencies
+│   ├── .env.example                     # Backend Environment Variable Template
+│   └── .env                             # Active Backend Configuration
+│
+├── frontend/                            # PySide6 Desktop Application
+│   ├── main.py                          # Desktop Application Executable Entry Point
+│   ├── api/                             # REST API Client, Endpoints & Network Handlers
+│   ├── components/                      # Reusable UI Widgets (Table, Document Viewer, Dialogs)
+│   ├── config/                          # Settings & Automatic .env Environment Resolver
+│   ├── models/                          # Typed Domain Models, Dataclasses & Enums
+│   ├── pages/                           # Role-Specific Dashboard & Workflow Pages
+│   ├── repositories/                    # Repository Pattern (APIRepository & MockRepository)
+│   ├── services/                        # Business Logic (Auth, Routing, OCR, Notifications)
+│   ├── styles/                          # Global QSS Theme Stylesheet (theme.qss)
+│   ├── ui/                              # Application Shell Window, Login Window & Sidebar
+│   ├── requirements.txt                 # Frontend Python Dependencies
+│   ├── .env.example                     # Frontend Environment Variable Template
+│   └── .env                             # Active Frontend Configuration
+│
+├── main.py                              # Root Application Launcher (Delegates to frontend)
+├── requirements.txt                     # Unified Dependencies
+└── SETUP_GUIDE.md                       # This Setup & Multi-PC Deployment Guide
 ```
-
-> **Important:** Avoid nested folder structures (e.g., `CDTRS-main/CDTRS-main/`). Make sure your terminal is opened in the directory containing `main.py`.
 
 ---
 
-## 3. Create Virtual Environment
+## 2. Prerequisites
 
-Open **PowerShell** in the project directory and run:
+Ensure the following are installed on your machine:
+- **Operating System:** Windows 10 or Windows 11 (64-bit).
+- **Python:** Python **3.10+** (Ensure *"Add python.exe to PATH"* was checked during installation).
+- **Database:** PostgreSQL (or SQLite fallback).
 
+---
+
+## 3. Quick Setup (Single Local PC)
+
+Follow these steps to run both Backend and Frontend on the same machine:
+
+### Step 1: Open PowerShell and Create Virtual Environment
 ```powershell
-# 1. Verify Python is installed and accessible
-python --version
+# Navigate to the project root directory
+cd "C:\path\to\CDTRS"
 
-# 2. Create an isolated virtual environment
+# Create virtual environment
 python -m venv .venv
 
-# 3. Activate the virtual environment
+# Activate virtual environment
 .\.venv\Scripts\Activate.ps1
 ```
 
-> **PowerShell Execution Policy Alternative:**  
-> If PowerShell shows an execution policy error (*"running scripts is disabled on this system"*), you can either:
-> - **Option A (Recommended):** Bypass for current terminal:
->   ```powershell
->   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
->   .\.venv\Scripts\Activate.ps1
->   ```
-> - **Option B:** Run commands directly using the virtual environment interpreter without activating:
->   ```powershell
->   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
->   .\.venv\Scripts\python.exe main.py
->   ```
+> **PowerShell Script Policy Note:** If you get a script execution policy error, run:
+> ```powershell
+> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+> .\.venv\Scripts\Activate.ps1
+> ```
 
----
-
-## 4. Install Dependencies
-
-With the virtual environment active, run:
-
+### Step 2: Install Dependencies
 ```powershell
-# 1. Upgrade pip to the latest version
 python -m pip install --upgrade pip
-
-# 2. Install all required dependencies
 python -m pip install -r requirements.txt
 ```
 
-### Verification Command
-Run this one-line command to verify all core dependencies are installed correctly:
+### Step 3: Initialize Database & Seed Default Accounts
 ```powershell
-python -c "import PySide6, requests, pip_system_certs; print('✓ All CDTRS core dependencies loaded successfully!')"
+# Creates all PostgreSQL tables and seeds default user accounts
+python backend/seed.py
 ```
 
+### Step 4: Start Backend Server (Terminal 1)
+```powershell
+cd backend
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+*Your FastAPI backend is now running at `http://127.0.0.1:8000` with interactive API docs at `http://127.0.0.1:8000/docs`.*
+
+### Step 5: Launch Desktop Frontend (Terminal 2)
+In a second PowerShell window:
+```powershell
+# Navigate to project and activate virtual environment
+cd "C:\path\to\CDTRS"
+.\.venv\Scripts\Activate.ps1
+
+# Launch Desktop App
+python frontend/main.py
+```
+*(You can also run `python main.py` from the root directory).*
+
 ---
 
-## 5. Configuration
+## 4. Connecting to a Different Backend Server / Another PC on LAN
 
-Configuration is managed in [config/settings.py](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/config/settings.py) and reads environment variables with automatic defaults.
+To run the **Backend on PC A (Server)** and connect the **Frontend from PC B (Client PC)** across your local Wi-Fi or Office Network:
 
-### Default Mode: Live Cloud API Mode
-Out of the box, CDTRS is configured to connect to the deployed backend on Render:
-- **Data Source:** `api`
-- **Backend API URL:** `https://cdtrs.onrender.com/api/v1`
+```mermaid
+flowchart LR
+    subgraph Server_PC ["PC A — Server (IP: 192.168.1.50)"]
+        DB[(PostgreSQL)]
+        API["FastAPI Backend (Port 8000)"]
+        DB --> API
+    end
 
-You do not need to configure anything if you want to use the live backend.
+    subgraph Client_PC ["PC B — Client PC"]
+        App["PySide6 Desktop App"]
+        Env[".env: CDTRS_API_URL=http://192.168.1.50:8000/api/v1"]
+        Env --> App
+    end
 
-### Setting Configuration via PowerShell (Optional)
-If you wish to explicitly set environment variables in your current PowerShell session:
-
-```powershell
-# Connect to Render Cloud Backend
-$env:CDTRS_DATA_SOURCE="api"
-$env:CDTRS_API_URL="https://cdtrs.onrender.com/api/v1"
+    App -- "HTTP REST Requests" --> API
 ```
 
+### On PC A (Server Running the Backend):
+
+1. **Find PC A's Local IP Address:**
+   In PowerShell on PC A, run:
+   ```powershell
+   ipconfig
+   ```
+   Look for the **IPv4 Address** under your active Wi-Fi or Ethernet adapter (e.g., `192.168.1.50`).
+
+2. **Configure Backend `.env` on PC A:**
+   In `backend/.env`:
+   ```ini
+   DATABASE_URL=postgresql+psycopg2://postgres:fctd@localhost:5432/cdtrs
+   HOST=0.0.0.0
+   PORT=8000
+   CORS_ORIGINS=*
+   ```
+
+3. **Start the Backend Server bound to `0.0.0.0`:**
+   ```powershell
+   cd backend
+   python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+4. **Allow Port 8000 in Windows Firewall (if prompted):**
+   When Windows Firewall prompts, click **"Allow Access"** on Private Networks, or run:
+   ```powershell
+   New-NetFirewallRule -DisplayName "CDTRS Backend Port 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+   ```
+
 ---
 
-## 6. Run the Application
+### On PC B (Client PC Running the Desktop App):
 
-Start the CDTRS desktop application by running:
+1. **Copy the `CDTRS/` folder or `frontend/` folder to PC B.**
+2. **Install Frontend Dependencies on PC B:**
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r frontend/requirements.txt
+   ```
 
+3. **Update `frontend/.env` on PC B to point to PC A's IP:**
+   Open `frontend/.env` and update `CDTRS_API_URL`:
+   ```ini
+   # Set to PC A's IP address:
+   CDTRS_API_URL=http://192.168.1.50:8000/api/v1
+   CDTRS_DATA_SOURCE=api
+   ```
+
+4. **Launch the Desktop App on PC B:**
+   ```powershell
+   python frontend/main.py
+   ```
+   The client app will connect seamlessly to the live backend running on PC A!
+
+---
+
+## 5. Environment Variables Reference
+
+### Frontend Environment Variables (`frontend/.env`)
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `CDTRS_API_URL` | `http://127.0.0.1:8000/api/v1` | Base URL of the backend API service. Replace with remote/LAN IP as needed. |
+| `CDTRS_DATA_SOURCE` | `api` | Data source mode: `api` for live backend, `mock` for offline in-memory demo. |
+| `CDTRS_API_TIMEOUT` | `15.0` | Network request timeout in seconds. |
+
+### Backend Environment Variables (`backend/.env`)
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | `postgresql+psycopg2://postgres:fctd@localhost:5432/cdtrs` | SQLAlchemy PostgreSQL connection string. |
+| `HOST` | `0.0.0.0` | Host IP binding (`0.0.0.0` allows LAN connections). |
+| `PORT` | `8000` | Port for the FastAPI HTTP server. |
+| `SECRET_KEY` | `cdtrs-super-secret-key-2026` | Cryptographic secret for signing JWT auth tokens. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | JWT access token session validity (in minutes). |
+| `CORS_ORIGINS` | `*` | Allowed CORS origins for cross-origin client requests. |
+
+---
+
+## 6. Pre-Configured Test User Accounts
+
+The database comes pre-seeded with canonical institutional accounts for all lifecycle roles:
+
+| Username | Role | Default Password | Primary Responsibilities |
+| :--- | :--- | :--- | :--- |
+| **`ds_user`** | Director Secretary (DS) | `cdtrs@ds` | Document Ingestion, Initial Routing, Department Delegation, Closure |
+| **`director`** | Executive Director | `cdtrs@director` | Executive Review, Strategic Directives, Returning Remarks |
+| **`hod_finance`** | Head of Finance | `cdtrs@hod` | Departmental Intake, Task Assignment to Staff |
+| **`hod_procurement`** | Head of Procurement | `cdtrs@hod` | Departmental Intake, Procurement Delegation |
+| **`emp_rahul`** | Employee (Finance Staff) | `cdtrs@emp` | Task Execution, Progress Report & Attachment Submission |
+| **`emp_priya`** | Employee (Procurement Staff) | `cdtrs@emp` | Task Execution, Progress Report & Attachment Submission |
+
+---
+
+## 7. Useful Operational Commands
+
+### Reset Database to 0 Documents (Clean Slate Testing):
 ```powershell
-python main.py
+python backend/clear_documents.py
 ```
-*(Or if not activated: `.\.venv\Scripts\python.exe main.py`)*
+*Deletes all test documents and reset audit trails while preserving user accounts and department structures.*
 
----
-
-## 7. First Run Checklist & Test Credentials
-
-Use this checklist on your first run:
-
-- [ ] **Application Starts:** The desktop application launches and displays the login screen.
-- [ ] **Login Screen Appears:** Clean executive UI with Username and Password fields.
-- [ ] **API Connection Verification:**
-  - Login as **Director Secretary (DS)**:
-    - **Username:** `ds_user`
-    - **Password:** `cdtrs@ds`
-- [ ] **Error Handling:** Entering an incorrect password displays a clean error dialog without crashing.
-- [ ] **Main Window Opens:** Successful login opens the role-based main shell with sidebar and header.
-- [ ] **Dashboard Loads:** KPI metric tiles and operational Action Required cards populate.
-- [ ] **Documents / Inboxes Load:** Central Documents repository and Intake Inbox display registered workflow items.
-- [ ] **Logout Works:** Clicking **Logout** cleans up the user session and safely returns to the login screen.
-
-### Development Test Accounts (API Mode)
-| Role | Username | Password | Purpose |
-|:---|:---|:---|:---|
-| **Director Secretary (DS)** | `ds_user` | `cdtrs@ds` | Document intake, routing to Director/HOD/Employee |
-| **The Director** | `director` | `cdtrs@director` | Executive reviews, remarks & return-to-DS |
-| **Finance HOD** | `hod_finance` | `cdtrs@hod` | Departmental task assignment & oversight |
-| **Procurement HOD** | `hod_procurement` | `cdtrs@hod` | Procurement task assignment |
-| **Finance Employee** | `emp_rahul` | `cdtrs@emp` | Task execution & progress updates (Rahul Sharma) |
-| **Procurement Employee** | `emp_priya` | `cdtrs@emp` | Task execution & progress updates (Priya Verma) |
-
-*(These accounts are pre-seeded development test accounts on the live Render test database).*
-
----
-
-## 8. Common Windows Errors & Troubleshooting
-
-### 1. `'python' is not recognized as an internal or external command`
-- **Cause:** Python was not added to the Windows system `PATH`.
-- **Fix:** Re-run the Python installer, select **Modify**, and check **"Add Python to environment variables"**. Alternatively, use the full path to `python.exe` (e.g. `C:\Users\<User>\AppData\Local\Programs\Python\Python313\python.exe`).
-
-### 2. PowerShell Script Activation Blocked
-- **Error:** `File ...\Activate.ps1 cannot be loaded because running scripts is disabled on this system.`
-- **Fix:** Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in your PowerShell window, then retry `.\.venv\Scripts\Activate.ps1`.
-
-### 3. Missing Module (`ModuleNotFoundError: No module named 'PySide6'`)
-- **Cause:** Command was executed outside the virtual environment.
-- **Fix:** Ensure the virtual environment is activated (`(.venv)` appears before your prompt) or run explicitly via `.\.venv\Scripts\python.exe main.py`.
-
-### 4. Wrong Working Directory (`FileNotFoundError: styles/theme.qss`)
-- **Cause:** Terminal is opened in a parent folder or nested subfolder.
-- **Fix:** Make sure you `cd` into the folder that directly contains `main.py` and `styles/`.
-
-### 5. Render Backend Free-Tier Cold Start Delay
-- **Symptom:** Initial login takes 30–50 seconds or times out on the very first attempt.
-- **Cause:** Render free-tier instances sleep after inactivity and take ~45 seconds to spin up on the first request.
-- **Fix:** Wait 30 seconds and retry login. Subsequent requests will be fast and responsive.
-
-### 6. SSL / Certificate Issues on Corporate / University Windows Networks
-- **Fix:** The project automatically imports `pip_system_certs` in [api/client.py](file:///c:/Users/Pratiksha/OneDrive/Desktop/CDTRS%20-%20Copy/api/client.py) to use the native Windows Certificate Store, resolving corporate firewall/proxy SSL intercept issues automatically.
-
----
-
-## 9. Mock Mode (Offline Development & Testing)
-
-You can run the entire frontend workflow in **Mock Mode** without requiring an internet connection or backend API.
-
-### Starting in Mock Mode:
+### Re-Seed Initial Canonical Documents:
 ```powershell
-# Set mode to mock for the current PowerShell session
-$env:CDTRS_DATA_SOURCE="mock"
-
-# Run application
-python main.py
+python backend/seed.py
 ```
 
-### Mock Mode Test Credentials:
-In Mock Mode, any non-empty password (such as `1234` or `admin`) works for all mock accounts:
-- **DS:** `ds` *(or `master`)* / password: `1234`
-- **Director:** `director` / password: `1234`
-- **Finance HOD:** `hod_finance` / password: `1234`
-- **Procurement HOD:** `hod_proc` / password: `1234`
-- **Finance Employee (Rahul Sharma):** `emp_rahul` / password: `1234`
-
-### Returning to API Mode:
-```powershell
-$env:CDTRS_DATA_SOURCE="api"
-$env:CDTRS_API_URL="https://cdtrs.onrender.com/api/v1"
-python main.py
+### Run Frontend in Standalone Offline Mock Mode:
+In `frontend/.env`, set:
+```ini
+CDTRS_DATA_SOURCE=mock
 ```
-
-> **Note:** Environment variables set via `$env:VAR=...` apply only to that specific PowerShell window session.
+Then run `python frontend/main.py`. The application will run entirely in memory with no backend or database requirement.
 
 ---
 
-## 10. Project Structure & Responsibilities
+## 8. Troubleshooting
 
-| Directory / File | Description |
-|:---|:---|
-| `main.py` | Application entry point: initializes `QApplication`, loads `theme.qss`, and displays `LoginWindow`. |
-| `api/` | REST API HTTP client (`client.py`), endpoint routing constants (`endpoints.py`), and error hierarchy (`exceptions.py`). |
-| `components/` | Reusable Qt UI components: `document_table.py`, `document_viewer.py`, `document_preview.py`, `document_info.py`, `routing_dialogs.py`, `priority_badge.py`, `state_widgets.py`. |
-| `config/` | Central configuration dataclass (`settings.py`) with environment variable parsing. |
-| `models/` | Core data domain models (`DocumentModel`, `UserModel`, `WorkAssignmentModel`, `ProgressUpdateModel`, `WorkflowEventModel`, `AttachmentModel`) and enums (`RoleEnum`, `DocumentStatusEnum`, `WorkflowStageEnum`, `PriorityEnum`). |
-| `pages/` | Primary role-based screen controllers: `dashboard.py`, `inbox.py`, `document_intake.py`, `documents.py`, `history.py`, `director_inbox.py`, `director_reviewed.py`, `hod_inbox.py`, `employee_tasks.py`. |
-| `repositories/` | Decoupled data layer implementing `BaseRepository`: `APIRepository` (REST API) and `MockRepository` (in-memory demonstration dataset). |
-| `services/` | Business service layer (`auth_service`, `document_service`, `routing_service`, `ocr_service`, `workflow_service`, `progress_service`, `notification_service`, `event_bus`). |
-| `styles/` | Global stylesheet `theme.qss` defining color palette, typography, buttons, inputs, and cards. |
-| `ui/` | Top-level window containers: `login.py`, `main_window.py`, and `sidebar.py`. |
-| `scratch/` | Test suites and validation scripts. |
-
----
-
-## 11. Important: Do Not Zip or Commit Virtual Environments
-
-When sharing the project or creating a ZIP package for distribution:
-
-- **DO NOT include:**
-  - `.venv/` or `venv/`
-  - `__pycache__/` folders or `*.pyc` files
-  - `.env` local environment files
-  - `.vscode/` or `.idea/` editor configurations
-  - Local log files or temporary test artifacts
-- The recipient should always create their own fresh `.venv` using `requirements.txt` as described in this guide.
-
----
-
-## 12. Automated Test Verification
-
-To run the automated test suite locally to verify application health:
-
-```powershell
-# Run the 5-Document Canonical Dataset Golden Workflow Test:
-python scratch/test_canonical_5_dataset.py
-
-# Run UI Pages & Dashboard Regression Test:
-python scratch/test_ui_pages_canonical.py
-
-# Run Feature & Filter Verification Test:
-python scratch/test_user_requested_fixes.py
-```
-*(All automated tests run cleanly and report 100% PASS).*
+| Issue | Cause | Solution |
+| :--- | :--- | :--- |
+| **"Could not connect to server"** | Backend is not running or incorrect IP in `.env`. | Verify backend is running (`python -m uvicorn main:app`). Check that `CDTRS_API_URL` matches the backend host and port. |
+| **"Connection Timed Out across LAN"** | Windows Firewall on the Server PC is blocking Port 8000. | On the Server PC, open Windows Firewall and create an Inbound Rule allowing TCP port `8000`. |
+| **"psycopg2.OperationalError: connection to server failed"** | PostgreSQL service is stopped. | Open Windows Services (`services.msc`), find `postgresql-x64`, and click **Start**. |
+| **"ModuleNotFoundError: No module named 'PySide6'"** | Virtual environment is not activated or dependencies missing. | Activate the virtual environment (`.\.venv\Scripts\Activate.ps1`) and run `pip install -r requirements.txt`. |
+cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

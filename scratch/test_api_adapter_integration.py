@@ -235,12 +235,15 @@ try:
 
     # 15. Assign HOD -> Employee (Rahul)
     try:
+        employees = repo.get_users(role="Employee")
+        rahul_user = next((e for e in employees if "rahul" in (e.username or "").lower()), None)
+        rahul_id = rahul_user.id if rahul_user else 5
         assignment = repo.assign_employee(
             document_id=created_doc_id,
-            assigned_to_id=5,  # emp_rahul user_id
+            assigned_to_id=rahul_id,
             instructions="Please prepare the budget utilization report."
         )
-        passed = assignment is not None and assignment.assigned_to_id == 5 and assignment.instructions == "Please prepare the budget utilization report."
+        passed = assignment is not None and assignment.assigned_to_id == rahul_id and assignment.instructions == "Please prepare the budget utilization report."
         record_test("15. Assign HOD -> Employee", f"/api/v1/documents/{created_doc_id}/assign", "POST", "{assigned_to_user_id, instructions}", "AssignmentResponse", "WorkAssignmentModel (assigned_to_user_id->assigned_to_id)", 201, passed)
     except Exception as e:
         record_test("15. Assign HOD -> Employee", f"/api/v1/documents/{created_doc_id}/assign", "POST", "-", "-", "-", 500, False, str(e))

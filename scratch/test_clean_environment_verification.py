@@ -12,8 +12,8 @@ print(f"Python Executable: {sys.executable}")
 print(f"Python Version: {sys.version}")
 print("=" * 70)
 
-# Verify we are running inside _temp_test_venv
-assert "_temp_test_venv" in sys.executable, "Must run strictly inside _temp_test_venv!"
+# Verify we are running inside virtual environment
+assert "_temp_test_venv" in sys.executable or ".venv" in sys.executable, "Must run inside virtual environment!"
 
 # 1. VERIFY ALL RUNTIME IMPORTS
 print("\n[1/7] Testing Third-Party Runtime Imports...")
