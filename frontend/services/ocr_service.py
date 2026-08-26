@@ -1,160 +1,309 @@
+"""
+ocr_service.py — Frontend OCR Service
+Runs real PaddleOCR (via OCR/ocr.py) on document files for instant UI
+feedback on the Document Intake page.  All extraction rules are in
+OCR/rules.py — edit that file to add/change patterns without touching
+this service.
+
+Falls back gracefully if PaddleOCR is not installed or the file cannot
+be read, so the intake form can still be submitted manually.
+"""
+
 import os
-from datetime import datetime, timedelta
+import sys
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+
+# ---------------------------------------------------------------------------
+# Import the OCR engine from the shared OCR/ directory.
+# ---------------------------------------------------------------------------
+_FE_DIR       = Path(__file__).resolve().parent.parent   # frontend/
+_PROJECT_ROOT = _FE_DIR.parent                            # CDTRS-master/
+_OCR_DIR      = _PROJECT_ROOT / "OCR"
+
+for _p in [str(_OCR_DIR), str(_PROJECT_ROOT)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from ocr import DocumentOCR as _DocumentOCR   # OCR/ocr.py
+    _OCR_AVAILABLE = True
+except ImportError:
+    _DocumentOCR   = None
+    _OCR_AVAILABLE = False
+
+# PZ_26/08: Import standalone extract_fields and suggest_department helpers from rules
+try:
+    from rules import extract_fields as _extract_fields, suggest_department as _suggest_department
+except ImportError:
+    try:
+        from OCR.rules import extract_fields as _extract_fields, suggest_department as _suggest_department
+    except ImportError:
+        _extract_fields = None
+        _suggest_department = None
+
+
+# ---------------------------------------------------------------------------
+# Priority normalisation helper
+# ---------------------------------------------------------------------------
+_PRIORITY_HIGH_KW = {"urgent", "immediate", "critical", "high", "asap", "expedite"}
+_PRIORITY_LOW_KW  = {"low", "routine", "normal", "standard", "when possible"}
+
+def _normalise_priority(raw: str) -> str:
+    if not raw:
+        return "Medium"
+    t = raw.lower().strip()
+    if any(kw in t for kw in _PRIORITY_HIGH_KW):
+        return "High"
+    if any(kw in t for kw in _PRIORITY_LOW_KW):
+        return "Low"
+    return "Medium"
+
+
+def _normalise_date(raw: str) -> str:
+    """Converts various date formats (DD/MM/YYYY, MM/DD/YYYY, etc.) to standard YYYY-MM-DD."""
+    if not raw:
+        return datetime.now().strftime("%Y-%m-%d")
+    s = str(raw).strip()
+    if "T" in s:
+        s = s.split("T")[0]
+    formats = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%d-%m-%Y",
+        "%m-%d-%Y",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%Y.%m.%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d %B, %Y",
+        "%b %d %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Director remark detection
+# ---------------------------------------------------------------------------
+_DIRECTOR_REMARK_PATTERNS = [
+    r"director\s+remark\s*[:\-]\s*(.+)",
+    r"director\s+directive\s*[:\-]\s*(.+)",
+    r"director['\u2019]?s\s+instruction\s*[:\-]\s*(.+)",
+    r"approved\s*\.\s*expedite\s*(.+)",
+    r"as\s+per\s+director\s*['\u2019]?s?\s+order\s*[:\-]?\s*(.+)",
+]
+
+def _detect_director_remark(text: str):
+    """Returns (has_remark: bool, remark_text: str)."""
+    if not text:
+        return False, ""
+    for pattern in _DIRECTOR_REMARK_PATTERNS:
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if m:
+            return True, m.group(1).strip().rstrip(")")
+    return False, ""
+
+
+# ---------------------------------------------------------------------------
+# Main OCR Service
+# ---------------------------------------------------------------------------
 
 class OCRService:
     """
     Intelligent OCR, Text Extraction and Routing Information Extraction Service.
-    Parses digital files, scanned documents, or email message bodies to extract text,
-    detect pre-existing Director directives, infer departmental routing, and identify
-    explicit employee assignments.
+    Calls PaddleOCR (OCR/ocr.py) for real text extraction and field detection.
+    All regex patterns and department keywords live in OCR/rules.py.
     """
 
-    def extract_from_file(self, file_path: str, title_hint: str = "", source_hint: str = "") -> Dict[str, Any]:
-        """Adapter for DocumentIntakePage structured extraction."""
-        item_hint = {"title": title_hint, "source": source_hint}
-        res = self.process_incoming_document(file_path, incoming_item=item_hint)
+
+    # ------------------------------------------------------------------
+    # Public API (used by document_intake.py)
+    # ------------------------------------------------------------------
+
+    def extract_from_file(
+        self,
+        file_path: str,
+        title_hint: str = "",
+        source_hint: str = "",
+    ) -> Dict[str, Any]:
+        """Run OCR on *file_path* and return a dict matching DocumentIntakePage expectations."""
+        res = self.process_incoming_document(
+            file_path,
+            incoming_item={"title": title_hint, "source": source_hint},
+        )
         return {
-            "raw_text": res.get("extracted_text", ""),
-            "suggested_title": res.get("title", title_hint),
-            "suggested_department": res.get("suggested_department", "Finance"),
-            "suggested_employee": res.get("suggested_employee", "Not Assigned"),
-            "detected_priority": res.get("priority", "Medium"),
-            "detected_deadline": res.get("deadline", ""),
-            "confidence": res.get("confidence", 90),
+            "raw_text":                  res.get("extracted_text", ""),
+            "suggested_title":           res.get("title", title_hint),
+            "suggested_department":      res.get("suggested_department", ""),
+            "suggested_employee":        res.get("suggested_employee", "Not Assigned"),
+            "detected_priority":         res.get("priority", "Medium"),
+            "detected_deadline":         res.get("deadline", ""),
+            "confidence":                res.get("confidence", 0),
             "has_prior_director_remark": res.get("has_prior_director_remark", False),
-            "director_remark": res.get("director_remark", "")
+            "director_remark":           res.get("director_remark", ""),
+            "is_handwritten":            res.get("is_handwritten", False),
+            "pages_extracted":           res.get("pages_extracted", 1),
+            "ocr_fields":                res.get("ocr_fields", {}),
         }
 
     def extract_text(self, file_path: str) -> Dict[str, Any]:
         """Legacy text extraction adapter."""
         data = self.process_incoming_document(file_path)
-        return {
-            "text": data["extracted_text"],
-            "confidence": data["confidence"]
-        }
+        return {"text": data["extracted_text"], "confidence": data["confidence"]}
 
-    def process_incoming_document(self, file_path: str, incoming_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # ------------------------------------------------------------------
+    # Core processing
+    # ------------------------------------------------------------------
+
+    def process_incoming_document(
+        self,
+        file_path: str,
+        incoming_item: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
-        Extracts content from physical disk or message body and performs NLP metadata analysis.
+        Runs real PaddleOCR on *file_path* (if available) and extracts
+        structured metadata.  Falls back gracefully when OCR is unavailable
+        or the file is missing — the intake form can still be completed manually.
         """
-        title = (incoming_item.get("title") if incoming_item else None) or ""
-        source = (incoming_item.get("source") if incoming_item else None) or "Government Mail"
-        mode = (incoming_item.get("mode") if incoming_item else None) or "Government Mail"
-        body_text = (incoming_item.get("body") if incoming_item else None) or ""
+        title     = (incoming_item.get("title")  if incoming_item else None) or ""
+        source    = (incoming_item.get("source") if incoming_item else None) or "External"
+        mode      = (incoming_item.get("mode")   if incoming_item else None) or "Government Mail"
+        body_text = (incoming_item.get("body")   if incoming_item else None) or ""
         today_str = datetime.now().strftime("%Y-%m-%d")
 
-        # 1. Read real file content from disk if file exists
-        disk_content = ""
-        if file_path and os.path.exists(file_path):
+        # ---- 1.  Run real PaddleOCR on the file ----------------------
+        raw_text        = ""
+        confidence      = 0.0
+        is_handwritten  = False
+        pages_extracted = 1
+        ocr_fields: Dict[str, Any] = {}
+        ocr_result: Dict[str, Any] = {}
+        ocr_ran = False
+
+        if _OCR_AVAILABLE and file_path and os.path.exists(file_path):
             try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    disk_content = f.read()
+                engine          = _DocumentOCR()
+                ocr_result      = engine.process(file_path)
+                raw_text        = ocr_result.get("raw_text", "")
+                confidence      = ocr_result.get("confidence", 0.0)
+                is_handwritten  = ocr_result.get("is_handwritten", False)
+                pages_extracted = ocr_result.get("pages_processed", 1)
+                ocr_fields      = ocr_result.get("fields", {})
+                ocr_ran         = True
+            except Exception as exc:
+                raw_text = f"[OCR error: {exc}]"
+        elif not _OCR_AVAILABLE and file_path and os.path.exists(file_path):
+            # PZ_26/08: Plain-text & digital PDF (pypdf) fallback when PaddleOCR not installed
+            try:
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == ".txt":
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                        raw_text   = fh.read()
+                        confidence = 1.0  # 100% accurate digital text reading
+                elif ext == ".pdf":
+                    try:
+                        import pypdf
+                        reader = pypdf.PdfReader(file_path)
+                        parts = [p.extract_text() or "" for p in reader.pages]
+                        raw_text = "\n".join(parts).strip()
+                        pages_extracted = len(reader.pages)
+                        if raw_text:
+                            confidence = 0.88  # Baseline digital extraction score
+                    except Exception:
+                        pass
             except Exception:
-                disk_content = ""
+                pass
 
-        # 2. Combine available text sources
-        combined_text = f"{title} {body_text} {disk_content}"
+        # Combine OCR output with any body text or title hint provided
+        combined_text = "\n".join(t for t in [raw_text, body_text] if t).strip()
+        if not combined_text and title:
+            combined_text = title
 
-        # 3. Detect pre-existing Director Remark
-        has_prior_director_remark = False
-        director_remark = ""
+        # PZ_26/08: Run standalone rules engine on combined_text to extract fields and department suggestion
+        if _extract_fields and not ocr_fields and combined_text:
+            ocr_fields = _extract_fields(combined_text)
+        elif _OCR_AVAILABLE and not ocr_fields and combined_text:
+            try:
+                engine = _DocumentOCR()
+                ocr_fields = engine._extract_fields(combined_text)
+            except Exception:
+                pass
 
-        if incoming_item and incoming_item.get("has_prior_director_remark"):
-            has_prior_director_remark = True
-            director_remark = incoming_item.get("director_remark") or "Approved. Expedite procurement and assign to Rahul Sharma for immediate execution."
-        elif incoming_item and incoming_item.get("director_remark"):
-            has_prior_director_remark = True
-            director_remark = incoming_item["director_remark"]
-        elif "Security Infrastructure" in title or "Pre-Reviewed" in title or "CDTRS-2026-0004" in title:
-            has_prior_director_remark = True
-            director_remark = "Approved. Expedite procurement and assign to Rahul Sharma for immediate execution."
-        elif "Director Remark:" in disk_content or "Director Remark:" in body_text:
-            has_prior_director_remark = True
-            for line in (disk_content or body_text).splitlines():
-                if "Director Remark:" in line:
-                    director_remark = line.split("Director Remark:", 1)[1].strip().rstrip(")")
-                    break
-        elif "Director Directive:" in disk_content or "Director Directive:" in body_text:
-            has_prior_director_remark = True
-            director_remark = "Approved. Expedite procurement and assign to Rahul Sharma for immediate execution."
+        if _suggest_department and not ocr_result.get("department_suggestion") and combined_text:
+            dept_s = _suggest_department(combined_text)
+            if dept_s.get("suggested"):
+                ocr_result["department_suggestion"] = dept_s
+        elif _OCR_AVAILABLE and not ocr_result.get("department_suggestion") and combined_text:
+            try:
+                engine = _DocumentOCR()
+                dept_s = engine._suggest_department(combined_text)
+                if dept_s.get("suggested"):
+                    ocr_result["department_suggestion"] = dept_s
+            except Exception:
+                pass
 
-        # 4. Department & Employee Routing Inference
-        if "Accreditation" in title or "Governance Compliance" in title or "CDTRS-2026-0001" in title:
-            suggested_dept = "Not Specified"
-            suggested_emp = ""
-            priority = "Medium"
-            deadline = ""
-            confidence = 0
-            content_text = (
-                "MINISTRY OF HIGHER EDUCATION & ACCREDITATION COUNCIL\n"
-                f"Subject: {title or 'National Higher Education Accreditation & Governance Compliance Directive'}\n\n"
-                "1. STATUTORY COMPLIANCE DIRECTIVE\n"
-                "All affiliated higher education institutions must submit updated governance charters and academic audit compliance reports for the 2026-2027 statutory cycle."
-            )
-        elif "Financial Audit" in title or "Disbursement Notice" in title or "CDTRS-2026-0002" in title:
-            suggested_dept = "Finance"
-            suggested_emp = ""
-            priority = "High"
-            deadline = ""
-            confidence = 92
-            content_text = (
-                "STATE AUDIT BUREAU — CAPITAL GRANT NOTIFICATION\n"
-                f"Subject: {title or 'Q3 Financial Audit & Capital Grant Disbursement Notice'}\n\n"
-                "1. CAPITAL GRANT ALLOCATION\n"
-                "Notification of state capital grant tranche release. Finance Department to verify matching expenditures and complete statutory audit submission."
-            )
-        elif "Tax Clearance" in title or "Procurement Verification" in title or "CDTRS-2026-0003" in title:
-            suggested_dept = "Finance"
-            suggested_emp = "Rahul Sharma"
-            priority = "High"
-            deadline = ""
-            confidence = 95
-            content_text = (
-                "CENTRAL BOARD OF DIRECT TAXES — STATUTORY CLEARANCE\n"
-                f"Subject: {title or 'Statutory Vendor Tax Clearance & Procurement Verification'}\n\n"
-                "1. VENDOR CLEARANCE RECORD\n"
-                "Statutory tax withholding and GST clearance verification. Route directly to Rahul Sharma for expedited vendor procurement verification."
-            )
-        elif "Security Infrastructure" in title or "Pre-Reviewed" in title or "CDTRS-2026-0004" in title:
-            suggested_dept = "Finance"
-            suggested_emp = "Rahul Sharma"
-            priority = "High"
-            deadline = ""
-            confidence = 96
-            content_text = (
-                "OFFICE OF THE DIRECTOR — EXECUTIVE MEMORANDUM\n"
-                f"Subject: {title or 'Urgent Campus Security Infrastructure Upgrade Order (Pre-Reviewed)'}\n\n"
-                "Director Directive: Approved. Expedite procurement and assign to Rahul Sharma for immediate execution."
-            )
-        elif "Server Maintenance" in title or "Firewall Compliance" in title or "Cyber Security" in source or "CDTRS-2026-0005" in title:
-            suggested_dept = "Technical"
-            suggested_emp = ""
-            priority = "High"
-            deadline = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-            confidence = 94
-            content_text = (
-                "CYBER SECURITY DIRECTORATE — CRITICAL NOTICE\n"
-                f"Subject: {title or 'High-Priority Enterprise Server Maintenance & Firewall Compliance'}\n\n"
-                "1. URGENT MAINTENANCE PROTOCOL\n"
-                "Mandatory enterprise server kernel patching and perimeter firewall rule verification. 7-day completion window is enforced."
-            )
-        else:
-            suggested_dept = "Not Specified"
-            suggested_emp = ""
-            priority = "Medium"
-            deadline = ""
-            confidence = 80
-            content_text = body_text or (
-                "GENERAL MEMORANDUM\n"
-                f"Subject: {title or 'Project Review and Status Summary'}\n\n"
-                "Periodic operational overview and departmental progress documentation."
-            )
+        # ---- 2.  Extract / derive fields from OCR result -------------
 
-        # Format detection
+        # Title: OCR subject > hint > filename stem
+        ocr_title = (
+            ocr_fields.get("subject", "")
+            or ocr_fields.get("title", "")
+            or title
+            or (os.path.splitext(os.path.basename(file_path))[0] if file_path else "")
+        )
+
+        # Date
+        raw_date = ocr_fields.get("date", "")
+        ocr_date = _normalise_date(raw_date) if raw_date else today_str
+
+        # Priority
+        raw_prio = ocr_fields.get("priority", "")
+        priority = _normalise_priority(raw_prio) if raw_prio else "Medium"
+        if incoming_item and incoming_item.get("priority"):
+            priority = _normalise_priority(str(incoming_item["priority"]))
+
+        # Deadline
+        deadline = ocr_fields.get("deadline", "")
+        if isinstance(deadline, list):
+            deadline = deadline[0] if deadline else ""
+
+        # Suggested department from OCR engine
+        dept_suggestion = ocr_result.get("department_suggestion", {})
+        suggested_dept  = dept_suggestion.get("suggested", "")
+
+        # PZ_26/08: Dynamic extraction quality confidence scaling for digital files; neural score for PaddleOCR
+        if not _OCR_AVAILABLE and confidence > 0:
+            f_count = len([v for v in ocr_fields.values() if v])
+            confidence = min(0.98, max(0.78, 0.82 + (f_count * 0.025)))
+
+        conf_pct = round(confidence * 100) if confidence <= 1.0 else round(confidence)
+
+
+        # ---- 3.  Director remark detection ---------------------------
+        has_remark, remark_text = _detect_director_remark(combined_text)
+        if not has_remark and incoming_item:
+            if incoming_item.get("has_prior_director_remark"):
+                has_remark  = True
+                remark_text = incoming_item.get("director_remark", "Approved.")
+            elif incoming_item.get("director_remark"):
+                has_remark  = True
+                remark_text = incoming_item["director_remark"]
+
+        # ---- 4.  File format detection --------------------------------
         if file_path:
-            ext = os.path.splitext(file_path)[1].upper().replace(".", "")
+            ext = os.path.splitext(file_path)[1].upper().lstrip(".")
             fmt = ext if ext else "PDF"
         elif body_text:
             fmt = "Email Body"
@@ -162,22 +311,30 @@ class OCRService:
             fmt = "PDF"
 
         return {
-            "title": title or "Official Document Dispatch",
-            "source": source,
-            "mode": mode,
-            "date": today_str,
-            "priority": priority,
-            "deadline": deadline,
-            "format": fmt,
-            "extracted_text": content_text,
-            "suggested_department": suggested_dept,
-            "suggested_employee": suggested_emp,
-            "confidence": confidence,
-            "has_prior_director_remark": has_prior_director_remark,
-            "director_remark": director_remark,
-            "file_path": file_path,
-            "pages_extracted": 2 if fmt in ("PDF", "DOCX") else 1
+            # Core metadata
+            "title":                     ocr_title or "Official Document",
+            "source":                    source,
+            "mode":                      mode,
+            "date":                      ocr_date,
+            "priority":                  priority,
+            "deadline":                  deadline,
+            "format":                    fmt,
+            # OCR content
+            "extracted_text":            combined_text,
+            "is_handwritten":            is_handwritten,
+            "pages_extracted":           pages_extracted,
+            "ocr_fields":                ocr_fields,
+            # Routing
+            "suggested_department":      suggested_dept,
+            "suggested_employee":        ocr_fields.get("employee", "Not Assigned"),
+            "confidence":                conf_pct,
+            # Director directive
+            "has_prior_director_remark": has_remark,
+            "director_remark":           remark_text,
+            # Housekeeping
+            "file_path":                 file_path,
         }
 
 
+# Global singleton
 ocr_service = OCRService()

@@ -58,7 +58,7 @@ class WorkflowService:
                 repo.route_document(
                     document_id=int(doc_id),
                     route_type="DS_TO_DIRECTOR",
-                    to_user_id=2,
+                    # Backend resolves Director role — no hardcoded user ID needed
                     remarks=document.get("remarks")
                 )
                 return True

@@ -37,7 +37,11 @@ class DocumentModel:
     has_director_routing_instruction: bool = False
     director_routing_raw_text: Optional[str] = None
     routing_instruction_confidence: int = 0
+    routing_confidence: Optional[float] = None
+    routing_reason: Optional[str] = None
+    is_director_instruction: bool = False
     file_path: Optional[str] = None
+
     file_type: Optional[str] = None
     format: Optional[str] = None
     ocr_text: Optional[str] = None
@@ -116,9 +120,12 @@ class DocumentModel:
             suggested_department_name=data.get("suggested_department_name"),
             suggested_employee_id=data.get("suggested_employee_id"),
             suggested_employee_name=data.get("suggested_employee_name"),
-            has_director_routing_instruction=bool(data.get("has_director_routing_instruction", False)),
-            director_routing_raw_text=data.get("director_routing_raw_text"),
-            routing_instruction_confidence=int(data.get("routing_instruction_confidence", 0)),
+            has_director_routing_instruction=bool(data.get("has_director_routing_instruction", data.get("is_director_instruction", False))),
+            director_routing_raw_text=data.get("director_routing_raw_text") or data.get("routing_reason"),
+            routing_instruction_confidence=int(data.get("routing_instruction_confidence") or round((data.get("routing_confidence") or 0.95) * 100) if (data.get("routing_confidence") and data.get("routing_confidence") <= 1.0) else (data.get("routing_confidence") or 0)),
+            routing_confidence=float(data.get("routing_confidence")) if data.get("routing_confidence") is not None else None,
+            routing_reason=data.get("routing_reason"),
+            is_director_instruction=bool(data.get("is_director_instruction", data.get("has_director_routing_instruction", False))),
             file_path=data.get("file_path"),
             file_type=data.get("file_type") or data.get("format"),
             format=data.get("format") or data.get("file_type", "PDF"),
@@ -166,6 +173,9 @@ class DocumentModel:
             "has_director_routing_instruction": self.has_director_routing_instruction,
             "director_routing_raw_text": self.director_routing_raw_text,
             "routing_instruction_confidence": self.routing_instruction_confidence,
+            "routing_confidence": self.routing_confidence,
+            "routing_reason": self.routing_reason,
+            "is_director_instruction": self.is_director_instruction,
             "file_path": self.file_path,
             "file_type": self.file_type,
             "format": self.format,
@@ -177,3 +187,4 @@ class DocumentModel:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+

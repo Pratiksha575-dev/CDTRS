@@ -44,3 +44,4 @@ backend/uploads/
 scratch/*.db
 scratch/*.pdf
 scratch/test_uploads/
+*.zip

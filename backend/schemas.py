@@ -100,6 +100,22 @@ class LoginResponse(BaseModel):
     user:         UserResponse
 
 
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class ResetPasswordRequest(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
+
+class AdminPasswordResetRequest(BaseModel):
+    username: str
+    new_password: str
+
+
 # =========================================================
 # INCOMING MESSAGES (Mail Intake)
 # =========================================================
@@ -168,6 +184,13 @@ class DocumentResponse(BaseModel):
     target_department_name: Optional[str] = None
     assigned_employee_name: Optional[str] = None
     assigned_employee_id:   Optional[int] = None
+    suggested_department_id: Optional[int] = None
+    suggested_department_name: Optional[str] = None
+    suggested_employee_id:   Optional[int] = None
+    suggested_employee_name: Optional[str] = None
+    routing_confidence:      Optional[float] = None
+    routing_reason:          Optional[str] = None
+    is_director_instruction: bool = False
     created_by:             int
     source_message_id:      Optional[int] = None
     ocr_status:             OCRStatus
@@ -194,6 +217,13 @@ class DocumentListResponse(BaseModel):
     target_department_name: Optional[str] = None
     assigned_employee_name: Optional[str] = None
     assigned_employee_id:   Optional[int] = None
+    suggested_department_id: Optional[int] = None
+    suggested_department_name: Optional[str] = None
+    suggested_employee_id:   Optional[int] = None
+    suggested_employee_name: Optional[str] = None
+    routing_confidence:      Optional[float] = None
+    routing_reason:          Optional[str] = None
+    is_director_instruction: bool = False
     director_remark:        Optional[str] = None
     hod_remark:             Optional[str] = None
     ocr_status:             OCRStatus
@@ -204,6 +234,7 @@ class DocumentListResponse(BaseModel):
     updated_at:             datetime
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 # =========================================================

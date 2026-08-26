@@ -15,12 +15,13 @@ class RoutingService:
         pass
 
     def route_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
-        """DS routes document to Director for review."""
+        """DS routes document to Director for review.
+        Backend resolves routing to the Director role — no hardcoded user ID required.
+        """
         repo = get_repository()
         return repo.route_document(
             document_id=document_id,
             route_type=RouteTypeEnum.DS_TO_DIRECTOR.value,
-            to_user_id=2,
             remarks=remarks or "Forwarded for Director Review"
         )
 
@@ -34,8 +35,23 @@ class RoutingService:
         """DS routes document to HOD for departmental processing."""
         repo = get_repository()
         if department_id is None and department_name:
-            dept_map = {"Finance": 1, "Procurement": 2, "Human Resources": 3, "HR": 3, "Maintenance": 4, "IT": 5}
-            department_id = dept_map.get(department_name, 1)
+            # Look up real department ID from the backend
+            try:
+                departments = repo.get_departments()
+                for dept in departments:
+                    if dept.name.lower() == department_name.lower() or (
+                        dept.name.lower() in department_name.lower()
+                        or department_name.lower() in dept.name.lower()
+                    ):
+                        department_id = dept.id
+                        break
+            except Exception:
+                pass
+        if department_id is None:
+            raise ValueError(
+                f"Cannot route to HOD: department ID is unknown for '{department_name}'. "
+                "Ensure the backend is connected and departments are registered."
+            )
         return repo.route_document(
             document_id=document_id,
             route_type=RouteTypeEnum.DS_TO_HOD.value,
@@ -84,6 +100,7 @@ class RoutingService:
         Analyzes Director remark text for explicit routing/assignment instructions.
         Strictly differentiates between a general review comment (e.g. 'Reviewed', 'Please check')
         and an explicit delegation/assignment directive (e.g. 'Route to Finance', 'Assign to Rahul Sharma').
+        Employee names are matched against the live backend user list — not a hardcoded table.
         """
         t = f" {(remark or '').lower().strip()} "
         dept = None
@@ -91,73 +108,28 @@ class RoutingService:
         emp = None
         emp_id = None
 
-        # Employee detection across all 5 departments
-        emp_database = [
-            # Finance (1)
-            ("rahul sharma", "Rahul Sharma", 101, "Finance", 1),
-            ("rahul", "Rahul Sharma", 101, "Finance", 1),
-            ("sneha patil", "Sneha Patil", 102, "Finance", 1),
-            ("sneha", "Sneha Patil", 102, "Finance", 1),
-            ("amit joshi", "Amit Joshi", 103, "Finance", 1),
-            ("amit", "Amit Joshi", 103, "Finance", 1),
-            ("neha kulkarni", "Neha Kulkarni", 104, "Finance", 1),
-            ("neha", "Neha Kulkarni", 104, "Finance", 1),
-            ("rohan mehta", "Rohan Mehta", 105, "Finance", 1),
-            ("rohan", "Rohan Mehta", 105, "Finance", 1),
-            # Procurement (2)
-            ("priya verma", "Priya Verma", 201, "Procurement", 2),
-            ("priya", "Priya Verma", 201, "Procurement", 2),
-            ("arjun shah", "Arjun Shah", 202, "Procurement", 2),
-            ("arjun", "Arjun Shah", 202, "Procurement", 2),
-            ("karan desai", "Karan Desai", 203, "Procurement", 2),
-            ("karan", "Karan Desai", 203, "Procurement", 2),
-            ("pooja nair", "Pooja Nair", 204, "Procurement", 2),
-            ("pooja", "Pooja Nair", 204, "Procurement", 2),
-            ("vivek more", "Vivek More", 205, "Procurement", 2),
-            ("vivek", "Vivek More", 205, "Procurement", 2),
-            # HR (3)
-            ("anjali gupta", "Anjali Gupta", 301, "Human Resources", 3),
-            ("anjali", "Anjali Gupta", 301, "Human Resources", 3),
-            ("rohit singh", "Rohit Singh", 302, "Human Resources", 3),
-            ("rohit", "Rohit Singh", 302, "Human Resources", 3),
-            ("meera joshi", "Meera Joshi", 303, "Human Resources", 3),
-            ("meera", "Meera Joshi", 303, "Human Resources", 3),
-            ("tanvi shah", "Tanvi Shah", 304, "Human Resources", 3),
-            ("tanvi", "Tanvi Shah", 304, "Human Resources", 3),
-            ("akash patil", "Akash Patil", 305, "Human Resources", 3),
-            ("akash", "Akash Patil", 305, "Human Resources", 3),
-            # Maintenance (4)
-            ("suresh pawar", "Suresh Pawar", 401, "Maintenance", 4),
-            ("suresh", "Suresh Pawar", 401, "Maintenance", 4),
-            ("kavita more", "Kavita More", 402, "Maintenance", 4),
-            ("kavita", "Kavita More", 402, "Maintenance", 4),
-            ("nikhil patil", "Nikhil Patil", 403, "Maintenance", 4),
-            ("nikhil", "Nikhil Patil", 403, "Maintenance", 4),
-            ("snehal jadhav", "Snehal Jadhav", 404, "Maintenance", 4),
-            ("snehal", "Snehal Jadhav", 404, "Maintenance", 4),
-            ("omkar shinde", "Omkar Shinde", 405, "Maintenance", 4),
-            ("omkar", "Omkar Shinde", 405, "Maintenance", 4),
-            # IT (5)
-            ("aditya kulkarni", "Aditya Kulkarni", 501, "IT", 5),
-            ("aditya", "Aditya Kulkarni", 501, "IT", 5),
-            ("riya shah", "Riya Shah", 502, "IT", 5),
-            ("riya", "Riya Shah", 502, "IT", 5),
-            ("siddhant joshi", "Siddhant Joshi", 503, "IT", 5),
-            ("siddhant", "Siddhant Joshi", 503, "IT", 5),
-            ("isha patil", "Isha Patil", 504, "IT", 5),
-            ("isha", "Isha Patil", 504, "IT", 5),
-            ("yash deshmukh", "Yash Deshmukh", 505, "IT", 5),
-            ("yash", "Yash Deshmukh", 505, "IT", 5),
-        ]
-
-        # 1. Check for specific individual employee name
-        for token, full_name, e_id, d_name, d_id in emp_database:
-            if f" {token} " in t or f" {token}," in t or f" {token}." in t or f" {token}:" in t:
-                emp = full_name
-                emp_id = e_id
-                dept = d_name
-                dept_id = d_id
-                break
+        # 1. Check for specific individual employee name against live backend users
+        try:
+            repo = get_repository()
+            live_users = repo.get_users(role="Employee")
+            for user in live_users:
+                name_lower = user.full_name.lower()
+                first_name = name_lower.split()[0] if name_lower.split() else ""
+                if (
+                    f" {name_lower} " in t
+                    or f" {first_name} " in t
+                    or f" {first_name}," in t
+                    or f" {first_name}." in t
+                    or f" {first_name}:" in t
+                ):
+                    emp = user.full_name
+                    emp_id = user.id
+                    dept = user.department_name
+                    dept_id = user.department_id
+                    break
+        except Exception:
+            # If backend unreachable during remark analysis, proceed without employee match
+            pass
 
         # 2. Check for explicit routing/assignment action intent
         routing_action_markers = (
@@ -167,23 +139,39 @@ class RoutingService:
         )
         has_routing_intent = any(marker in t for marker in routing_action_markers) or (emp is not None)
 
-        # 3. Department detection (only if routing intent is present or explicit department instruction)
+        # 3. Department detection via keyword matching (text pattern only — ID resolved from backend)
         if has_routing_intent and not dept:
-            if "procurement" in t or "purchase" in t or "tender" in t:
-                dept = "Procurement"
-                dept_id = 2
-            elif "finance" in t or "accounts" in t:
-                dept = "Finance"
-                dept_id = 1
-            elif "human resource" in t or " hr " in t or "hr department" in t or "hr dept" in t:
-                dept = "Human Resources"
-                dept_id = 3
-            elif "maintenance" in t or "facility" in t:
-                dept = "Maintenance"
-                dept_id = 4
-            elif "it department" in t or "it dept" in t or "it cell" in t or "information technology" in t or "tech department" in t:
-                dept = "IT"
-                dept_id = 5
+            dept_keywords = [
+                ("procurement", "Procurement"),
+                ("purchase", "Procurement"),
+                ("tender", "Procurement"),
+                ("finance", "Finance"),
+                ("accounts", "Finance"),
+                ("human resource", "Human Resources"),
+                (" hr ", "Human Resources"),
+                ("hr department", "Human Resources"),
+                ("hr dept", "Human Resources"),
+                ("maintenance", "Maintenance"),
+                ("facility", "Maintenance"),
+                ("it department", "IT"),
+                ("it dept", "IT"),
+                ("it cell", "IT"),
+                ("information technology", "IT"),
+                ("tech department", "IT"),
+            ]
+            for keyword, dept_name in dept_keywords:
+                if keyword in t:
+                    dept = dept_name
+                    # Resolve dept_id from backend
+                    try:
+                        repo = get_repository()
+                        for bd in repo.get_departments():
+                            if bd.name.lower() == dept_name.lower():
+                                dept_id = bd.id
+                                break
+                    except Exception:
+                        pass
+                    break
 
         # Must have both routing intent AND an identified department or employee
         has_instruction = bool(has_routing_intent and (dept or emp))

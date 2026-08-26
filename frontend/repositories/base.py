@@ -40,6 +40,11 @@ class BaseRepository(ABC):
         pass
 
     @abstractmethod
+    def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
+        """Resets the password for the specified user after verifying current password."""
+        pass
+
+    @abstractmethod
     def get_users(self, role: Optional[str] = None, department_id: Optional[int] = None) -> List[UserModel]:
         """Retrieves list of users filtered by role or department."""
         pass
@@ -228,4 +233,28 @@ class BaseRepository(ABC):
     @abstractmethod
     def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves role-specific dashboard metrics and document queues."""
+        pass
+
+    # =========================================================
+    # OCR & ROUTING INTELLIGENCE
+    # =========================================================
+
+    @abstractmethod
+    def get_ocr_result(self, document_id: int) -> Dict[str, Any]:
+        """Returns the OCR record for a document (status, extracted text, fields)."""
+        pass
+
+    @abstractmethod
+    def trigger_ocr(self, document_id: int) -> Dict[str, Any]:
+        """Triggers server-side OCR processing on the stored document file."""
+        pass
+
+    @abstractmethod
+    def get_routing_suggestion(self, document_id: int) -> Dict[str, Any]:
+        """Returns the advisory routing suggestion generated from OCR + Director remarks."""
+        pass
+
+    @abstractmethod
+    def analyze_routing(self, document_id: int) -> Dict[str, Any]:
+        """Generates (or refreshes) the routing suggestion for a document."""
         pass

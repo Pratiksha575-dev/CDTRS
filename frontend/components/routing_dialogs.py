@@ -55,22 +55,34 @@ class RouteToHODDialog(QDialog):
         departments = repo.get_departments()
         self._dept_map = {}
         target_dept = self.document.target_department_name or self.document.suggested_department_name
+        if not target_dept and self.document.id:
+            try:
+                s_data = repo.get_routing_suggestion(self.document.id) or {}
+                target_dept = s_data.get("suggested_department_name")
+            except Exception:
+                pass
 
-        for d in departments:
-            if d.name.lower() != "administration":
-                self.dept_combo.addItem(d.name, d.id)
-                self._dept_map[d.name] = d.id
+        if departments:
+            for d in departments:
+                if d.name.lower() != "administration":
+                    self.dept_combo.addItem(d.name, d.id)
+                    self._dept_map[d.name] = d.id
+        else:
+            self.dept_combo.addItem("⚠ Could not load departments — check connection", None)
 
-        if not departments:
-            default_depts = [("Finance", 1), ("Procurement", 2), ("HR", 3), ("Maintenance", 4), ("Technical", 5)]
-            for name, did in default_depts:
-                self.dept_combo.addItem(name, did)
-                self._dept_map[name] = did
-
-        if target_dept:
+        if target_dept and departments:
+            alias_map = {
+                "human resources": "hr",
+                "it": "technical",
+                "information technology": "technical",
+                "systems": "technical",
+                "operations": "administration",
+                "legal": "administration",
+            }
+            norm_target = alias_map.get(target_dept.lower(), target_dept).lower()
             for i in range(self.dept_combo.count()):
-                item_text = self.dept_combo.itemText(i)
-                if target_dept.lower() in item_text.lower() or item_text.lower() in target_dept.lower():
+                item_text = self.dept_combo.itemText(i).lower()
+                if norm_target == item_text or norm_target in item_text or item_text in norm_target:
                     self.dept_combo.setCurrentIndex(i)
                     break
 
@@ -102,7 +114,9 @@ class RouteToHODDialog(QDialog):
 
     def get_data(self) -> Dict[str, Any]:
         dept_name = self.dept_combo.currentText()
-        dept_id = self.dept_combo.currentData() or self._dept_map.get(dept_name, 1)
+        dept_id = self.dept_combo.currentData()  # Real backend ID stored as item data
+        if dept_id is None:
+            dept_id = self._dept_map.get(dept_name)
         return {
             "department_name": dept_name,
             "department_id": dept_id,
@@ -148,17 +162,29 @@ class RouteToEmployeeDialog(QDialog):
         employees = repo.get_users(role="Employee")
         self._emp_map = {}
         target_emp = self.document.assigned_employee_name or self.document.suggested_employee_name
+        if not target_emp and self.document.id:
+            try:
+                s_data = repo.get_routing_suggestion(self.document.id) or {}
+                target_emp = s_data.get("suggested_employee_name")
+            except Exception:
+                pass
 
-        for emp in employees:
-            label = f"{emp.full_name} ({emp.department_name or 'General'})"
-            self.emp_combo.addItem(label, emp.id)
-            self._emp_map[label] = emp.id
-            if target_emp and emp.full_name.lower() in target_emp.lower():
-                self.emp_combo.setCurrentText(label)
+        if employees:
+            for emp in employees:
+                label = f"{emp.full_name} ({emp.department_name or 'General'})"
+                self.emp_combo.addItem(label, emp.id)
+                self._emp_map[label] = emp.id
 
-        if not employees:
-            self.emp_combo.addItem("Rahul Sharma (Finance)", 101)
-            self.emp_combo.addItem("Priya Verma (Procurement)", 201)
+            if target_emp:
+                for i in range(self.emp_combo.count()):
+                    item_text = self.emp_combo.itemText(i).lower()
+                    if target_emp.lower() in item_text:
+                        self.emp_combo.setCurrentIndex(i)
+                        break
+        else:
+            # Backend unreachable — show placeholder; do not insert hardcoded employees
+            self.emp_combo.addItem("⚠ Could not load employees — check connection", None)
+
 
         form.addRow("Select Staff:", self.emp_combo)
         layout.addLayout(form)
@@ -187,7 +213,7 @@ class RouteToEmployeeDialog(QDialog):
         self.accept()
 
     def get_data(self) -> Dict[str, Any]:
-        emp_id = self.emp_combo.currentData() or 5
+        emp_id = self.emp_combo.currentData()  # None if no real employee loaded
         emp_text = self.emp_combo.currentText().split(" (")[0]
         return {
             "employee_id": emp_id,
@@ -236,12 +262,13 @@ class HODAssignEmployeeDialog(QDialog):
         if not employees:
             employees = repo.get_users(role="Employee")
 
-        for emp in employees:
-            label = f"{emp.full_name} ({emp.department_name or 'General'})"
-            self.emp_combo.addItem(label, emp.id)
-
-        if not employees:
-            self.emp_combo.addItem("Rahul Sharma (Finance)", 101)
+        if employees:
+            for emp in employees:
+                label = f"{emp.full_name} ({emp.department_name or 'General'})"
+                self.emp_combo.addItem(label, emp.id)
+        else:
+            # Backend unreachable — show placeholder; do not insert hardcoded employees
+            self.emp_combo.addItem("⚠ Could not load employees — check connection", None)
 
         self.instructions_input = QTextEdit()
         self.instructions_input.setPlaceholderText("Enter specific task instructions, deliverables, or target timeline...")
@@ -275,7 +302,7 @@ class HODAssignEmployeeDialog(QDialog):
         self.accept()
 
     def get_data(self) -> Dict[str, Any]:
-        emp_id = self.emp_combo.currentData() or 5
+        emp_id = self.emp_combo.currentData()  # None if no real employee loaded
         emp_text = self.emp_combo.currentText().split(" (")[0]
         return {
             "assigned_to_id": emp_id,

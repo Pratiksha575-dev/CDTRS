@@ -130,21 +130,18 @@ class InboxPage(QWidget):
 
         for row, doc in enumerate(self.documents):
             source = (doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "External"
-            sender = (doc.created_by if isinstance(doc, DocumentModel) and doc.created_by else (doc.source if isinstance(doc, DocumentModel) else doc.get("sender"))) or "Internal"
-            # Generate clean sender label
-            if "Finance" in source:
-                sender_label = "comptroller.audit@gov.in"
-            elif "IT Cell" in source:
-                sender_label = "it.procurement@domain.org"
-            elif "Security" in source:
-                sender_label = "security.directorate@gov.in"
-            else:
-                sender_label = "directorate.general@gov.in"
+
+            # Use actual sender data from backend — prefer created_by (email/username), fall back to source
+            sender_label = (
+                (doc.created_by if isinstance(doc, DocumentModel) else doc.get("created_by"))
+                or source
+                or "External Dispatch"
+            )
 
             title = (doc.title if isinstance(doc, DocumentModel) else doc.get("title")) or ""
             mode = (doc.mode if isinstance(doc, DocumentModel) else doc.get("mode")) or "Government Mail"
             fmt = (doc.format or doc.file_type if isinstance(doc, DocumentModel) else doc.get("format", doc.get("file_type"))) or "PDF"
-            
+
             att_cnt = (doc.attachment_count if isinstance(doc, DocumentModel) else doc.get("attachment_count")) or 0
             if att_cnt > 1:
                 att_str = f"📎 {att_cnt} attachments"
@@ -167,6 +164,7 @@ class InboxPage(QWidget):
             status_item = QTableWidgetItem(str(status))
             status_item.setForeground(Qt.darkBlue)
             self.table.setItem(row, 7, status_item)
+
 
     def process_selected(self):
         """Emits selected intake item for OCR extraction and document processing."""

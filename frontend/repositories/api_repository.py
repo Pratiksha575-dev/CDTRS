@@ -90,19 +90,26 @@ class APIRepository(BaseRepository):
             api_client.clear_auth_token()
             self._current_user = None
 
+    def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
+        """Resets user password via backend reset endpoint requiring current password."""
+        payload = {
+            "username": username.strip(),
+            "old_password": old_password,
+            "new_password": new_password.strip()
+        }
+        response = api_client.post(Endpoints.AUTH_RESET_PASSWORD, json=payload)
+        return bool(response)
+
     def get_departments(self) -> List[DepartmentModel]:
         """Retrieves list of all institutional departments from backend."""
         try:
             data = api_client.get(Endpoints.DEPARTMENTS_LIST)
             return [DepartmentModel.from_dict(d) for d in data]
         except Exception:
-            return [
-                DepartmentModel(id=1, name="Finance", code="FIN"),
-                DepartmentModel(id=2, name="Procurement", code="PROC"),
-                DepartmentModel(id=3, name="Human Resources", code="HR"),
-                DepartmentModel(id=4, name="Maintenance", code="MAINT"),
-                DepartmentModel(id=5, name="Technical", code="TECH"),
-            ]
+            # Return empty list — callers must handle gracefully.
+            # Do NOT return hardcoded departments with fake IDs as they would
+            # cause documents to be routed to wrong departments.
+            return []
 
     def get_users(self, role: Optional[str] = None, department_id: Optional[int] = None) -> List[UserModel]:
         """
@@ -479,3 +486,52 @@ class APIRepository(BaseRepository):
     def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves role-specific dashboard metrics."""
         return api_client.get(Endpoints.DASHBOARD_STATS)
+
+    # =========================================================
+    # OCR & ROUTING INTELLIGENCE
+    # =========================================================
+
+    def get_ocr_result(self, document_id: int) -> Dict[str, Any]:
+        """
+        Returns the OCR record for a document including:
+          - ocr_status, ocr_engine, confidence, extracted_text
+          - extracted_fields (list of {field_name, extracted_value, confidence})
+        """
+        try:
+            return api_client.get(Endpoints.OCR_GET(document_id)) or {}
+        except Exception:
+            return {}
+
+    def trigger_ocr(self, document_id: int) -> Dict[str, Any]:
+        """
+        Asks the backend to run real PaddleOCR on the stored document file.
+        Called after a document is created via the intake pipeline.
+        """
+        try:
+            return api_client.post(Endpoints.OCR_PROCESS(document_id), json={}) or {}
+        except Exception:
+            return {}
+
+    def get_routing_suggestion(self, document_id: int) -> Dict[str, Any]:
+        """
+        Fetches the advisory routing suggestion persisted in the database.
+        Returns a dict with: suggested_department_name, suggested_employee_name,
+        routing_confidence (0.0–1.0), routing_reason, is_director_instruction.
+        """
+        try:
+            return api_client.get(Endpoints.ROUTING_SUGGESTION(document_id)) or {}
+        except Exception:
+            return {}
+
+    def analyze_routing(self, document_id: int) -> Dict[str, Any]:
+        """
+        Triggers fresh routing analysis for a document (uses OCR text +
+        Director remark if present).  Returns same structure as get_routing_suggestion.
+        """
+        try:
+            return api_client.post(
+                Endpoints.ROUTING_ANALYZE(document_id),
+                json={"include_director_remark": True}
+            ) or {}
+        except Exception:
+            return {}

@@ -1,0 +1,12 @@
+GOVERNMENT OF INDIA - MINISTRY OF COMMUNICATIONS
+Ref No: TECH/2026/089
+Date: 26/08/2026
+Priority: High Priority
+Deadline: 15/09/2026
+Subject: Annual Server Infrastructure and Cloud Database Portal Renewal
+From: Additional Secretary, Systems and IT Infrastructure
+To: Technical Department
+Director Remark: Forward to Systems Engineer for technical review and implementation.
+
+Regarding the IT portal software licenses, network firewall upgrades, and server backup,
+the technical department is requested to submit the cyber security compliance audit report.

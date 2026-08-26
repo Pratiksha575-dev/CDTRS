@@ -1,8 +1,36 @@
 import os
+import sys
 import hashlib
 import re
 from datetime import datetime, timedelta, date
+from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+# ---------------------------------------------------------------------------
+# Ensure the OCR engine (OCR/ocr.py + OCR/rules.py) is importable from the
+# backend. Works whether the backend is run from the project root or from
+# backend/ sub-directory.
+# ---------------------------------------------------------------------------
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_OCR_DIR = _PROJECT_ROOT / "OCR"
+if str(_OCR_DIR) not in sys.path:
+    sys.path.insert(0, str(_OCR_DIR))
+
+try:
+    from OCR import DocumentOCR as _DocumentOCR
+    _OCR_AVAILABLE = True
+except ImportError:
+    _OCR_AVAILABLE = False
+    _DocumentOCR = None
+
+# PZ_26/08: Import standalone extract_fields helper from rules
+try:
+    from rules import extract_fields as _extract_fields
+except ImportError:
+    try:
+        from OCR.rules import extract_fields as _extract_fields
+    except ImportError:
+        _extract_fields = None
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, and_
@@ -162,6 +190,16 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[mod
     if not user or not verify_password(password, user.password_hash) or not user.is_active:
         return None
     return user
+
+
+def update_user_password(db: Session, user_id: int, new_password: str) -> bool:
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return False
+    user.password_hash = hash_password(new_password)
+    user.updated_at = datetime.utcnow()
+    db.commit()
+    return True
 
 
 # =========================================================
@@ -642,10 +680,13 @@ def return_to_ds(db: Session, doc_id: int, ds_user_id: int, remarks: Optional[st
             remark_type=RemarkType.DIRECTOR
         )
         db.add(remark_entry)
-        generate_routing_suggestion(db, doc_id, include_director_remark=True)
+
+    # Always generate / refresh routing suggestion on return to DS
+    generate_routing_suggestion(db, doc_id, include_director_remark=True)
 
     doc.updated_at = datetime.now()
     doc.version += 1
+
 
     db_route = models.DocumentRoute(
         document_id=doc_id,
@@ -969,77 +1010,158 @@ def get_attachment(db: Session, attachment_id: int) -> Optional[models.Attachmen
 # =========================================================
 
 def trigger_ocr_processing(db: Session, doc_id: int) -> Optional[models.DocumentOCR]:
+    """
+    Runs real PaddleOCR on the first original attachment found for this document.
+    Falls back to metadata-based text if no file is on disk or PaddleOCR unavailable.
+    Stores extracted_text, confidence, structured fields, and triggers routing suggestion.
+    """
     doc = get_document(db, doc_id)
     if not doc:
         return None
 
-    ocr_record = db.query(models.DocumentOCR).filter(models.DocumentOCR.document_id == doc_id).first()
+    # Upsert OCR record
+    ocr_record = db.query(models.DocumentOCR).filter(
+        models.DocumentOCR.document_id == doc_id
+    ).first()
     if not ocr_record:
         ocr_record = models.DocumentOCR(
             document_id=doc_id,
             ocr_status=OCRStatus.PROCESSING,
-            ocr_engine="PaddleOCR/Tesseract-v5-Engine"
+            ocr_engine="PaddleOCR-v3"
         )
         db.add(ocr_record)
     else:
         ocr_record.ocr_status = OCRStatus.PROCESSING
         ocr_record.error_message = None
+        ocr_record.ocr_engine = "PaddleOCR-v3"
 
     doc.ocr_status = OCRStatus.PROCESSING
     db.commit()
 
-    # Simulate intelligent text extraction from document metadata/description
-    extracted_text = (
-        f"CENTRAL DOCUMENT RECORD\n"
-        f"Subject: {doc.title}\n"
-        f"Reference No: {doc.reference_no}\n"
-        f"Date of Receipt: {doc.received_date}\n"
-        f"Originating Source: {doc.source or 'Internal'}\n"
-        f"Description: {doc.description or 'Official correspondence requiring department review and verification.'}\n"
-        f"Priority Level: {doc.priority.value}\n"
-    )
+    extracted_text = ""
+    confidence = 0.0
+    is_handwritten = False
+    ocr_fields: dict = {}
+    ocr_error: Optional[str] = None
+
+    # ---- Attempt real PaddleOCR on stored file -------------------------
+    file_processed = False
+    attachment = db.query(models.Attachment).filter(
+        models.Attachment.document_id == doc_id,
+        models.Attachment.attachment_type == AttachmentType.ORIGINAL
+    ).order_by(models.Attachment.id).first()
+
+    if attachment:
+        # Build absolute file path from storage_key (relative to UPLOAD_DIR)
+        upload_dir = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+        full_path = (upload_dir / attachment.storage_key).resolve()
+
+        if full_path.exists():
+            if _OCR_AVAILABLE:
+                try:
+                    engine = _DocumentOCR()
+                    result = engine.process(str(full_path))
+                    extracted_text = result.get("raw_text", "")
+                    confidence = result.get("confidence", 0.0)
+                    is_handwritten = result.get("is_handwritten", False)
+                    ocr_fields = result.get("fields", {})
+                    file_processed = True
+                except Exception as e:
+                    ocr_error = f"PaddleOCR error: {str(e)[:300]}"
+            else:
+                # PZ_26/08: Digital text & PDF fallback when PaddleOCR not installed
+                ext = full_path.suffix.lower()
+                try:
+                    if ext == ".txt":
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as fh:
+                            extracted_text = fh.read().strip()
+                            if extracted_text:
+                                confidence = 1.0
+                                file_processed = True
+                    elif ext == ".pdf":
+                        try:
+                            import pypdf
+                            reader = pypdf.PdfReader(str(full_path))
+                            extracted_text = "\n".join(p.extract_text() or "" for p in reader.pages).strip()
+                            if extracted_text:
+                                confidence = 1.0
+                                file_processed = True
+                        except Exception:
+                            pass
+                    if file_processed and _extract_fields:
+                        ocr_fields = _extract_fields(extracted_text)
+                except Exception as e:
+                    ocr_error = f"Digital extraction error: {str(e)[:300]}"
+                if not file_processed:
+                    ocr_error = "PaddleOCR not installed. Run: pip install paddlepaddle paddleocr"
+        else:
+            ocr_error = f"Attachment file not found on disk: {full_path}"
+    else:
+        ocr_error = "No original attachment found for this document."
+
+    # ---- Fallback: build text from document metadata if no file was read
+    if not file_processed or not extracted_text.strip():
+        extracted_text = (
+            f"Subject: {doc.title}\n"
+            f"Reference No: {doc.reference_no}\n"
+            f"Date of Receipt: {doc.received_date}\n"
+            f"Originating Source: {doc.source or 'Internal'}\n"
+            f"Description: {doc.description or ''}\n"
+            f"Priority Level: {doc.priority.value}\n"
+        )
+        # PZ_26/08: Fallback confidence is 0.0 when no OCR/file processing ran (removed fake 0.80)
+        confidence = 0.0
+
+    # Append handwriting note
+    hw_note = " [handwritten]" if is_handwritten else ""
+    engine_name = f"PaddleOCR-v3{hw_note}" if _OCR_AVAILABLE else "Metadata-Fallback"
 
     ocr_record.extracted_text = extracted_text
-    ocr_record.confidence = 0.94
-    ocr_record.ocr_status = OCRStatus.COMPLETED
+    ocr_record.confidence = confidence
+    ocr_record.ocr_status = OCRStatus.COMPLETED if not (ocr_error and not file_processed) else OCRStatus.FAILED
     ocr_record.processed_at = datetime.now()
-    doc.ocr_status = OCRStatus.COMPLETED
+    ocr_record.ocr_engine = engine_name
+    ocr_record.error_message = ocr_error if not file_processed else None
+    doc.ocr_status = ocr_record.ocr_status
 
-    # Extract standard structured fields
-    fields_data = [
-        {"name": "TITLE", "value": doc.title, "conf": 0.96, "page": 1, "text": f"Subject: {doc.title}"},
-        {"name": "REFERENCE_NO", "value": doc.reference_no, "conf": 0.98, "page": 1, "text": f"Reference No: {doc.reference_no}"},
-        {"name": "SOURCE", "value": doc.source or "External", "conf": 0.90, "page": 1, "text": f"Originating Source: {doc.source}"},
-        {"name": "PRIORITY", "value": doc.priority.value, "conf": 0.95, "page": 1, "text": f"Priority Level: {doc.priority.value}"},
+    # ---- Persist structured fields (never overwrite DS-verified fields) ----
+    # PZ_26/08: Store actual confidence score instead of hardcoded 0.98/0.99/0.90/0.95
+    always_fields = [
+        {"name": "TITLE",        "value": doc.title,             "conf": confidence, "page": 1},
+        {"name": "REFERENCE_NO", "value": doc.reference_no,      "conf": confidence, "page": 1},
+        {"name": "SOURCE",       "value": doc.source or "",      "conf": confidence, "page": 1},
+        {"name": "PRIORITY",     "value": doc.priority.value,    "conf": confidence, "page": 1},
+    ]
+    # Add OCR-extracted fields (from real PaddleOCR run)
+    ocr_extracted_fields = [
+        {"name": k.upper(), "value": (v if isinstance(v, str) else ", ".join(v)),
+         "conf": confidence, "page": 1}
+        for k, v in ocr_fields.items() if v
     ]
 
-    for f_item in fields_data:
+    for f_item in always_fields + ocr_extracted_fields:
         existing_f = db.query(models.DocumentExtractedField).filter(
             models.DocumentExtractedField.document_id == doc_id,
             models.DocumentExtractedField.field_name == f_item["name"]
         ).first()
-
         if not existing_f:
-            new_f = models.DocumentExtractedField(
+            db.add(models.DocumentExtractedField(
                 document_id=doc_id,
                 field_name=f_item["name"],
                 extracted_value=f_item["value"],
                 confidence=f_item["conf"],
                 source_page=f_item["page"],
-                source_text=f_item["text"]
-            )
-            db.add(new_f)
-        else:
-            # Update only if not already verified by DS
-            if not existing_f.verified_value:
-                existing_f.extracted_value = f_item["value"]
-                existing_f.confidence = f_item["conf"]
-                existing_f.source_text = f_item["text"]
+                source_text=f_item["value"][:500] if f_item["value"] else None
+            ))
+        elif not existing_f.verified_value:
+            # Only update unverified fields
+            existing_f.extracted_value = f_item["value"]
+            existing_f.confidence = f_item["conf"]
 
     db.commit()
     db.refresh(ocr_record)
 
-    # Automatically generate routing suggestion
+    # Automatically generate routing suggestion from the fresh OCR text
     generate_routing_suggestion(db, doc_id, include_director_remark=True)
 
     return ocr_record
@@ -1090,69 +1212,153 @@ def reanalyze_document_ocr(db: Session, doc_id: int) -> Optional[models.Document
 # =========================================================
 
 def generate_routing_suggestion(db: Session, doc_id: int, include_director_remark: bool = True) -> Optional[models.RoutingSuggestion]:
+    """
+    Generates a routing suggestion using:
+    1. Explicit Director remark analysis (employee name / department mention)
+    2. Keyword scoring of real OCR extracted text against all live departments
+    3. Fallback to document title + metadata keyword match
+    Never uses hardcoded department names.
+    """
     doc = get_document(db, doc_id)
     if not doc:
         return None
 
+    depts = get_departments(db)
     suggested_dept_id: Optional[int] = None
     suggested_emp_id: Optional[int] = None
-    confidence = 0.75
-    reason = "Extracted from document content keywords."
+    confidence = 0.60
+    reason = "Insufficient content to determine department."
     source = RoutingSource.DOCUMENT_CONTENT
     is_director_instruction = False
 
-    # 1. Check for Explicit Director Instruction first
+    # ------------------------------------------------------------------
+    # 1. Director Remark — explicit delegation detection
+    # ------------------------------------------------------------------
     if include_director_remark and doc.director_remark:
         remark_lower = doc.director_remark.lower()
 
-        # Find if any department name or code is mentioned
-        depts = get_departments(db)
-        for dept in depts:
-            if dept.name.lower() in remark_lower or (dept.code and dept.code.lower() in remark_lower):
-                suggested_dept_id = dept.id
-                confidence = 0.92
-                reason = f"Explicit instruction in Director's remark referencing {dept.name} department."
-                source = RoutingSource.DIRECTOR_REMARK
-                is_director_instruction = True
-                break
-
-        # Find if any employee name is mentioned
+        # Employee name check (highest specificity)
         employees = get_employees(db)
         for emp in employees:
             if emp.full_name.lower() in remark_lower:
                 suggested_emp_id = emp.user_id or (
-                    db.query(models.User.id).filter(models.User.employee_id == emp.id).scalar()
+                    db.query(models.User.id)
+                    .filter(models.User.employee_id == emp.id)
+                    .scalar()
                 )
                 suggested_dept_id = emp.department_id
                 confidence = 0.95
-                reason = f"Explicit instruction in Director's remark directing assignment to {emp.full_name} ({emp.department.name})."
+                dept_name = emp.department.name if emp.department else "unknown"
+                reason = (
+                    f"Director remark explicitly names {emp.full_name} "
+                    f"({dept_name}) for assignment."
+                )
                 source = RoutingSource.DIRECTOR_REMARK
                 is_director_instruction = True
                 break
 
-    # 2. Fallback to Content / Metadata keywords if Director remark had no specific match
-    if not suggested_dept_id:
-        text_to_search = f"{doc.title} {doc.description or ''} {doc.source or ''}".lower()
-        depts = get_departments(db)
-        for dept in depts:
-            if dept.name.lower() in text_to_search or (dept.code and dept.code.lower() in text_to_search):
-                suggested_dept_id = dept.id
-                confidence = 0.82
-                reason = f"Content matched keywords for {dept.name} Department."
-                source = RoutingSource.DOCUMENT_CONTENT
-                break
+        # Department name / code check
+        if not suggested_dept_id:
+            for dept in depts:
+                if dept.name.lower() in remark_lower or (
+                    dept.code and dept.code.lower() in remark_lower
+                ):
+                    suggested_dept_id = dept.id
+                    confidence = 0.92
+                    reason = (
+                        f"Director remark explicitly references {dept.name} department."
+                    )
+                    source = RoutingSource.DIRECTOR_REMARK
+                    is_director_instruction = True
+                    break
 
-    # If still not found, default to first department if exists
+    # ------------------------------------------------------------------
+    # 2. Keyword scoring against real OCR extracted text
+    # ------------------------------------------------------------------
     if not suggested_dept_id:
-        first_dept = db.query(models.Department).filter(models.Department.is_active == True).first()
-        if first_dept:
-            suggested_dept_id = first_dept.id
-            confidence = 0.60
-            reason = "General administrative routing default."
-            source = RoutingSource.SOURCE_METADATA
+        # Gather text: OCR extracted text (best) OR title+description+source
+        ocr_record = db.query(models.DocumentOCR).filter(
+            models.DocumentOCR.document_id == doc_id,
+            models.DocumentOCR.ocr_status == OCRStatus.COMPLETED
+        ).first()
+
+        text_to_score = (
+            (ocr_record.extracted_text or "")
+            if ocr_record
+            else ""
+        )
+        # Supplement with metadata
+        text_to_score += f" {doc.title} {doc.description or ''} {doc.source or ''}"
+        text_lower = text_to_score.lower()
+
+        # Score each department using keyword counts
+        dept_scores: Dict[int, float] = {}
+        for dept in depts:
+            score = 0.0
+            # Department name / code direct hit (high weight)
+            if dept.name.lower() in text_lower:
+                score += 5.0
+            if dept.code and dept.code.lower() in text_lower:
+                score += 4.0
+
+            # Word-level keyword scoring using rules loaded from the OCR module
+            try:
+                from OCR.rules import DEPARTMENT_KEYWORDS, DEPARTMENT_SCORE_WEIGHTS
+                # Match the dept name to a rules key (case-insensitive prefix/substring)
+                matched_key = None
+                for rules_key in DEPARTMENT_KEYWORDS:
+                    if (
+                        rules_key.lower() == dept.name.lower()
+                        or rules_key.lower() in dept.name.lower()
+                        or dept.name.lower() in rules_key.lower()
+                    ):
+                        matched_key = rules_key
+                        break
+
+                if matched_key:
+                    for kw in DEPARTMENT_KEYWORDS[matched_key]:
+                        import re as _re
+                        hits = len(_re.findall(_re.escape(kw), text_lower))
+                        if hits:
+                            weight = DEPARTMENT_SCORE_WEIGHTS.get(kw, 1.0)
+                            score += hits * weight
+            except ImportError:
+                pass
+
+            if score > 0:
+                dept_scores[dept.id] = score
+
+        if dept_scores:
+            best_dept_id = max(dept_scores, key=dept_scores.__getitem__)
+            best_score = dept_scores[best_dept_id]
+            total_score = sum(dept_scores.values())
+            norm_conf = min(0.90, round(best_score / total_score, 3)) if total_score else 0.60
+
+            suggested_dept_id = best_dept_id
+            confidence = norm_conf
+            dept_obj = next((d for d in depts if d.id == best_dept_id), None)
+            source_label = "OCR text" if (ocr_record and ocr_record.extracted_text) else "document metadata"
+            reason = (
+                f"Keyword scoring of {source_label} matched "
+                f"{dept_obj.name if dept_obj else 'department'} "
+                f"(score {best_score:.1f} / {total_score:.1f})."
+            )
+            source = RoutingSource.DOCUMENT_CONTENT
+
+    # ------------------------------------------------------------------
+    # 3. Final fallback — first available department
+    # ------------------------------------------------------------------
+    if not suggested_dept_id and depts:
+        suggested_dept_id = depts[0].id
+        confidence = 0.50
+        reason = "No strong keyword match found; defaulting to first department."
+        source = RoutingSource.SOURCE_METADATA
 
     # Upsert routing suggestion
-    suggestion = db.query(models.RoutingSuggestion).filter(models.RoutingSuggestion.document_id == doc_id).first()
+    suggestion = db.query(models.RoutingSuggestion).filter(
+        models.RoutingSuggestion.document_id == doc_id
+    ).first()
+
     if not suggestion:
         suggestion = models.RoutingSuggestion(
             document_id=doc_id,
@@ -1162,19 +1368,17 @@ def generate_routing_suggestion(db: Session, doc_id: int, include_director_remar
             routing_reason=reason,
             routing_source=source,
             is_director_instruction=is_director_instruction,
-            generated_at=datetime.now()
+            generated_at=datetime.now(),
         )
         db.add(suggestion)
-    else:
-        # Update advisory values if not already confirmed
-        if not suggestion.confirmed_at:
-            suggestion.suggested_department_id = suggested_dept_id
-            suggestion.suggested_employee_id = suggested_emp_id
-            suggestion.routing_confidence = confidence
-            suggestion.routing_reason = reason
-            suggestion.routing_source = source
-            suggestion.is_director_instruction = is_director_instruction
-            suggestion.generated_at = datetime.now()
+    elif not suggestion.confirmed_at:          # Preserve DS-confirmed suggestions
+        suggestion.suggested_department_id = suggested_dept_id
+        suggestion.suggested_employee_id = suggested_emp_id
+        suggestion.routing_confidence = confidence
+        suggestion.routing_reason = reason
+        suggestion.routing_source = source
+        suggestion.is_director_instruction = is_director_instruction
+        suggestion.generated_at = datetime.now()
 
     db.commit()
     db.refresh(suggestion)

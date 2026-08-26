@@ -24,3 +24,13 @@ bcrypt>=4.0.0
 python-multipart>=0.0.9
 psycopg2-binary>=2.9.0
 websockets>=12.0
+
+# ---------------------------------------------------------------------
+# 3. OCR Engine (OCR/ folder — PaddleOCR + supporting libs)
+# ---------------------------------------------------------------------
+paddlepaddle>=2.6.0        # CPU version — use paddlepaddle-gpu for GPU
+paddleocr>=2.7.0
+PyMuPDF>=1.23.0            # Pure-Python PDF renderer (no Poppler needed)
+opencv-python>=4.8.0       # Image processing / pre-processing
+Pillow>=10.0.0             # Fallback image loader (TIFF, WEBP, etc.)
+numpy>=1.24.0

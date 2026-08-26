@@ -36,6 +36,7 @@ class DocumentsPage(QWidget):
         self.selected_document: Optional[DocumentModel] = None
         self.all_documents: List[DocumentModel] = []
         self.setup_ui()
+        self._load_department_filter()  # Populate department dropdown from backend
         self.load_documents()
         from services.event_bus import event_bus
         event_bus.data_changed.connect(self.load_documents)
@@ -106,14 +107,8 @@ class DocumentsPage(QWidget):
         self.deadline_filter.currentIndexChanged.connect(self.apply_filters)
 
         self.department_filter = QComboBox()
-        self.department_filter.addItems([
-            "All Departments",
-            "Finance",
-            "Procurement",
-            "HR",
-            "FCTD",
-            "Maintenance"
-        ])
+        self.department_filter.addItem("All Departments")
+        # Departments are loaded dynamically from backend in _load_department_filter()
         self.department_filter.currentIndexChanged.connect(self.apply_filters)
 
         clear_button = QPushButton("Clear")
@@ -170,6 +165,28 @@ class DocumentsPage(QWidget):
     def load_documents(self):
         self.all_documents = document_service.get_documents()
         self.apply_filters()
+
+    def _load_department_filter(self):
+        """Populates the department filter dropdown from the live backend."""
+        from repositories.provider import get_repository
+        self.department_filter.blockSignals(True)
+        current_text = self.department_filter.currentText()
+        self.department_filter.clear()
+        self.department_filter.addItem("All Departments")
+        try:
+            repo = get_repository()
+            departments = repo.get_departments()
+            for dept in departments:
+                self.department_filter.addItem(dept.name)
+        except Exception:
+            pass  # If backend unavailable, only "All Departments" is shown
+        # Restore selection
+        idx = self.department_filter.findText(current_text)
+        if idx >= 0:
+            self.department_filter.setCurrentIndex(idx)
+        else:
+            self.department_filter.setCurrentIndex(0)
+        self.department_filter.blockSignals(False)
 
     def apply_filters(self):
         search_query = self.search_input.text().strip().lower()

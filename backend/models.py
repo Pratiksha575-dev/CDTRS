@@ -282,6 +282,49 @@ class Document(Base):
             return self.current_owner_id
         return None
 
+    @property
+    def suggested_department_name(self) -> Optional[str]:
+        if self.routing_suggestion and self.routing_suggestion.suggested_department:
+            return self.routing_suggestion.suggested_department.name
+        return None
+
+    @property
+    def suggested_department_id(self) -> Optional[int]:
+        if self.routing_suggestion:
+            return self.routing_suggestion.suggested_department_id
+        return None
+
+    @property
+    def suggested_employee_name(self) -> Optional[str]:
+        if self.routing_suggestion and self.routing_suggestion.suggested_employee:
+            return self.routing_suggestion.suggested_employee.full_name
+        return None
+
+    @property
+    def suggested_employee_id(self) -> Optional[int]:
+        if self.routing_suggestion:
+            return self.routing_suggestion.suggested_employee_id
+        return None
+
+    @property
+    def routing_confidence(self) -> Optional[float]:
+        if self.routing_suggestion:
+            return self.routing_suggestion.routing_confidence
+        return None
+
+    @property
+    def routing_reason(self) -> Optional[str]:
+        if self.routing_suggestion:
+            return self.routing_suggestion.routing_reason
+        return None
+
+    @property
+    def is_director_instruction(self) -> bool:
+        if self.routing_suggestion:
+            return bool(self.routing_suggestion.is_director_instruction)
+        return False
+
+
 
 
 # =========================================================

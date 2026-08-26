@@ -104,17 +104,39 @@ class PriorityEnum(str, Enum):
         return cls.MEDIUM.value
 
 
+# PZ_26/08: Streamlined IngestionModeEnum to 3 canonical modes (Government Mail, Outlook, Manual Upload)
+# with aliases mapping Fax, Physical, Scanned, Direct Submission into Manual Upload.
 class IngestionModeEnum(str, Enum):
     """Channels / modes through which documents enter CDTRS."""
-    EMAIL = "Email"
     GOVERNMENT_MAIL = "Government Mail"
-    INTERNAL_OUTLOOK = "Internal Outlook"
-    INTRANET = "Intranet"
-    FAX = "Fax"
-    SCANNED = "Scanned"
-    PHYSICAL = "Physical"
-    DIRECT_SUBMISSION = "Direct Submission"
-    OTHER = "Other"
+    OUTLOOK = "Outlook"
+    MANUAL_UPLOAD = "Manual Upload"
+
+    # Backward compatibility aliases
+    INTERNAL_OUTLOOK = "Outlook"
+    EMAIL = "Outlook"
+    INTRANET = "Government Mail"
+    FAX = "Manual Upload"
+    SCANNED = "Manual Upload"
+    PHYSICAL = "Manual Upload"
+    DIRECT_SUBMISSION = "Manual Upload"
+    OTHER = "Manual Upload"
+
+    @classmethod
+    def normalize(cls, val: str) -> str:
+        if not val:
+            return cls.MANUAL_UPLOAD.value
+        s = str(val).strip().lower()
+        if any(k in s for k in ("gov", "nic", "government")):
+            return cls.GOVERNMENT_MAIL.value
+        if any(k in s for k in ("outlook", "email", "intranet")):
+            return cls.OUTLOOK.value
+        if any(k in s for k in ("manual", "scan", "fax", "physical", "direct", "upload")):
+            return cls.MANUAL_UPLOAD.value
+        for m in cls:
+            if m.value.lower() == s:
+                return m.value
+        return cls.MANUAL_UPLOAD.value
 
 
 class RouteTypeEnum(str, Enum):

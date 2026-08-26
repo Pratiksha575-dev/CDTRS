@@ -43,6 +43,11 @@ class AuthService:
         """Checks if a user session is actively authenticated."""
         return self.get_current_user() is not None
 
+    def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
+        """Resets user password through repository layer verifying current password."""
+        repo = get_repository()
+        return repo.reset_password(username, old_password, new_password)
+
 
 # Global singleton service instance
 auth_service = AuthService()

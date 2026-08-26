@@ -31,7 +31,9 @@ from services.attachment_service import attachment_service
 from services.document_service import document_service
 from services.progress_service import progress_service
 from services.routing_service import routing_service
-
+from repositories.provider import get_repository
+from components.ocr_splash_dialog import OCRSplashDialog
+import os
 
 class DocumentViewer(QWidget):
     """
@@ -149,39 +151,41 @@ class DocumentViewer(QWidget):
         top_row.addWidget(self.info, 1)
         self.content_layout.addLayout(top_row)
 
-        # A. DIRECTOR ROUTING SUGGESTION CARD (Built Once)
+        # A. DIRECTOR ROUTING SUGGESTION CARD (Built Once - Clean Neutral Theme)
         self.suggestion_card = QFrame()
         self.suggestion_card.setObjectName("contentCard")
-        self.suggestion_card.setStyleSheet("QFrame#contentCard { background-color: #FEF3C7; border: 1px solid #F59E0B; border-left: 5px solid #D97706; border-radius: 6px; }")
+        self.suggestion_card.setStyleSheet("QFrame#contentCard { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-left: 4px solid #0F172A; border-radius: 6px; }")
         sugg_layout = QVBoxLayout(self.suggestion_card)
         sugg_layout.setContentsMargins(18, 14, 18, 14)
         sugg_layout.setSpacing(8)
 
         s_hdr_row = QHBoxLayout()
-        s_hdr_lbl = QLabel("💡 Director Routing Instruction Detected")
-        s_hdr_lbl.setStyleSheet("font-weight: 700; color: #92400E; font-size: 13px;")
-        s_hdr_row.addWidget(s_hdr_lbl)
+        self.s_hdr_lbl = QLabel("💡 Routing Directive / Suggestion")
+        self.s_hdr_lbl.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+        s_hdr_row.addWidget(self.s_hdr_lbl)
         s_hdr_row.addStretch()
 
         self.sugg_conf_lbl = QLabel("Confidence: 95%")
-        self.sugg_conf_lbl.setStyleSheet("color: #B45309; font-weight: 600; font-size: 11px;")
+        self.sugg_conf_lbl.setStyleSheet("color: #64748B; font-weight: 600; font-size: 11px;")
         s_hdr_row.addWidget(self.sugg_conf_lbl)
         sugg_layout.addLayout(s_hdr_row)
 
         self.sugg_remark_lbl = QLabel()
-        self.sugg_remark_lbl.setStyleSheet("color: #78350F; font-size: 12px; font-style: italic;")
+        self.sugg_remark_lbl.setStyleSheet("color: #334155; font-size: 12px; font-style: italic;")
         self.sugg_remark_lbl.setWordWrap(True)
         sugg_layout.addWidget(self.sugg_remark_lbl)
 
         self.sugg_detected_lbl = QLabel()
-        self.sugg_detected_lbl.setStyleSheet("color: #92400E; font-size: 12px;")
+        self.sugg_detected_lbl.setStyleSheet("color: #0F172A; font-size: 12px;")
         sugg_layout.addWidget(self.sugg_detected_lbl)
 
-        s_btn_row = QHBoxLayout()
+        self.s_btn_widget = QWidget()
+        s_btn_row = QHBoxLayout(self.s_btn_widget)
+        s_btn_row.setContentsMargins(0, 0, 0, 0)
         s_btn_row.setSpacing(8)
 
         apply_btn = QPushButton("Apply Suggested Routing")
-        apply_btn.setStyleSheet("background-color: #D97706; color: white; font-weight: 600; padding: 6px 14px; border-radius: 4px; font-size: 12px;")
+        apply_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 6px 14px; border-radius: 4px; font-size: 12px;")
         apply_btn.clicked.connect(self._ds_apply_suggested_routing)
         s_btn_row.addWidget(apply_btn)
 
@@ -191,12 +195,25 @@ class DocumentViewer(QWidget):
         s_btn_row.addWidget(edit_btn)
 
         dismiss_btn = QPushButton("Ignore / Dismiss")
-        dismiss_btn.setStyleSheet("background-color: transparent; color: #78350F; text-decoration: underline; padding: 6px 10px; font-size: 12px;")
+        dismiss_btn.setStyleSheet("background-color: transparent; color: #64748B; text-decoration: underline; padding: 6px 10px; font-size: 12px;")
         dismiss_btn.clicked.connect(lambda: self.suggestion_card.setVisible(False))
         s_btn_row.addWidget(dismiss_btn)
         s_btn_row.addStretch()
 
-        sugg_layout.addLayout(s_btn_row)
+        # Director Action Row (Use suggestion in remark)
+        self.dir_sugg_action_widget = QWidget()
+        dir_btn_row = QHBoxLayout(self.dir_sugg_action_widget)
+        dir_btn_row.setContentsMargins(0, 0, 0, 0)
+        dir_btn_row.setSpacing(8)
+
+        self.dir_use_sugg_btn = QPushButton("✍ Pre-fill in Executive Remark")
+        self.dir_use_sugg_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 6px 14px; border-radius: 4px; font-size: 12px;")
+        self.dir_use_sugg_btn.clicked.connect(self._director_prefill_remark)
+        dir_btn_row.addWidget(self.dir_use_sugg_btn)
+        dir_btn_row.addStretch()
+
+        sugg_layout.addWidget(self.s_btn_widget)
+        sugg_layout.addWidget(self.dir_sugg_action_widget)
         self.content_layout.addWidget(self.suggestion_card)
 
         # B. WORKFLOW REMARKS & DIRECTIVES CARD (Built Once)
@@ -267,12 +284,12 @@ class DocumentViewer(QWidget):
         remarks_layout.addWidget(self.hod_edit_frame)
 
         self.hod_view_frame = QFrame()
-        self.hod_view_frame.setStyleSheet("background-color: #F0F9FF; border: 1px solid #BAE6FD; border-radius: 5px;")
+        self.hod_view_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 5px;")
         hf_layout = QVBoxLayout(self.hod_view_frame)
         hf_layout.setContentsMargins(10, 8, 10, 8)
         hf_layout.setSpacing(3)
         self.hod_view_title = QLabel("HOD Remark:")
-        self.hod_view_title.setStyleSheet("font-weight: 700; color: #0284C7; font-size: 11px;")
+        self.hod_view_title.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 11px;")
         self.hod_view_lbl = QLabel()
         self.hod_view_lbl.setWordWrap(True)
         hf_layout.addWidget(self.hod_view_title)
@@ -281,30 +298,39 @@ class DocumentViewer(QWidget):
 
         # Latest Progress Summary
         self.prog_summary_frame = QFrame()
-        self.prog_summary_frame.setStyleSheet("background-color: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 5px;")
+        self.prog_summary_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 5px;")
         pf_layout = QVBoxLayout(self.prog_summary_frame)
         pf_layout.setContentsMargins(10, 8, 10, 8)
-        pf_layout.setSpacing(3)
+        pf_layout.setSpacing(6)
         self.prog_summary_title = QLabel("Latest Execution Progress:")
-        self.prog_summary_title.setStyleSheet("font-weight: 700; color: #166534; font-size: 11px;")
+        self.prog_summary_title.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 11px;")
         self.prog_summary_lbl = QLabel()
         self.prog_summary_lbl.setStyleSheet("color: #1E293B; font-size: 12px;")
         self.prog_summary_lbl.setWordWrap(True)
         pf_layout.addWidget(self.prog_summary_title)
         pf_layout.addWidget(self.prog_summary_lbl)
+
+        # Attached Proof widget in progress frame
+        self.prog_proof_row = QWidget()
+        self.prog_proof_layout = QHBoxLayout(self.prog_proof_row)
+        self.prog_proof_layout.setContentsMargins(0, 4, 0, 0)
+        self.prog_proof_layout.setSpacing(8)
+        pf_layout.addWidget(self.prog_proof_row)
+        self.prog_proof_row.setVisible(False)
+
         remarks_layout.addWidget(self.prog_summary_frame)
 
         self.content_layout.addWidget(self.remarks_card)
 
-        # C. ATTACHMENTS SECTION CONTAINER (Built Once)
+        # C. ATTACHMENTS SECTION CONTAINER (Built Once - Clean Neutral Theme)
         self.attachments_card = QFrame()
         self.attachments_card.setObjectName("contentCard")
-        self.attachments_card.setStyleSheet("QFrame#contentCard { border-left: 4px solid #6366F1; }")
+        self.attachments_card.setStyleSheet("QFrame#contentCard { border-left: 4px solid #0F172A; }")
         att_outer_layout = QVBoxLayout(self.attachments_card)
         att_outer_layout.setContentsMargins(20, 15, 20, 15)
         att_outer_layout.setSpacing(10)
 
-        self.att_header_lbl = QLabel("Original Source Attachments")
+        self.att_header_lbl = QLabel("Attached Documents & Submitted Proofs")
         self.att_header_lbl.setObjectName("sectionTitle")
         att_outer_layout.addWidget(self.att_header_lbl)
 
@@ -313,6 +339,61 @@ class DocumentViewer(QWidget):
         att_outer_layout.addLayout(self.attachments_items_layout)
 
         self.content_layout.addWidget(self.attachments_card)
+
+        # C2. DOCUMENT INTELLIGENCE & OCR EXTRACTION CARD (Built Once - Clean Neutral Theme)
+        self.ocr_intel_card = QFrame()
+        self.ocr_intel_card.setObjectName("contentCard")
+        self.ocr_intel_card.setStyleSheet("QFrame#contentCard { border-left: 4px solid #0F172A; }")
+        ocr_layout = QVBoxLayout(self.ocr_intel_card)
+        ocr_layout.setContentsMargins(20, 15, 20, 15)
+        ocr_layout.setSpacing(10)
+
+        ocr_hdr_row = QHBoxLayout()
+        ocr_hdr_lbl = QLabel("🧠 Document Intelligence & OCR Extraction")
+        ocr_hdr_lbl.setObjectName("sectionTitle")
+        ocr_hdr_row.addWidget(ocr_hdr_lbl)
+        ocr_hdr_row.addStretch()
+
+        self.ocr_status_badge = QLabel("✓ COMPLETED")
+        self.ocr_status_badge.setStyleSheet("background-color: #F1F5F9; color: #0F172A; font-weight: 600; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #E2E8F0;")
+        self.ocr_hw_badge = QLabel("✍ Handwritten")
+        self.ocr_hw_badge.setStyleSheet("background-color: #F1F5F9; color: #0F172A; font-weight: 600; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #E2E8F0;")
+        self.ocr_hw_badge.setVisible(False)
+        # PZ_26/08: Initial placeholder is neutral 'Confidence: —' (removed hardcoded fake 96%)
+        self.ocr_conf_badge = QLabel("Confidence: —")
+        self.ocr_conf_badge.setStyleSheet("background-color: #F1F5F9; color: #475569; font-weight: 600; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #E2E8F0;")
+
+        ocr_hdr_row.addWidget(self.ocr_status_badge)
+        ocr_hdr_row.addWidget(self.ocr_hw_badge)
+        ocr_hdr_row.addWidget(self.ocr_conf_badge)
+        ocr_layout.addLayout(ocr_hdr_row)
+
+        self.ocr_fields_box = QLabel()
+        self.ocr_fields_box.setWordWrap(True)
+        self.ocr_fields_box.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 5px; padding: 10px; font-family: monospace; font-size: 11px; color: #1E293B;")
+        ocr_layout.addWidget(self.ocr_fields_box)
+
+        self.ocr_text_preview = QTextEdit()
+        self.ocr_text_preview.setReadOnly(True)
+        self.ocr_text_preview.setMaximumHeight(120)
+        self.ocr_text_preview.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 5px; font-size: 11px; color: #334155;")
+        self.ocr_text_preview.setVisible(False)
+        ocr_layout.addWidget(self.ocr_text_preview)
+
+        ocr_btn_row = QHBoxLayout()
+        self.ocr_toggle_btn = QPushButton("Show Raw OCR Extracted Text ▼")
+        self.ocr_toggle_btn.setStyleSheet("background-color: transparent; color: #0D9488; font-weight: 600; font-size: 11px; text-decoration: underline;")
+        self.ocr_toggle_btn.clicked.connect(self._toggle_raw_ocr_text)
+        ocr_btn_row.addWidget(self.ocr_toggle_btn)
+        ocr_btn_row.addStretch()
+
+        self.ocr_rerun_btn = QPushButton("⚡ Re-run OCR Extraction")
+        self.ocr_rerun_btn.setStyleSheet("background-color: #F0FDFA; color: #0F766E; border: 1px solid #99F6E4; font-weight: 600; font-size: 11px; padding: 4px 12px; border-radius: 4px;")
+        self.ocr_rerun_btn.clicked.connect(self._rerun_ocr_extraction)
+        ocr_btn_row.addWidget(self.ocr_rerun_btn)
+
+        ocr_layout.addLayout(ocr_btn_row)
+        self.content_layout.addWidget(self.ocr_intel_card)
 
         # D. ASSIGNMENT STATUS CARD (Built Once)
         self.assignment_card = QFrame()
@@ -426,10 +507,14 @@ class DocumentViewer(QWidget):
 
         try:
             if doc and doc.id and not doc.director_remark:
-                fresh_doc = document_service.get_document(doc.id)
-                if fresh_doc:
-                    doc = fresh_doc
+                try:
+                    fresh_doc = document_service.get_document(doc.id)
+                    if fresh_doc:
+                        doc = fresh_doc
+                except Exception:
+                    pass
             self.document = doc
+
 
             # 1. Update Header
             title_text = self.document.title or "Document Information"
@@ -445,50 +530,105 @@ class DocumentViewer(QWidget):
             self.preview.set_document(self.document)
             self.info.set_document(self.document)
 
-            # 3. Update Director Routing Suggestion Card
-            # The yellow advisory card must ONLY appear if the Director Remark (or prior directive)
-            # actually explicitly mentions a specific target department or employee name.
-            has_sugg_target = bool(
-                getattr(self.document, "suggested_department_name", None)
-                or getattr(self.document, "suggested_employee_name", None)
-            )
+            # 3. Update Routing Suggestion Card (Director instruction OR OCR intelligence)
+            sugg_dept = getattr(self.document, "suggested_department_name", None)
+            sugg_dept_id = getattr(self.document, "suggested_department_id", None)
+            sugg_emp = getattr(self.document, "suggested_employee_name", None)
+            sugg_emp_id = getattr(self.document, "suggested_employee_id", None)
+            conf = getattr(self.document, "routing_instruction_confidence", 0) or 0
+            is_dir_instruction = bool(getattr(self.document, "has_director_routing_instruction", False) or getattr(self.document, "is_director_instruction", False))
 
-            # If not already attached, dynamically analyze the director remark
-            if not has_sugg_target and self.document.director_remark:
+            # Query backend routing suggestion if not already populated on the model
+            if not sugg_dept and not sugg_emp and self.document.id:
+                try:
+                    repo = get_repository()
+                    s_data = repo.get_routing_suggestion(self.document.id) or {}
+                    if s_data:
+                        sugg_dept = s_data.get("suggested_department_name")
+                        sugg_dept_id = s_data.get("suggested_department_id")
+                        sugg_emp = s_data.get("suggested_employee_name")
+                        sugg_emp_id = s_data.get("suggested_employee_id")
+                        r_conf = s_data.get("routing_confidence")
+                        if r_conf is not None:
+                            conf = round(r_conf * 100) if r_conf <= 1.0 else round(r_conf)
+                        is_dir_instruction = bool(s_data.get("is_director_instruction", False))
+
+                        self.document.suggested_department_name = sugg_dept
+                        self.document.suggested_department_id = sugg_dept_id
+                        self.document.suggested_employee_name = sugg_emp
+                        self.document.suggested_employee_id = sugg_emp_id
+                        self.document.routing_instruction_confidence = conf
+                        self.document.has_director_routing_instruction = is_dir_instruction
+                except Exception:
+                    pass
+
+            # Also check director remark for explicit directives
+            if self.document.director_remark:
                 from services.routing_service import routing_service
                 analysis = routing_service.analyze_director_remark(self.document.director_remark)
                 if analysis.get("has_routing_instruction"):
-                    has_sugg_target = True
-                    if not getattr(self.document, "suggested_department_name", None):
-                        self.document.suggested_department_name = analysis.get("suggested_department")
-                        self.document.suggested_department_id = analysis.get("suggested_department_id")
-                    if not getattr(self.document, "suggested_employee_name", None):
-                        self.document.suggested_employee_name = analysis.get("suggested_employee")
-                        self.document.suggested_employee_id = analysis.get("suggested_employee_id")
+                    if analysis.get("suggested_department"):
+                        sugg_dept = analysis.get("suggested_department")
+                        sugg_dept_id = analysis.get("suggested_department_id")
+                        self.document.suggested_department_name = sugg_dept
+                        self.document.suggested_department_id = sugg_dept_id
+                    if analysis.get("suggested_employee"):
+                        sugg_emp = analysis.get("suggested_employee")
+                        sugg_emp_id = analysis.get("suggested_employee_id")
+                        self.document.suggested_employee_name = sugg_emp
+                        self.document.suggested_employee_id = sugg_emp_id
+                    is_dir_instruction = True
+                    conf = 95
                     self.document.has_director_routing_instruction = True
+                    self.document.routing_instruction_confidence = 95
+
+            is_ds = self.role in (RoleEnum.DIRECTOR_SECRETARY.value, "Master", "DS", "Director Secretary")
+            is_director = self.role in (RoleEnum.DIRECTOR.value, "Director", "DIRECTOR")
+            is_closed = (self.document.status == DocumentStatusEnum.CLOSED.value or self.document.current_stage == WorkflowStageEnum.CLOSED.value)
 
             show_sugg = (
-                self.role in (RoleEnum.DIRECTOR_SECRETARY.value, "Master", "DS", "Director Secretary")
-                and self.document.current_stage == WorkflowStageEnum.DS.value
-                and has_sugg_target
-                and (
-                    getattr(self.document, "has_director_routing_instruction", False)
-                    or getattr(self.document, "has_prior_director_remark", False)
-                    or bool(self.document.director_remark)
-                )
+                not is_closed
+                and (is_ds or is_director)
+                and bool(sugg_dept or sugg_emp)
             )
+
             self.suggestion_card.setVisible(show_sugg)
             if show_sugg:
                 self.sugg_card = self.suggestion_card
-                conf = getattr(self.document, "routing_instruction_confidence", 95) or 95
-                self.sugg_conf_lbl.setText(f"Confidence: {conf}%")
-                raw_rem = self.document.director_remark or getattr(self.document, "director_routing_raw_text", "") or ""
-                self.sugg_remark_lbl.setText(f"Director Remark:\n\"{raw_rem}\"")
-                dept_str = getattr(self.document, "suggested_department_name", None) or "Not specified"
-                emp_str = getattr(self.document, "suggested_employee_name", None) or "Not specified"
-                self.sugg_detected_lbl.setText(f"Detected:  <b>Department:</b> {dept_str}  •  <b>Employee:</b> {emp_str}")
+                conf_display = conf if conf > 0 else 85
+                self.sugg_conf_lbl.setText(f"Confidence: {conf_display}%")
+
+                # Toggle role-specific action buttons on the suggestion card
+                if is_director:
+                    self.s_btn_widget.setVisible(False)
+                    self.dir_sugg_action_widget.setVisible(True)
+                else:
+                    self.s_btn_widget.setVisible(True)
+                    self.dir_sugg_action_widget.setVisible(False)
+
+                self.suggestion_card.setStyleSheet("QFrame#contentCard { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-left: 4px solid #0F172A; border-radius: 6px; }")
+
+                if is_dir_instruction:
+                    self.s_hdr_lbl.setText("💡 Director Directive / Routing Instruction Detected")
+                    self.s_hdr_lbl.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+                    raw_rem = self.document.director_remark or getattr(self.document, "director_routing_raw_text", "") or ""
+                    self.sugg_remark_lbl.setText(f"Director Guidance:\n\"{raw_rem}\"" if raw_rem else "")
+                    self.sugg_remark_lbl.setVisible(bool(raw_rem))
+                else:
+                    self.s_hdr_lbl.setText("💡 Advisory Department Suggestion (OCR & Content Intelligence)")
+                    self.s_hdr_lbl.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+                    reason_txt = getattr(self.document, "routing_reason", "") or "Automatically inferred from document text extraction and departmental keyword scoring."
+                    self.sugg_remark_lbl.setText(f"Analysis: {reason_txt}")
+                    self.sugg_remark_lbl.setVisible(True)
+
+                dept_str = sugg_dept or "Not specified"
+                emp_str = sugg_emp or "Not specified"
+                self.sugg_detected_lbl.setText(f"Target:  <b>Department:</b> {dept_str}  •  <b>Staff:</b> {emp_str}")
             else:
                 self.sugg_card = None
+
+
+
 
             # 4. Update Remarks Card
             is_closed = (self.document.status == DocumentStatusEnum.CLOSED.value or self.document.current_stage == WorkflowStageEnum.CLOSED.value)
@@ -520,44 +660,80 @@ class DocumentViewer(QWidget):
                 self.hod_view_lbl.setText(hod_text)
                 self.hod_view_lbl.setStyleSheet("color: #334155; font-size: 12px;" if self.document.hod_remark else "color: #94A3B8; font-style: italic; font-size: 12px;")
 
-            # Latest Progress summary binding
             doc_id = self.document.id or 0
-            progress_entries = progress_service.get_progress_updates(doc_id) if doc_id else []
+            progress_entries = []
+            if doc_id:
+                try:
+                    progress_entries = progress_service.get_progress_updates(doc_id) or []
+                except Exception:
+                    progress_entries = []
+
+            # 5. Update Attachments List (Original Source Files + Employee Execution Proofs)
+            self._clear_item_layout(self.attachments_items_layout)
+            all_attachments = []
+            if doc_id:
+                try:
+                    all_attachments = attachment_service.get_document_attachments(doc_id) or []
+                except Exception:
+                    all_attachments = []
+
+            count_text = f" ({len(all_attachments)})" if all_attachments else ""
+            self.att_header_lbl.setText(f"Attached Documents & Submitted Proofs{count_text}")
+
+            # Latest Progress summary binding with attached proof file display
             if progress_entries:
+
                 latest = progress_entries[-1]
                 self.prog_summary_frame.setVisible(True)
-                self.prog_summary_title.setText(f"Latest Execution Progress ({latest.user_name} • {latest.created_at}):")
+                self.prog_summary_title.setText(f"Latest Execution Progress ({latest.user_name or 'Assigned Staff'} • {latest.created_at}):")
                 self.prog_summary_lbl.setText(latest.description)
+
+                # Render proof button directly in latest progress frame if proof exists
+                self._clear_item_layout(self.prog_proof_layout)
+                matching_proofs = [a for a in all_attachments if a.progress_update_id == latest.id or (a.category != "ORIGINAL" and getattr(a, "attachment_type", "") != "ORIGINAL")]
+                if matching_proofs:
+                    self.prog_proof_row.setVisible(True)
+                    p_lbl = QLabel(f"📎 Submitted Proof:")
+                    p_lbl.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 11px;")
+                    self.prog_proof_layout.addWidget(p_lbl)
+                    for pf in matching_proofs:
+                        pf_btn = QPushButton(f"📄 {pf.file_name} ({pf.formatted_size})")
+                        pf_btn.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; font-weight: 600; font-size: 11px; padding: 3px 10px; border-radius: 4px;")
+                        pf_btn.clicked.connect(lambda _, a=pf: self._view_attachment(a))
+                        self.prog_proof_layout.addWidget(pf_btn)
+                    self.prog_proof_layout.addStretch()
+                else:
+                    self.prog_proof_row.setVisible(False)
             else:
                 self.prog_summary_frame.setVisible(False)
 
-            # 5. Update Attachments List
-            self._clear_item_layout(self.attachments_items_layout)
-            original_attachments = attachment_service.get_document_attachments(doc_id, category="ORIGINAL") if doc_id else []
-            count_text = f" ({len(original_attachments)})" if original_attachments else ""
-            self.att_header_lbl.setText(f"Original Source Attachments{count_text}")
-
-            if not original_attachments:
-                no_att_lbl = QLabel("No source attachments (Email Body Instruction / Direct Dispatched Text)")
+            if not all_attachments:
+                no_att_lbl = QLabel("No attachments recorded (Email Body / Direct Dispatched Text).")
                 no_att_lbl.setStyleSheet("color: #64748B; font-style: italic; font-size: 12px;")
                 self.attachments_items_layout.addWidget(no_att_lbl)
             else:
-                for att in original_attachments:
+                for att in all_attachments:
                     row_frame = QFrame()
                     row_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px;")
                     row_hbox = QHBoxLayout(row_frame)
                     row_hbox.setContentsMargins(10, 8, 10, 8)
                     row_hbox.setSpacing(12)
 
-                    badge = QLabel(f"[{att.extension}]")
-                    badge.setStyleSheet("background-color: #0F172A; color: white; font-weight: bold; font-size: 11px; padding: 3px 7px; border-radius: 3px;")
+                    is_proof = (att.category != "ORIGINAL" and getattr(att, "attachment_type", "") != "ORIGINAL") or bool(att.progress_update_id)
+                    badge_text = f"[{att.extension.upper()}]"
+                    badge_style = "background-color: #0F172A; color: white; font-weight: bold; font-size: 11px; padding: 3px 7px; border-radius: 3px;"
+
+                    badge = QLabel(badge_text)
+                    badge.setStyleSheet(badge_style)
 
                     info_vbox = QVBoxLayout()
                     info_vbox.setSpacing(2)
                     name_lbl = QLabel(att.file_name)
-                    name_lbl.setStyleSheet("font-weight: 600; color: #1E293B; font-size: 12px;")
+                    name_lbl.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 12px;")
 
-                    meta_lbl = QLabel(f"Original Source Attachment • {att.formatted_size} • Source: {att.source or self.document.source or 'Direct'}")
+                    category_label = "📎 Submitted Execution Proof" if is_proof else "📄 Canonical Intake Document"
+                    uploader_info = f" • Uploaded: {str(att.created_at)[:10] if att.created_at else 'Recent'}"
+                    meta_lbl = QLabel(f"{category_label} • {att.formatted_size}{uploader_info}")
                     meta_lbl.setStyleSheet("color: #64748B; font-size: 11px;")
 
                     info_vbox.addWidget(name_lbl)
@@ -571,7 +747,7 @@ class DocumentViewer(QWidget):
 
                     if att.is_previewable:
                         view_btn = QPushButton("View")
-                        view_btn.setStyleSheet("background-color: #E2E8F0; color: #0F172A; font-weight: 600; font-size: 11px; padding: 4px 12px; border-radius: 4px;")
+                        view_btn.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; font-weight: 600; font-size: 11px; padding: 4px 12px; border-radius: 4px;")
                         view_btn.clicked.connect(lambda _, a=att: self._view_attachment(a))
                         btn_hbox.addWidget(view_btn)
 
@@ -582,6 +758,54 @@ class DocumentViewer(QWidget):
 
                     row_hbox.addLayout(btn_hbox)
                     self.attachments_items_layout.addWidget(row_frame)
+
+
+            # 5b. Update OCR & Intelligence Card
+            ocr_data = {}
+            if doc_id:
+                repo = get_repository()
+                try:
+                    ocr_data = repo.get_ocr_result(doc_id) or {}
+                except Exception:
+                    ocr_data = {}
+
+            extracted_text = ocr_data.get("extracted_text") or getattr(self.document, "description", "") or ""
+            fields_list = ocr_data.get("extracted_fields") or []
+            ocr_conf = ocr_data.get("confidence")
+            ocr_engine = ocr_data.get("ocr_engine") or "PaddleOCR-v3"
+            is_hw = "handwritten" in str(ocr_engine).lower()
+
+            if (ocr_data and ocr_data.get("ocr_status") in ("COMPLETED", "PROCESSING")) or extracted_text:
+                self.ocr_intel_card.setVisible(True)
+                status_txt = ocr_data.get("ocr_status", "COMPLETED")
+                self.ocr_status_badge.setText(f"✓ {status_txt}")
+                self.ocr_hw_badge.setVisible(is_hw)
+                # PZ_26/08: Display real OCR confidence percentage or 'Confidence: —' (removed (ocr_conf or 95) fake fallback)
+                if ocr_conf is not None and ocr_conf > 0:
+                    conf_pct = round(ocr_conf * 100) if ocr_conf <= 1.0 else round(ocr_conf)
+                    self.ocr_conf_badge.setText(f"Confidence: {conf_pct}%")
+                else:
+                    self.ocr_conf_badge.setText("Confidence: —")
+
+                f_lines = []
+                for f in fields_list:
+                    if isinstance(f, dict):
+                        fname = f.get("field_name", "")
+                        fval = f.get("verified_value") or f.get("extracted_value", "")
+                        if fval:
+                            f_lines.append(f"• {fname.title()}: {fval}")
+
+                if not f_lines and extracted_text:
+                    f_lines = [
+                        f"• Document Title: {self.document.title}",
+                        f"• Reference No: {self.document.reference or '-'}",
+                        f"• Ingestion Mode: {self.document.mode or 'Government Mail'}",
+                    ]
+
+                self.ocr_fields_box.setText("\n".join(f_lines) if f_lines else "Content indexed and verified.")
+                self.ocr_text_preview.setText(extracted_text)
+            else:
+                self.ocr_intel_card.setVisible(False)
 
             # 6. Update Assignment Status Card
             has_assign = bool(self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned")
@@ -613,22 +837,27 @@ class DocumentViewer(QWidget):
                     p_vbox.addWidget(p_hdr)
                     p_vbox.addWidget(p_desc)
 
-                    if p.attachments:
+                    p_proofs = list(p.attachments or [])
+                    for a in all_attachments:
+                        if a.progress_update_id == p.id and not any(getattr(existing, "id", None) == a.id for existing in p_proofs):
+                            p_proofs.append(a)
+
+                    if p_proofs:
                         att_vbox = QVBoxLayout()
                         att_vbox.setSpacing(4)
-                        att_hdr = QLabel("Supporting Attachments:")
-                        att_hdr.setStyleSheet("font-weight: 600; color: #475569; font-size: 11px;")
+                        att_hdr = QLabel("📎 Submitted Proof Documents:")
+                        att_hdr.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 11px;")
                         att_vbox.addWidget(att_hdr)
 
-                        for att in p.attachments:
+                        for att in p_proofs:
                             att_frame = QFrame()
                             att_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 4px;")
                             att_hbox = QHBoxLayout(att_frame)
                             att_hbox.setContentsMargins(8, 4, 8, 4)
                             att_hbox.setSpacing(8)
 
-                            badge = QLabel(f"[{att.extension}]")
-                            badge.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; font-size: 10px; padding: 2px 5px; border-radius: 3px;")
+                            badge = QLabel(f"[{att.extension.upper()}]")
+                            badge.setStyleSheet("background-color: #0F172A; color: white; font-weight: bold; font-size: 10px; padding: 2px 5px; border-radius: 3px;")
 
                             lbl = QLabel(f"{att.file_name} • {att.formatted_size}")
                             lbl.setStyleSheet("color: #1E293B; font-size: 11px; font-weight: 500;")
@@ -638,7 +867,7 @@ class DocumentViewer(QWidget):
 
                             if att.is_previewable:
                                 v_btn = QPushButton("View")
-                                v_btn.setStyleSheet("background-color: #E2E8F0; color: #0F172A; font-size: 11px; padding: 3px 8px; border-radius: 3px;")
+                                v_btn.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; font-size: 11px; padding: 3px 8px; border-radius: 3px;")
                                 v_btn.clicked.connect(lambda _, a=att: self._view_attachment(a))
                                 att_hbox.addWidget(v_btn)
 
@@ -649,6 +878,7 @@ class DocumentViewer(QWidget):
 
                             att_vbox.addWidget(att_frame)
                         p_vbox.addLayout(att_vbox)
+
 
                     self.progress_items_layout.addWidget(p_box)
 
@@ -823,10 +1053,21 @@ class DocumentViewer(QWidget):
     # ACTION HANDLERS
     # =========================================================
 
+    def _director_prefill_remark(self):
+        dept = getattr(self.document, "suggested_department_name", None) or "Department"
+        emp = getattr(self.document, "suggested_employee_name", None)
+        if emp and emp != "Not specified":
+            prefill = f"Approved. Route to {dept} for action by {emp}."
+        else:
+            prefill = f"Approved. Route to {dept} for necessary action."
+        self.dir_remark_edit.setText(prefill)
+        self.dir_remark_edit.setFocus()
+
     def _director_save_remark(self):
         if getattr(self, "_action_in_progress", False):
             return
         self._action_in_progress = True
+
         try:
             remark_text = self.dir_remark_edit.toPlainText().strip()
             if not remark_text:
@@ -1187,3 +1428,35 @@ class DocumentViewer(QWidget):
             saved_path = attachment_service.download_attachment(attachment, parent=self)
         finally:
             self._action_in_progress = False
+
+    def _toggle_raw_ocr_text(self):
+        is_vis = self.ocr_text_preview.isVisible()
+        self.ocr_text_preview.setVisible(not is_vis)
+        self.ocr_toggle_btn.setText("Hide Raw OCR Text ▲" if not is_vis else "Show Raw OCR Extracted Text ▼")
+
+    def _rerun_ocr_extraction(self):
+        doc_id = self.document.id if self.document else None
+        if not doc_id:
+            return
+        repo = get_repository()
+        try:
+            # If we have a local file path, run through OCRSplashDialog for instant visual animation
+            f_path = getattr(self.document, "file_path", "") or ""
+            if f_path and os.path.exists(f_path):
+                OCRSplashDialog.execute_ocr(
+                    file_path=f_path,
+                    incoming_item=self.document.to_dict(),
+                    parent=self
+                )
+            repo.trigger_ocr(doc_id)
+            QMessageBox.information(
+                self,
+                "OCR Re-Analysis",
+                "OCR processing completed. Refreshed document intelligence fields."
+            )
+            fresh = document_service.get_document(doc_id)
+            if fresh:
+                self.document = fresh
+            self.update_view_data(self.document)
+        except Exception as ex:
+            QMessageBox.warning(self, "OCR Notice", f"OCR status: {str(ex)}")

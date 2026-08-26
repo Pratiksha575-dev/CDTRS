@@ -8,6 +8,8 @@ class Endpoints:
     AUTH_LOGIN = "/auth/login"
     AUTH_ME = "/auth/me"
     AUTH_LOGOUT = "/auth/logout"
+    AUTH_CHANGE_PASSWORD = "/auth/change-password"
+    AUTH_RESET_PASSWORD = "/auth/reset-password"
 
     # --- Users & Departments ---
     USERS_LIST = "/users"

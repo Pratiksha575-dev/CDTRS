@@ -498,6 +498,12 @@ class MockRepository(BaseRepository):
     def logout(self) -> None:
         self._current_user = None
 
+    def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
+        u = username.strip().lower()
+        if u in self._users and old_password:
+            return True
+        return False
+
     def get_users(self, role: Optional[str] = None, department_id: Optional[int] = None) -> List[UserModel]:
         seen_ids = set()
         users = []
@@ -1296,3 +1302,31 @@ class MockRepository(BaseRepository):
             "in_progress": len([d for d in dept_docs if d.current_stage == WorkflowStageEnum.EMPLOYEE.value and d.status != DocumentStatusEnum.PROGRESS_UPDATED.value]),
             "progress_updated": len([d for d in dept_docs if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value])
         }
+
+    # =========================================================
+    # OCR & ROUTING INTELLIGENCE  (stubs — mock mode returns empty results)
+    # =========================================================
+
+    def get_ocr_result(self, document_id: int) -> Dict[str, Any]:
+        """Mock: no server-side OCR in offline mode."""
+        return {
+            "document_id":    document_id,
+            "ocr_status":     "NONE",
+            "ocr_engine":     "Mock",
+            "confidence":     None,
+            "extracted_text": "",
+            "extracted_fields": [],
+        }
+
+    def trigger_ocr(self, document_id: int) -> Dict[str, Any]:
+        """Mock: no-op — OCR runs client-side via ocr_service.py."""
+        return {"message": "OCR not available in mock mode.", "ocr_status": "NONE"}
+
+    def get_routing_suggestion(self, document_id: int) -> Dict[str, Any]:
+        """Mock: no server-side routing suggestion in offline mode."""
+        return {}
+
+    def analyze_routing(self, document_id: int) -> Dict[str, Any]:
+        """Mock: no-op in offline mode."""
+        return {}
+

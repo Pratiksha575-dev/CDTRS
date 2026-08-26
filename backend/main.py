@@ -1,7 +1,15 @@
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+
+# Ensure OCR package directory is accessible
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_OCR_DIR = _PROJECT_ROOT / "OCR"
+if str(_OCR_DIR) not in sys.path:
+    sys.path.insert(0, str(_OCR_DIR))
+
 
 from fastapi import (
     FastAPI,
@@ -25,6 +33,38 @@ import crud
 
 from database import engine, get_db
 from models import UserRole, AttachmentType, SourceType, Priority
+from datetime import date as _date
+
+
+def _parse_flexible_date(date_str: Optional[str]) -> _date:
+    """Safely parse various date string representations into a datetime.date object."""
+    if not date_str:
+        return datetime.utcnow().date()
+    s = str(date_str).strip()
+    if "T" in s:
+        s = s.split("T")[0]
+    formats = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%d-%m-%Y",
+        "%m-%d-%Y",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%Y.%m.%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d %B, %Y",
+        "%b %d %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return datetime.utcnow().date()
 
 
 # =========================================================
@@ -40,16 +80,27 @@ models.Base.metadata.create_all(bind=engine)
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 20 * 1024 * 1024))  # 20 MB limit
 
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 ALLOWED_TYPES = {
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "image/jpeg",
+    "image/jpg",
     "image/png",
     "text/plain",
+    "text/csv",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/octet-stream",
 }
+ALLOWED_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".txt", ".csv", ".zip"
+}
+
 
 
 # =========================================================
@@ -261,6 +312,60 @@ def logout(current_user: models.User = Depends(get_current_user)):
     return {"message": "Logged out successfully. Please discard your token."}
 
 
+@app.post(
+    f"{API_V1}/auth/change-password",
+    tags=["Authentication"],
+    summary="Change password for current logged-in user",
+)
+def change_password(
+    data: schemas.ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if data.old_password:
+        if not crud.verify_password(data.old_password, current_user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password does not match.",
+            )
+    if len(data.new_password) < 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 4 characters long.",
+        )
+    crud.update_user_password(db, current_user.id, data.new_password)
+    return {"message": "Password updated successfully."}
+
+
+@app.post(
+    f"{API_V1}/auth/reset-password",
+    tags=["Authentication"],
+    summary="Change / Reset password from login screen (requires current password verification)",
+)
+def reset_password(
+    data: schemas.ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    user = crud.get_user_by_username(db, data.username)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User '{data.username}' not found.",
+        )
+    if not crud.verify_password(data.old_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password does not match.",
+        )
+    if len(data.new_password) < 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 4 characters long.",
+        )
+    crud.update_user_password(db, user.id, data.new_password)
+    return {"message": f"Password updated successfully for user '{data.username}'."}
+
+
 # =========================================================
 # USERS & ROLES
 # =========================================================
@@ -428,10 +533,11 @@ async def manual_intake_upload(
     )
 
     # 2. Create canonical document
+    parsed_date = _parse_flexible_date(received_date)
     doc_create = schemas.DocumentCreate(
         title=title,
         description=description,
-        received_date=datetime.strptime(received_date, "%Y-%m-%d").date(),
+        received_date=parsed_date,
         source=source,
         mode=mode,
         priority=Priority(priority),
@@ -982,11 +1088,14 @@ async def upload_attachment(
     doc = _get_authorized_doc_or_404(db, document_id, current_user)
     _assert_not_closed(doc)
 
-    if file.content_type not in ALLOWED_TYPES:
+    file_ext = Path(file.filename or "").suffix.lower()
+    is_valid_type = (file.content_type in ALLOWED_TYPES) or (file_ext in ALLOWED_EXTENSIONS)
+    if not is_valid_type:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type '{file.content_type}' is not allowed.",
+            detail=f"File type '{file.content_type}' ({file_ext}) is not allowed.",
         )
+
 
     contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:

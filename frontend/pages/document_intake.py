@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Union
 import os
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +26,7 @@ from repositories.provider import get_repository
 from services.document_service import document_service
 from services.ocr_service import ocr_service
 from services.routing_service import routing_service
+from components.ocr_splash_dialog import OCRSplashDialog
 
 
 class DocumentIntakePage(QWidget):
@@ -43,6 +45,7 @@ class DocumentIntakePage(QWidget):
         self.current_inbox_item_id: Optional[int] = None
         self.extracted_ocr_text: str = ""
         self.has_prior_director_remark: bool = False
+        self._dept_id_map: Dict[str, int] = {}  # name -> id, populated from backend
         self.setup_ui()
 
     def setup_ui(self):
@@ -102,17 +105,49 @@ class DocumentIntakePage(QWidget):
         self.preview_label.setWordWrap(True)
         preview_layout.addWidget(self.preview_label, 1)
 
-        # Compact OCR Status Badge
+        # Compact OCR Status Badge (Clean Neutral)
         self.ocr_status_frame = QFrame()
-        self.ocr_status_frame.setStyleSheet("background-color: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 5px; padding: 8px;")
+        self.ocr_status_frame.setStyleSheet(
+            "background-color: #F8FAFC; border: 1px solid #E2E8F0;"
+            " border-radius: 5px; padding: 8px;"
+        )
         ocr_hlayout = QHBoxLayout(self.ocr_status_frame)
         ocr_hlayout.setContentsMargins(10, 6, 10, 6)
-        
-        self.ocr_status_lbl = QLabel("✓ OCR Processed • Content Extracted & Indexed")
-        self.ocr_status_lbl.setStyleSheet("color: #166534; font-weight: 600; font-size: 12px;")
+        ocr_hlayout.setSpacing(8)
+
+        self.ocr_status_lbl = QLabel("✓ OCR Processed")
+        self.ocr_status_lbl.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px;")
+        self.ocr_hw_badge = QLabel()
+        self.ocr_hw_badge.setStyleSheet(
+            "background: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; font-size: 10px; font-weight: 600;"
+            " border-radius: 3px; padding: 2px 6px;"
+        )
+        self.ocr_hw_badge.setVisible(False)
         ocr_hlayout.addWidget(self.ocr_status_lbl)
+        ocr_hlayout.addWidget(self.ocr_hw_badge)
+        ocr_hlayout.addStretch()
         self.ocr_status_frame.setVisible(False)
         preview_layout.addWidget(self.ocr_status_frame)
+
+
+        # Collapsible OCR Fields panel
+        self.ocr_fields_frame = QFrame()
+        self.ocr_fields_frame.setStyleSheet(
+            "background: #F8FAFC; border: 1px solid #E2E8F0;"
+            " border-radius: 5px; padding: 4px;"
+        )
+        ocr_f_layout = QVBoxLayout(self.ocr_fields_frame)
+        ocr_f_layout.setContentsMargins(8, 6, 8, 6)
+        ocr_f_layout.setSpacing(3)
+        ocr_fields_hdr = QLabel("📋 OCR Extracted Fields")
+        ocr_fields_hdr.setStyleSheet("font-weight: 600; font-size: 11px; color: #475569;")
+        ocr_f_layout.addWidget(ocr_fields_hdr)
+        self.ocr_fields_text = QLabel()
+        self.ocr_fields_text.setWordWrap(True)
+        self.ocr_fields_text.setStyleSheet("font-size: 11px; color: #334155; font-family: monospace;")
+        ocr_f_layout.addWidget(self.ocr_fields_text)
+        self.ocr_fields_frame.setVisible(False)
+        preview_layout.addWidget(self.ocr_fields_frame)
 
         content_layout.addWidget(preview_card, 1)
 
@@ -139,17 +174,12 @@ class DocumentIntakePage(QWidget):
         self.date_input = QLineEdit()
         self.date_input.setPlaceholderText("YYYY-MM-DD")
 
+        # PZ_26/08: Simplified mode_input dropdown items to 3 clean categories (Government Mail, Outlook, Manual Upload)
         self.mode_input = QComboBox()
         self.mode_input.addItems([
             IngestionModeEnum.GOVERNMENT_MAIL.value,
-            IngestionModeEnum.INTERNAL_OUTLOOK.value,
-            IngestionModeEnum.EMAIL.value,
-            IngestionModeEnum.INTRANET.value,
-            IngestionModeEnum.FAX.value,
-            IngestionModeEnum.SCANNED.value,
-            IngestionModeEnum.PHYSICAL.value,
-            IngestionModeEnum.DIRECT_SUBMISSION.value,
-            IngestionModeEnum.OTHER.value
+            IngestionModeEnum.OUTLOOK.value,
+            IngestionModeEnum.MANUAL_UPLOAD.value,
         ])
 
         self.source_input = QLineEdit()
@@ -205,26 +235,19 @@ class DocumentIntakePage(QWidget):
         r_form.setSpacing(6)
 
         self.dept_combo = QComboBox()
-        self.dept_combo.addItems([
-            "Finance",
-            "Procurement",
-            "Human Resources",
-            "Maintenance",
-            "IT",
-            "Not Specified"
-        ])
+        self.dept_combo.addItem("Not Specified", None)
 
         self.emp_combo = QComboBox()
         self.emp_combo.addItem("Not Assigned", None)
-        try:
-            repo = get_repository()
-            for emp in repo.get_users(role="Employee"):
-                self.emp_combo.addItem(f"{emp.full_name} ({emp.department_name or 'General'})", emp.id)
-        except Exception:
-            self.emp_combo.addItem("Rahul Sharma (Finance)", 101)
-            self.emp_combo.addItem("Priya Verma (Procurement)", 201)
 
-        self.confidence_label = QLabel("Confidence: 92% • Source: Document / OCR")
+        # Load departments and employees from backend
+        self._load_departments_from_backend()
+        self._load_employees_from_backend()
+
+        # Reload employees when department selection changes
+        self.dept_combo.currentIndexChanged.connect(self._on_dept_changed)
+
+        self.confidence_label = QLabel("Confidence: — • Source: Document / OCR")
         self.confidence_label.setStyleSheet("color: #059669; font-weight: 600; font-size: 11px;")
 
         r_form.addRow("Target Dept:", self.dept_combo)
@@ -285,6 +308,52 @@ class DocumentIntakePage(QWidget):
     # ACTIONS
     # ====================================
 
+    def _load_departments_from_backend(self):
+        """Populates dept_combo from the live backend. Stores department ID as item data."""
+        self.dept_combo.blockSignals(True)
+        current_dept_id = self.dept_combo.currentData()
+        self.dept_combo.clear()
+        self.dept_combo.addItem("Not Specified", None)
+        self._dept_id_map = {}
+        try:
+            repo = get_repository()
+            departments = repo.get_departments()
+            for dept in departments:
+                self.dept_combo.addItem(dept.name, dept.id)
+                self._dept_id_map[dept.name] = dept.id
+        except Exception:
+            self.dept_combo.addItem("⚠ Could not load departments", None)
+        # Restore previous selection if still available
+        if current_dept_id is not None:
+            for i in range(self.dept_combo.count()):
+                if self.dept_combo.itemData(i) == current_dept_id:
+                    self.dept_combo.setCurrentIndex(i)
+                    break
+        self.dept_combo.blockSignals(False)
+
+    def _load_employees_from_backend(self, department_id: Optional[int] = None):
+        """Populates emp_combo from the live backend, optionally filtered by department."""
+        self.emp_combo.blockSignals(True)
+        self.emp_combo.clear()
+        self.emp_combo.addItem("Not Assigned", None)
+        try:
+            repo = get_repository()
+            employees = repo.get_users(role="Employee", department_id=department_id)
+            if not employees and department_id:
+                # Try without department filter as fallback
+                employees = repo.get_users(role="Employee")
+            for emp in employees:
+                dept_label = emp.department_name or "General"
+                self.emp_combo.addItem(f"{emp.full_name} ({dept_label})", emp.id)
+        except Exception:
+            self.emp_combo.addItem("⚠ Could not load employees", None)
+        self.emp_combo.blockSignals(False)
+
+    def _on_dept_changed(self):
+        """Reloads employee dropdown filtered to the newly selected department."""
+        dept_id = self.dept_combo.currentData()
+        self._load_employees_from_backend(department_id=dept_id)
+
     def _update_action_button_text(self):
         if self.bypass_director_check.isChecked():
             self.submit_btn.setText("Confirm & Route Directly to HOD / Staff")
@@ -292,6 +361,7 @@ class DocumentIntakePage(QWidget):
         else:
             self.submit_btn.setText("Confirm & Send for Director Review")
             self.submit_btn.setStyleSheet("background-color: #0F172A; color: white; font-size: 13px; font-weight: 600; padding: 9px 24px; border-radius: 6px;")
+
 
     def select_document(self):
         """Allows manual upload of local PDFs, images, or scanned dispatches."""
@@ -310,8 +380,13 @@ class DocumentIntakePage(QWidget):
         self.incoming_attachment_count = 1
         self.preview_label.setText(f"Manual File Loaded:\n{fname}\n\nPath: {file_path}")
 
-        # Run OCR extraction
-        res = ocr_service.process_incoming_document(file_path, incoming_item={"title": fname, "source": "Manual Upload", "mode": "Manual Upload"})
+        # Run OCR extraction with splash animation
+        # PZ_26/08: Explicitly set mode to IngestionModeEnum.MANUAL_UPLOAD on manual intake
+        res = OCRSplashDialog.execute_ocr(
+            file_path=file_path,
+            incoming_item={"title": fname, "source": "Manual Upload", "mode": IngestionModeEnum.MANUAL_UPLOAD.value},
+            parent=self
+        )
         self._populate_extracted_data(res, file_path=file_path)
 
     def load_document(self, doc_dict_or_model: Union[DocumentModel, Dict[str, Any]]):
@@ -342,22 +417,24 @@ class DocumentIntakePage(QWidget):
             self.incoming_attachment_count = raw_data.get("attachment_count", len(self.incoming_attachments_list))
 
         raw_file_path = raw_data.get("file_path", "")
-        # Run OCR and routing analysis
-        ocr_result = ocr_service.process_incoming_document(
+        # Run real OCR via OCRSplashDialog, then populate the form
+        ocr_result = OCRSplashDialog.execute_ocr(
             file_path=raw_file_path,
-            incoming_item=raw_data
+            incoming_item=raw_data,
+            parent=self
         )
-
         self._populate_extracted_data(ocr_result, file_path=raw_file_path)
 
     def _populate_extracted_data(self, ocr_result: Dict[str, Any], file_path: Optional[str] = None):
         self.extracted_ocr_text = ocr_result.get("extracted_text", "")
         self.title_input.setText(ocr_result.get("title", ""))
-        self.ref_input.setText(f"CDTRS-2026-{self.current_inbox_item_id or 101:03d}")
+        # Reference number is auto-generated by backend — never hardcode it
+        self.ref_input.clear()
         self.date_input.setText(ocr_result.get("date", datetime.now().strftime("%Y-%m-%d")))
 
-        # Ingestion Mode
-        mode_val = ocr_result.get("mode", IngestionModeEnum.GOVERNMENT_MAIL.value)
+        # PZ_26/08: Ingestion Mode normalized from incoming item / OCR result
+        raw_mode = ocr_result.get("mode") or IngestionModeEnum.MANUAL_UPLOAD.value
+        mode_val = IngestionModeEnum.normalize(raw_mode)
         idx = self.mode_input.findText(mode_val)
         if idx >= 0:
             self.mode_input.setCurrentIndex(idx)
@@ -380,31 +457,96 @@ class DocumentIntakePage(QWidget):
 
         self.deadline_input.setText(ocr_result.get("deadline", ""))
 
-        # Routing Intelligence Dropdowns (Editable)
-        dept = ocr_result.get("suggested_department", "Not Specified")
-        emp = ocr_result.get("suggested_employee") or "Not Assigned"
+        # Routing Intelligence Dropdowns (Editable & Auto-Selected from OCR)
+        dept = ocr_result.get("suggested_department", "")
+        emp = ocr_result.get("suggested_employee") or ""
         conf = ocr_result.get("confidence", 0)
 
-        d_idx = self.dept_combo.findText(dept)
+        # Dynamic department selection with alias & fuzzy matching
+        d_idx = -1
+        if dept and dept not in ("Not Specified", "None", ""):
+            d_idx = self.dept_combo.findText(dept, Qt.MatchFixedString)
+            if d_idx < 0:
+                alias_map = {
+                    "human resources": "hr",
+                    "it": "technical",
+                    "information technology": "technical",
+                    "systems": "technical",
+                    "operations": "administration",
+                    "legal": "administration",
+                }
+                target_name = alias_map.get(dept.lower(), dept).lower()
+                for i in range(self.dept_combo.count()):
+                    item_txt = self.dept_combo.itemText(i).lower()
+                    if target_name == item_txt or target_name in item_txt or item_txt in target_name:
+                        d_idx = i
+                        break
+
         if d_idx >= 0:
             self.dept_combo.setCurrentIndex(d_idx)
+            selected_dept_id = self.dept_combo.itemData(d_idx)
+            self._load_employees_from_backend(department_id=selected_dept_id)
 
+        # Dynamic employee selection
         e_idx = -1
-        for i in range(self.emp_combo.count()):
-            if emp and emp.lower() in self.emp_combo.itemText(i).lower():
-                e_idx = i
-                break
+        if emp and emp not in ("Not Assigned", "None", ""):
+            for i in range(self.emp_combo.count()):
+                if emp.lower() in self.emp_combo.itemText(i).lower():
+                    e_idx = i
+                    break
         if e_idx >= 0:
             self.emp_combo.setCurrentIndex(e_idx)
-        else:
+        elif d_idx < 0:
             self.emp_combo.setCurrentIndex(0)
 
-        self.confidence_label.setText(f"Confidence: {conf}% • Source: Document / OCR")
+        # PZ_26/08: Display real OCR confidence percentage or neutral placeholder (removed hardcoded confidence values)
+        if conf is not None and conf > 0:
+            self.confidence_label.setText(f"Confidence: {conf}% • Source: Document / OCR")
+        else:
+            self.confidence_label.setText("Confidence: — • Source: Document / OCR")
 
-        # Compact OCR Status
-        pages = ocr_result.get("pages_extracted", 1)
-        self.ocr_status_lbl.setText(f"✓ OCR Processed • {pages} page(s) extracted and indexed")
+
+        # OCR Status badge — show real engine, pages, handwriting flag
+        pages        = ocr_result.get("pages_extracted", 1)
+        is_hw        = ocr_result.get("is_handwritten", False)
+        pages_label  = f"{pages} page(s)"
+        self.ocr_status_lbl.setText(f"✓ OCR Processed • {pages_label} extracted")
+        if is_hw:
+            self.ocr_hw_badge.setText("✍ Handwritten")
+            self.ocr_hw_badge.setVisible(True)
+        else:
+            self.ocr_hw_badge.setVisible(False)
         self.ocr_status_frame.setVisible(True)
+
+        # OCR Extracted Fields panel
+        ocr_fields = ocr_result.get("ocr_fields", {})
+        if ocr_fields:
+            lines = []
+            field_labels = {
+                "subject":      "Subject",
+                "reference_no": "Ref No",
+                "date":         "Date",
+                "deadline":     "Deadline",
+                "priority":     "Priority",
+                "amount":       "Amount",
+                "sender":       "Sender",
+                "recipient":    "Recipient",
+                "employee":     "Employee",
+                "department":   "Department",
+            }
+            for key, label in field_labels.items():
+                val = ocr_fields.get(key)
+                if val:
+                    if isinstance(val, list):
+                        val = ", ".join(str(v) for v in val)
+                    lines.append(f"{label}: {val}")
+            if lines:
+                self.ocr_fields_text.setText("\n".join(lines))
+                self.ocr_fields_frame.setVisible(True)
+            else:
+                self.ocr_fields_frame.setVisible(False)
+        else:
+            self.ocr_fields_frame.setVisible(False)
 
         # Prior Director Directive Handling
         has_remark = ocr_result.get("has_prior_director_remark", False)
@@ -442,14 +584,14 @@ class DocumentIntakePage(QWidget):
             return
 
         dept_text = self.dept_combo.currentText()
-        if dept_text == "Not Specified":
+        if dept_text in ("Not Specified", ""):
             dept_text = None
 
         emp_raw = self.emp_combo.currentText()
         emp_text = emp_raw.split(" (")[0] if emp_raw != "Not Assigned" else None
 
-        dept_id_map = {"Finance": 1, "Procurement": 2, "Human Resources": 3, "HR": 3, "Maintenance": 4, "IT": 5}
-        target_dept_id = dept_id_map.get(dept_text) if dept_text else None
+        # Use real backend department ID from combo data (set during _load_departments_from_backend)
+        target_dept_id = self.dept_combo.currentData() if dept_text else None
         emp_id = self.emp_combo.currentData()
 
         # Determine real physical upload path if exists on disk
@@ -515,6 +657,20 @@ class DocumentIntakePage(QWidget):
                 self.current_inbox_item_id = None
 
             QMessageBox.information(self, "Intake Registered & Routed", msg)
+
+            # ---- Trigger server-side OCR in background (non-blocking) ------
+            # The file is now stored in uploads/; the backend will run PaddleOCR
+            # on it and persist structured fields + routing suggestion.
+            def _bg_ocr():
+                try:
+                    repo = get_repository()
+                    if hasattr(repo, "trigger_ocr"):
+                        repo.trigger_ocr(created_doc.id)
+                except Exception:
+                    pass  # OCR failure never blocks the workflow
+
+            QTimer.singleShot(500, _bg_ocr)
+
             self.clear_form()
             self.document_processed.emit(routed_doc)
 
@@ -532,7 +688,9 @@ class DocumentIntakePage(QWidget):
         self.current_inbox_item_id = None
         self.has_prior_director_remark = False
         self.ocr_status_frame.setVisible(False)
+        self.ocr_fields_frame.setVisible(False)
         self.director_remark_card.setVisible(False)
+
         self.bypass_director_check.setChecked(False)
         self.preview_label.setText("No document loaded\n\nSelect an incoming item from Inbox or click 'Manual Intake / Upload File' to process a document.")
         self.dept_combo.setCurrentIndex(0)
