@@ -15,6 +15,9 @@ class UserModel:
     full_name: str
     role: str
     email: Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email: Optional[str] = None
+    preferred_mail_channel: str = "outlook"
     department_id: Optional[int] = None
     department_name: Optional[str] = None
     is_active: bool = True
@@ -30,6 +33,9 @@ class UserModel:
             full_name=data.get("full_name") or data.get("username", ""),
             role=RoleEnum.normalize(str(raw_role)),
             email=data.get("email"),
+            outlook_email=data.get("outlook_email"),
+            gov_email=data.get("gov_email"),
+            preferred_mail_channel=data.get("preferred_mail_channel", "outlook"),
             department_id=data.get("department_id"),
             department_name=data.get("department_name") or data.get("department"),
             is_active=bool(data.get("is_active", True)),
@@ -44,6 +50,9 @@ class UserModel:
             "full_name": self.full_name,
             "role": self.role,
             "email": self.email,
+            "outlook_email": self.outlook_email,
+            "gov_email": self.gov_email,
+            "preferred_mail_channel": self.preferred_mail_channel,
             "department_id": self.department_id,
             "department_name": self.department_name,
             "is_active": self.is_active,

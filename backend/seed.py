@@ -18,14 +18,14 @@ def main():
     # 1. Ensure all tables exist in database
     print("\n1. Creating database tables...")
     models.Base.metadata.create_all(bind=engine)
-    print("✓ All database tables created.")
+    print("[OK] All database tables created.")
 
     # 2. Seed departments, employees, and test user accounts
     print("\n2. Seeding initial test data...")
     db = SessionLocal()
     try:
         crud.seed_data(db)
-        print("✓ Seed data inserted / verified successfully.")
+        print("[OK] Seed data inserted / verified successfully.")
 
         # 3. Print list of available accounts
         users = crud.get_users(db)
@@ -49,7 +49,7 @@ def main():
             print(f"{u.username:<18} | {role_val:<18} | {pwd}")
         print("=" * 60)
     except Exception as e:
-        print(f"❌ Error seeding database: {e}")
+        print(f"[ERROR] Error seeding database: {e}")
     finally:
         db.close()
 

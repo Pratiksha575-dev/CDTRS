@@ -20,6 +20,7 @@ class Endpoints:
 
     # --- Mail & Intake Pipeline ---
     INTAKE_LIST = "/intake"
+    INTAKE_SYNC_OUTLOOK = "/intake/sync-outlook"
     INTAKE_MANUAL_UPLOAD = "/intake/manual-upload"
     INTAKE_PROCESS = lambda intake_id: f"/intake/{intake_id}/process"
 
@@ -30,6 +31,7 @@ class Endpoints:
     DOCUMENT_DETAIL = lambda doc_id: f"/documents/{doc_id}"
     DOCUMENT_STATUS = lambda doc_id: f"/documents/{doc_id}/status"
     DOCUMENT_CLOSE = lambda doc_id: f"/documents/{doc_id}/close"
+    DOCUMENT_REMIND = lambda doc_id: f"/documents/{doc_id}/remind"
 
     # --- Document Routing (DS Workflow) ---
     DOCUMENT_ROUTE = lambda doc_id: f"/documents/{doc_id}/route"

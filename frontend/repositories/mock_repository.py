@@ -1330,3 +1330,56 @@ class MockRepository(BaseRepository):
         """Mock: no-op in offline mode."""
         return {}
 
+    # =========================================================
+    # OUTLOOK INTAKE & WORKFLOW REMINDERS (Mock Fallbacks)
+    # =========================================================
+
+    def sync_outlook(self) -> Dict[str, Any]:
+        """Mock mode: returns simulated status."""
+        return {
+            "status": "not_configured",
+            "synced_count": 0,
+            "ignored_duplicates": 0,
+            "message": "Outlook integration requires live API mode with configured Azure credentials."
+        }
+
+    def send_document_reminder(self, document_id: int, message: Optional[str] = None) -> Dict[str, Any]:
+        """Mock: dispatches reminder locally and logs history."""
+        doc = self.get_document(document_id)
+        if not doc:
+            return {"status": "error", "message": "Document not found."}
+
+        from services.notification_service import notification_service
+        recipient = notification_service.resolve_reminder_recipient(doc)
+        if not recipient:
+            return {"status": "error", "message": "No active recipient available for this document."}
+
+        default_msg = f"Action Reminder: Pending action required for document {doc.reference_no} ({doc.title})."
+        rem_msg = message or default_msg
+
+        self._send_notification(
+            user_id=recipient["user_id"],
+            document=doc,
+            title="Action Reminder",
+            message=rem_msg
+        )
+        self._log_event(
+            document_id=doc.id,
+            action="Action Reminder Sent",
+            from_role="DS",
+            to_role=recipient["role"],
+            remarks=f"Reminder dispatched to {recipient['user_name']} ({recipient['role']}): {rem_msg}"
+        )
+        return {
+            "status": "success",
+            "recipient_user_id": recipient["user_id"],
+            "recipient_name": recipient["user_name"],
+            "recipient_role": recipient["role"],
+            "document_id": doc.id,
+            "document_reference": doc.reference_no or str(doc.id),
+            "document_title": doc.title,
+            "channel_used": "in_app",
+            "email_dispatched": False,
+            "message": f"Action reminder dispatched to {recipient['user_name']} ({recipient['role']})."
+        }
+

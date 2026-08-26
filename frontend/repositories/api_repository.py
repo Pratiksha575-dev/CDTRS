@@ -161,9 +161,45 @@ class APIRepository(BaseRepository):
     # =========================================================
 
     def get_inbox(self) -> List[DocumentModel]:
-        """Retrieves role-scoped inbox queue from backend."""
+        """
+        Retrieves incoming intake queue (Outlook emails & dispatches) for DS intake,
+        falling back to documents inbox queue.
+        """
+        try:
+            intake_data = api_client.get(Endpoints.INTAKE_LIST)
+            if intake_data:
+                docs = []
+                for item in intake_data:
+                    # Only show un-processed (NEW) intake items
+                    status_str = str(item.get("processing_status", "")).upper()
+                    if status_str in ("PROCESSED", "IGNORED", "FAILED"):
+                        continue
+                    doc_dict = {
+                        "id": item.get("id"),
+                        "title": item.get("subject") or f"Incoming Dispatch #{item.get('id')}",
+                        "subject": item.get("subject"),
+                        "date": item.get("received_at"),
+                        "mode": item.get("source_type") or "Outlook",
+                        "source": item.get("sender_name") or item.get("sender_email") or "Outlook",
+                        "created_by": item.get("sender_email") or item.get("sender_name"),
+                        "status": "New / Received",
+                        "attachment_count": 1 if item.get("has_attachments") else 0,
+                        "description": item.get("body_reference")
+                    }
+                    docs.append(DocumentModel.from_dict(doc_dict))
+                return docs
+        except Exception:
+            pass
+
         data = api_client.get(Endpoints.DOCUMENTS_INBOX)
         return [DocumentModel.from_dict(d) for d in data]
+
+    def get_intake_items(self) -> List[Dict[str, Any]]:
+        """Retrieves raw incoming intake items from /intake."""
+        try:
+            return api_client.get(Endpoints.INTAKE_LIST) or []
+        except Exception:
+            return []
 
     def add_inbox_item(self, document: DocumentModel) -> DocumentModel:
         """
@@ -535,3 +571,28 @@ class APIRepository(BaseRepository):
             ) or {}
         except Exception:
             return {}
+
+    # =========================================================
+    # OUTLOOK INTAKE & WORKFLOW REMINDERS
+    # =========================================================
+
+    def sync_outlook(self) -> Dict[str, Any]:
+        """
+        Calls backend to synchronize incoming emails and attachments from DS Outlook mailbox.
+        """
+        try:
+            return api_client.post(Endpoints.INTAKE_SYNC_OUTLOOK, json={}) or {}
+        except Exception as ex:
+            return {
+                "status": "error",
+                "synced_count": 0,
+                "ignored_duplicates": 0,
+                "message": f"Failed to sync Outlook mailbox: {str(ex)}"
+            }
+
+    def send_document_reminder(self, document_id: int, message: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Dispatches an official action reminder via backend API to current responsible user.
+        """
+        payload = {"message": message} if message else {}
+        return api_client.post(Endpoints.DOCUMENT_REMIND(document_id), json=payload)

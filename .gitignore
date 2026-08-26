@@ -41,7 +41,6 @@ backend/.env
 # Backend uploads & local databases
 backend/uploads/
 *.db
-scratch/*.db
-scratch/*.pdf
-scratch/test_uploads/
+scratch/
+frontend/data/cache/
 *.zip

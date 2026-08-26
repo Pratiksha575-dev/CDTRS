@@ -143,6 +143,10 @@ class Employee(Base):
     full_name = Column(String(100), nullable=False)
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
     designation = Column(String(100), nullable=False)
+    # PZ_26/08 - Added email attributes for workflow notifications and mail routing
+    email = Column(String(255), nullable=True)
+    outlook_email = Column(String(255), nullable=True)
+    gov_email = Column(String(255), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     is_active = Column(Boolean, default=True)
 
@@ -163,6 +167,11 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(100), nullable=False)
     role = Column(SAEnum(UserRole, name="user_role"), nullable=False)
+    # PZ_26/08 - Added email, outlook_email, gov_email, and preferred_mail_channel
+    email = Column(String(255), unique=True, nullable=True, index=True)
+    outlook_email = Column(String(255), nullable=True)
+    gov_email = Column(String(255), nullable=True)
+    preferred_mail_channel = Column(String(50), default="outlook", nullable=False)
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     employee_id = Column(Integer, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -403,7 +412,8 @@ class Attachment(Base):
     __tablename__ = "attachments"
 
     id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
+    # PZ_26/08 - Made document_id nullable for pre-intake storage; linked to source_message_id
+    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=True)
     progress_update_id = Column(Integer, ForeignKey("progress_updates.id"), nullable=True)
     uploaded_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     file_name = Column(String(255), nullable=False)

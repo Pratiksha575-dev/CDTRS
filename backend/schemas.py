@@ -37,6 +37,9 @@ class EmployeeCreate(BaseModel):
     full_name:     str
     department_id: int
     designation:   str
+    email:         Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email:     Optional[str] = None
     user_id:       Optional[int] = None
 
 
@@ -46,6 +49,9 @@ class EmployeeResponse(BaseModel):
     full_name:     str
     department_id: int
     designation:   str
+    email:         Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email:     Optional[str] = None
     user_id:       Optional[int] = None
     is_active:     bool
 
@@ -57,24 +63,32 @@ class EmployeeResponse(BaseModel):
 # =========================================================
 
 class UserCreate(BaseModel):
-    username:      str
-    password:      str
-    full_name:     str
-    role:          UserRole
-    department_id: Optional[int] = None
-    employee_id:   Optional[int] = None
+    username:               str
+    password:               str
+    full_name:              str
+    role:                   UserRole
+    email:                  Optional[str] = None
+    outlook_email:          Optional[str] = None
+    gov_email:              Optional[str] = None
+    preferred_mail_channel: Optional[str] = "outlook"
+    department_id:          Optional[int] = None
+    employee_id:            Optional[int] = None
 
 
 class UserResponse(BaseModel):
-    id:            int
-    username:      str
-    full_name:     str
-    role:          UserRole
-    department_id: Optional[int] = None
-    employee_id:   Optional[int] = None
-    is_active:     bool
-    created_at:    datetime
-    updated_at:    datetime
+    id:                     int
+    username:               str
+    full_name:              str
+    role:                   UserRole
+    email:                  Optional[str] = None
+    outlook_email:          Optional[str] = None
+    gov_email:              Optional[str] = None
+    preferred_mail_channel: Optional[str] = "outlook"
+    department_id:          Optional[int] = None
+    employee_id:            Optional[int] = None
+    is_active:              bool
+    created_at:             datetime
+    updated_at:             datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -347,7 +361,7 @@ class CloseRequest(BaseModel):
 
 class AttachmentResponse(BaseModel):
     id:                  int
-    document_id:         int
+    document_id:         Optional[int] = None
     progress_update_id:  Optional[int] = None
     uploaded_by_user_id: int
     file_name:           str
@@ -359,6 +373,38 @@ class AttachmentResponse(BaseModel):
     created_at:          datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================
+# OUTLOOK SYNC & EMAIL DISPATCH SCHEMAS
+# =========================================================
+# PZ_26/08 - OUTLOOK INTEGRATION & ACTION REMINDERS
+# =========================================================
+
+class OutlookSyncResponse(BaseModel):
+    status:             str               # "success", "not_configured", "error"
+    synced_count:       int = 0
+    ignored_duplicates: int = 0
+    message:            str
+    details:            Optional[List[dict]] = None
+
+
+class ReminderSendRequest(BaseModel):
+    message: Optional[str] = None
+
+
+class ReminderSendResponse(BaseModel):
+    status:             str
+    recipient_user_id:  int
+    recipient_name:     str
+    recipient_email:    Optional[str] = None
+    recipient_role:     str
+    document_id:        int
+    document_reference: str
+    document_title:     str
+    channel_used:       str               # "outlook", "gov_mail", "in_app"
+    email_dispatched:   bool
+    message:            str
 
 
 # =========================================================

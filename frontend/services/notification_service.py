@@ -137,40 +137,29 @@ class NotificationService:
     ) -> Optional[Dict[str, Any]]:
         """
         Dispatches an official action reminder to the single resolved recipient.
-        Logs an audit trail event and notifies the recipient.
+        In API mode, delegates to backend send_document_reminder API.
+        In Mock mode, resolves recipient locally and logs event.
         """
         repo = get_repository()
-        doc = repo.get_document(document_id)
-        if not doc:
+        try:
+            res = repo.send_document_reminder(document_id, message=message)
+            if res and res.get("status") == "success":
+                from services.event_bus import event_bus
+                event_bus.notify_workflow_updated(document_id)
+                return {
+                    "recipient_type": "RESPONSIBLE_USER",
+                    "user_id": res.get("recipient_user_id"),
+                    "user_name": res.get("recipient_name"),
+                    "recipient_email": res.get("recipient_email"),
+                    "role": res.get("recipient_role"),
+                    "channel_used": res.get("channel_used"),
+                    "email_dispatched": res.get("email_dispatched", False),
+                    "document_id": document_id,
+                    "message": res.get("message")
+                }
             return None
-
-        recipient = self.resolve_reminder_recipient(doc)
-        if not recipient:
+        except Exception:
             return None
-
-        default_msg = f"Action Reminder: Pending action required for document {doc.reference} ({doc.title})."
-        rem_msg = message or default_msg
-
-        if hasattr(repo, "_send_notification"):
-            repo._send_notification(
-                user_id=recipient["user_id"],
-                document=doc,
-                title="Action Reminder",
-                message=rem_msg
-            )
-
-        if hasattr(repo, "_log_event"):
-            repo._log_event(
-                document_id=doc.id,
-                action="Action Reminder Sent",
-                from_role="DS",
-                to_role=recipient["role"],
-                remarks=f"Reminder dispatched to {recipient['user_name']} ({recipient['role']})."
-            )
-
-        from services.event_bus import event_bus
-        event_bus.notify_workflow_updated(doc.id)
-        return recipient
 
     def send_all_due_reminders(self) -> List[Dict[str, Any]]:
         """

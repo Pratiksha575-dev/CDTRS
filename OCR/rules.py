@@ -1,3 +1,4 @@
+
 """
 =============================================================================
 CDTRS OCR — Regex Rules & Department Keyword Configuration

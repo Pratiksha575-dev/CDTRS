@@ -1323,10 +1323,15 @@ class DocumentViewer(QWidget):
                     )
                 return
 
+            email_note = f" (Email: {recipient['recipient_email']})" if recipient.get("recipient_email") else " (In-App notification recorded)"
+            email_status_str = "📧 Email dispatched via Outlook." if recipient.get("email_dispatched") else "📌 In-app notification recorded."
+
             QMessageBox.information(
                 self,
                 "Action Reminder Dispatched",
-                f"Official deadline reminder successfully dispatched to {recipient['user_name']} ({recipient['role']}) for {self.document.reference}."
+                f"Official action reminder successfully dispatched for {self.document.reference}.\n\n"
+                f"• Recipient: {recipient.get('user_name', 'Responsible User')} ({recipient.get('role', 'Staff')}){email_note}\n"
+                f"• Delivery Status: {email_status_str}"
             )
         finally:
             self._action_in_progress = False

@@ -258,3 +258,17 @@ class BaseRepository(ABC):
     def analyze_routing(self, document_id: int) -> Dict[str, Any]:
         """Generates (or refreshes) the routing suggestion for a document."""
         pass
+
+    # =========================================================
+    # OUTLOOK INTAKE & WORKFLOW REMINDERS
+    # =========================================================
+
+    @abstractmethod
+    def sync_outlook(self) -> Dict[str, Any]:
+        """Synchronizes new incoming emails and attachments from DS Outlook mailbox."""
+        pass
+
+    @abstractmethod
+    def send_document_reminder(self, document_id: int, message: Optional[str] = None) -> Dict[str, Any]:
+        """Dispatches an official action reminder to the current responsible user with email notification."""
+        pass

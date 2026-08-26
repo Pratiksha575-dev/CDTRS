@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -24,6 +24,8 @@ class InboxPage(QWidget):
     Director Secretary (DS) Incoming Communications & Document Intake Queue.
     Displays incoming dispatches, government emails, and departmental communications
     awaiting OCR text extraction and canonical workflow registration.
+    Director Secretary (DS) Incoming Mail & Ingestion Queue.
+    Awaiting document registration, OCR processing, and director review routing.
     """
 
     process_requested = Signal(object)
@@ -32,7 +34,12 @@ class InboxPage(QWidget):
         super().__init__()
         self.documents: List[DocumentModel] = []
         self.setup_ui()
-        self.load_documents()
+        
+        # Periodic Background Auto-Sync (Every 30 seconds)
+        self._autosync_timer = QTimer(self)
+        self._autosync_timer.timeout.connect(self._background_autosync)
+        self._autosync_timer.start(30000)
+
         from services.event_bus import event_bus
         event_bus.inbox_updated.connect(self.load_documents)
         event_bus.data_changed.connect(self.load_documents)
@@ -40,6 +47,8 @@ class InboxPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.load_documents()
+        # Silent auto-sync on page view
+        QTimer.singleShot(500, self._background_autosync)
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
@@ -47,8 +56,13 @@ class InboxPage(QWidget):
         main_layout.setSpacing(15)
 
         # --------------------------------
-        # PAGE HEADER
         # --------------------------------
+        # PAGE HEADER & ACTIONS
+        # --------------------------------
+        header_row = QHBoxLayout()
+        header_vbox = QVBoxLayout()
+        header_vbox.setSpacing(2)
+
         title = QLabel("Incoming Communications & Intake")
         title.setObjectName("pageTitle")
 
@@ -57,8 +71,25 @@ class InboxPage(QWidget):
         )
         subtitle.setObjectName("pageSubtitle")
 
-        main_layout.addWidget(title)
-        main_layout.addWidget(subtitle)
+        header_vbox.addWidget(title)
+        header_vbox.addWidget(subtitle)
+        header_row.addLayout(header_vbox, 1)
+
+        # Auto-Sync Status Badge
+        self.sync_badge = QLabel("🟢 Auto-Sync Active • Ready")
+        self.sync_badge.setStyleSheet(
+            "background-color: #F0FDF4; color: #166534; border: 1px solid #BBF7D0; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 600;"
+        )
+        header_row.addWidget(self.sync_badge)
+
+        self.sync_outlook_btn = QPushButton("🔄 Sync Now")
+        self.sync_outlook_btn.setStyleSheet(
+            "background-color: #0F172A; color: white; font-weight: 600; padding: 8px 16px; border-radius: 5px; font-size: 12px;"
+        )
+        self.sync_outlook_btn.clicked.connect(self._sync_outlook)
+        header_row.addWidget(self.sync_outlook_btn)
+
+        main_layout.addLayout(header_row)
 
         # --------------------------------
         # TABLE & EMPTY STATE CONTAINER
@@ -179,3 +210,62 @@ class InboxPage(QWidget):
 
         selected_item = self.documents[row]
         self.process_requested.emit(selected_item)
+
+    def _background_autosync(self):
+        """Silently auto-syncs mailbox in background without intrusive popups."""
+        try:
+            from datetime import datetime
+            from repositories.provider import get_repository
+            repo = get_repository()
+            result = repo.sync_outlook()
+
+            status = result.get("status")
+            now_str = datetime.now().strftime("%H:%M:%S")
+
+            if status == "success":
+                synced_cnt = result.get("synced_count", 0)
+                if synced_cnt > 0:
+                    self.sync_badge.setText(f"🟢 Auto-Synced ({now_str}) • {synced_cnt} new mail(s)")
+                    self.load_documents()
+                else:
+                    self.sync_badge.setText(f"🟢 Auto-Synced ({now_str})")
+            elif status == "not_configured":
+                self.sync_badge.setText("⚪ Standby (Manual Mode)")
+        except Exception:
+            pass
+
+    def _sync_outlook(self):
+        """Triggers manual mailbox sync with responsive button state."""
+        self.sync_outlook_btn.setEnabled(False)
+        self.sync_outlook_btn.setText("⏳ Syncing...")
+        try:
+            from datetime import datetime
+            from repositories.provider import get_repository
+            repo = get_repository()
+            result = repo.sync_outlook()
+
+            status = result.get("status")
+            message = result.get("message", "Mailbox synchronization complete.")
+            now_str = datetime.now().strftime("%H:%M:%S")
+
+            if status == "success":
+                synced_cnt = result.get("synced_count", 0)
+                self.sync_badge.setText(f"🟢 Synced ({now_str}) • {synced_cnt} new mail(s)")
+                QMessageBox.information(self, "Outlook Synchronized", message)
+            elif status == "not_configured":
+                self.sync_badge.setText("⚪ Standby (Manual Mode)")
+                QMessageBox.information(
+                    self,
+                    "Outlook Notice",
+                    f"{message}\n\nManual upload and existing intake documents remain fully accessible."
+                )
+            else:
+                QMessageBox.warning(self, "Sync Issue", message)
+
+            self.load_documents()
+
+        except Exception as ex:
+            QMessageBox.warning(self, "Sync Error", f"Could not complete Outlook sync: {str(ex)}")
+        finally:
+            self.sync_outlook_btn.setEnabled(True)
+            self.sync_outlook_btn.setText("🔄 Sync Now")

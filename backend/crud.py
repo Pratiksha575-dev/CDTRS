@@ -291,7 +291,11 @@ def get_incoming_message_by_id(db: Session, msg_id: int) -> Optional[models.Inco
     return db.query(models.IncomingMessage).filter(models.IncomingMessage.id == msg_id).first()
 
 
-def process_intake_to_document(db: Session, msg_id: int, proc_req: schemas.IntakeProcessRequest, user: models.User) -> models.Document:
+def get_incoming_message_by_external_id(db: Session, external_id: str) -> Optional[models.IncomingMessage]:
+    return db.query(models.IncomingMessage).filter(models.IncomingMessage.external_message_id == external_id).first()
+
+
+def process_intake_to_document(db: Session, msg_id: int, proc_req: schemas.IntakeProcessRequest, user: models.User) -> Optional[models.Document]:
     msg = get_incoming_message_by_id(db, msg_id)
     if not msg:
         return None
@@ -311,7 +315,21 @@ def process_intake_to_document(db: Session, msg_id: int, proc_req: schemas.Intak
 
     doc = create_document(db, doc_create, created_by=user.id)
     msg.processing_status = MessageProcessingStatus.PROCESSED
+
+    # Re-link pre-intake attachments to the newly generated document
+    existing_attachments = db.query(models.Attachment).filter(
+        models.Attachment.source_message_id == msg.id,
+        models.Attachment.document_id == None
+    ).all()
+    for att in existing_attachments:
+        att.document_id = doc.doc_id
+
     db.commit()
+    db.refresh(doc)
+
+    # Automatically trigger OCR processing on canonical document
+    trigger_ocr_processing(db, doc.doc_id)
+
     return doc
 
 
@@ -957,7 +975,7 @@ def compute_checksum(data: bytes) -> str:
 
 def create_attachment(
     db: Session,
-    doc_id: int,
+    doc_id: Optional[int],
     progress_update_id: Optional[int],
     uploaded_by: int,
     file_name: str,
@@ -984,15 +1002,16 @@ def create_attachment(
     db.commit()
     db.refresh(att)
 
-    _add_workflow_history(
-        db=db,
-        document_id=doc_id,
-        user_id=uploaded_by,
-        action="ATTACHMENT_UPLOADED",
-        from_role=None,
-        to_role=None,
-        details=f"File uploaded: {file_name} ({attachment_type.value})"
-    )
+    if doc_id:
+        _add_workflow_history(
+            db=db,
+            document_id=doc_id,
+            user_id=uploaded_by,
+            action="ATTACHMENT_UPLOADED",
+            from_role=None,
+            to_role=None,
+            details=f"File uploaded: {file_name} ({attachment_type.value})"
+        )
 
     return att
 
@@ -1485,6 +1504,137 @@ def mark_reminder_read(db: Session, reminder_id: int, user_id: int) -> Optional[
     return rem
 
 
+def send_document_reminder(
+    db: Session,
+    doc_id: int,
+    current_user: models.User,
+    custom_message: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Triggers an official action reminder for a single document based strictly on CURRENT workflow ownership:
+    1. Active Work Assignment (Assigned Employee)
+    2. Target Department HOD
+    3. Current Owner (Director / DS)
+    4. Creator (DS)
+    """
+    doc = get_document(db, doc_id)
+    if not doc:
+        return {"status": "error", "message": "Document not found."}
+
+    if doc.status == DocumentStatus.CLOSED:
+        return {"status": "error", "message": "Document is closed. Action reminders cannot be sent for closed documents."}
+
+    # Resolve responsible recipient
+    recipient: Optional[models.User] = None
+    role_label = "Responsible Staff"
+
+    active_assignment = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.document_id == doc.doc_id,
+        models.WorkAssignment.is_active == True
+    ).first()
+
+    if active_assignment and active_assignment.assigned_to:
+        recipient = active_assignment.assigned_to
+        role_label = "Assigned Employee"
+    elif doc.target_department_id:
+        hod = db.query(models.User).filter(
+            models.User.department_id == doc.target_department_id,
+            models.User.role == UserRole.HOD,
+            models.User.is_active == True
+        ).first()
+        if hod:
+            recipient = hod
+            role_label = f"HOD ({doc.target_department_name or 'Department'})"
+    elif doc.current_owner_id:
+        recipient = db.query(models.User).filter(models.User.id == doc.current_owner_id).first()
+        role_label = recipient.role.value if recipient else "Current Owner"
+    else:
+        recipient = db.query(models.User).filter(models.User.id == doc.created_by).first()
+        role_label = "Creator (DS)"
+
+    if not recipient:
+        return {"status": "error", "message": "No active workflow recipient could be resolved for this document."}
+
+    today = date.today()
+    reason = ReminderReason.ACTION_REQUIRED
+    if doc.deadline:
+        if doc.deadline < today:
+            reason = ReminderReason.OVERDUE
+        elif doc.deadline <= today + timedelta(days=2):
+            reason = ReminderReason.DUE_SOON
+
+    # Deduplication and DB record
+    dedup_key = f"DOC_{doc.doc_id}_USER_{recipient.id}_{reason.value}_{today.isoformat()}_{int(datetime.now().timestamp())}"
+    reminder = models.Reminder(
+        document_id=doc.doc_id,
+        recipient_user_id=recipient.id,
+        reason=reason,
+        due_at=datetime.combine(doc.deadline, datetime.min.time()) if doc.deadline else None,
+        sent_at=datetime.now(),
+        is_read=False,
+        deduplication_key=dedup_key
+    )
+    db.add(reminder)
+    db.commit()
+    db.refresh(reminder)
+
+    default_msg = f"Action reminder dispatched for document {doc.reference_no} ({doc.title}). Immediate action required."
+    rem_msg = custom_message or default_msg
+
+    # Log workflow history & in-app notification
+    entry = _add_workflow_history(
+        db=db,
+        document_id=doc.doc_id,
+        user_id=current_user.id,
+        action="ACTION_REMINDER_SENT",
+        from_role=current_user.role.value,
+        to_role=recipient.role.value,
+        details=f"Official reminder sent to {recipient.full_name} ({role_label}): {rem_msg}"
+    )
+
+    _create_notification(
+        db=db,
+        user_id=recipient.id,
+        document_id=doc.doc_id,
+        workflow_event_id=entry.id,
+        title=f"Action Reminder: {doc.reference_no}",
+        message=rem_msg
+    )
+
+    # Dispatched via MailService
+    email_dispatched = False
+    channel_used = recipient.preferred_mail_channel or "outlook"
+    email_addr = None
+
+    try:
+        from mail.service import mail_service
+        email_addr = mail_service.resolve_user_email(recipient)
+        email_dispatched = mail_service.send_workflow_notification(
+            db=db,
+            doc_id=doc.doc_id,
+            recipient_user_id=recipient.id,
+            title=f"Action Reminder ({role_label})",
+            message=rem_msg,
+            channel=channel_used
+        )
+    except Exception as ex:
+        pass
+
+    return {
+        "status": "success",
+        "recipient_user_id": recipient.id,
+        "recipient_name": recipient.full_name,
+        "recipient_email": email_addr or recipient.email,
+        "recipient_role": role_label,
+        "document_id": doc.doc_id,
+        "document_reference": doc.reference_no,
+        "document_title": doc.title,
+        "channel_used": channel_used,
+        "email_dispatched": email_dispatched,
+        "message": f"Action reminder successfully dispatched to {recipient.full_name} ({role_label})."
+    }
+
+
 # =========================================================
 # WORKFLOW HISTORY
 # =========================================================
@@ -1496,17 +1646,8 @@ def _add_workflow_history(
     action: str,
     from_role: Optional[str] = None,
     to_role: Optional[str] = None,
-    details: Optional[str] = None
+    details: Optional[str] = None,
 ) -> models.WorkflowHistory:
-    # Deduplicate consecutive identical entries on the same document
-    last_entry = (
-        db.query(models.WorkflowHistory)
-        .filter(models.WorkflowHistory.document_id == document_id)
-        .order_by(models.WorkflowHistory.id.desc())
-        .first()
-    )
-    if last_entry and last_entry.action == action and last_entry.details == details:
-        return last_entry
 
     entry = models.WorkflowHistory(
         document_id=document_id,
@@ -1607,6 +1748,10 @@ def create_audit_log(
     db.add(audit)
     db.commit()
     return audit
+
+
+def get_audit_logs(db: Session) -> List[models.AuditLog]:
+    return db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc()).all()
 
 
 # =========================================================
@@ -1752,8 +1897,8 @@ def seed_data(db: Session) -> None:
     """
     Populates the database with:
     - All canonical departments: Administration, Finance, Procurement, Technical, HR, Maintenance
-    - HODs and employees across departments
-    - DS and Director accounts
+    - HODs and employees across departments with email identities
+    - DS and Director accounts with email identities
     - The 5 canonical demonstration documents with initial audit histories
     """
     # 1. Departments
@@ -1780,11 +1925,11 @@ def seed_data(db: Session) -> None:
 
     # 2. Employees (Records)
     employees_data = [
-        {"code": "EMP-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Accounts Officer"},
-        {"code": "EMP-002", "name": "Priya Verma", "dept": "Procurement", "designation": "Procurement Specialist"},
-        {"code": "EMP-003", "name": "Anil Kumar", "dept": "Technical", "designation": "Systems Engineer"},
-        {"code": "EMP-004", "name": "Sneha Deshmukh", "dept": "HR", "designation": "HR Officer"},
-        {"code": "EMP-005", "name": "Ramesh Pawar", "dept": "Maintenance", "designation": "Facility Supervisor"},
+        {"code": "EMP-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Accounts Officer", "email": "rahul.sharma@cdtrs.gov.in", "outlook_email": "rahul.sharma@outlook.com", "gov_email": "rahul.sharma@nic.in"},
+        {"code": "EMP-002", "name": "Priya Verma", "dept": "Procurement", "designation": "Procurement Specialist", "email": "priya.verma@cdtrs.gov.in", "outlook_email": "priya.verma@outlook.com", "gov_email": "priya.verma@nic.in"},
+        {"code": "EMP-003", "name": "Anil Kumar", "dept": "Technical", "designation": "Systems Engineer", "email": "anil.kumar@cdtrs.gov.in", "outlook_email": "anil.kumar@outlook.com", "gov_email": "anil.kumar@nic.in"},
+        {"code": "EMP-004", "name": "Sneha Deshmukh", "dept": "HR", "designation": "HR Officer", "email": "sneha.deshmukh@cdtrs.gov.in", "outlook_email": "sneha.deshmukh@outlook.com", "gov_email": "sneha.deshmukh@nic.in"},
+        {"code": "EMP-005", "name": "Ramesh Pawar", "dept": "Maintenance", "designation": "Facility Supervisor", "email": "ramesh.pawar@cdtrs.gov.in", "outlook_email": "ramesh.pawar@outlook.com", "gov_email": "ramesh.pawar@nic.in"},
     ]
 
     emp_map = {}
@@ -1795,13 +1940,21 @@ def seed_data(db: Session) -> None:
                 employee_code=emp_d["code"],
                 full_name=emp_d["name"],
                 department_id=dept_map[emp_d["dept"]],
-                designation=emp_d["designation"]
+                designation=emp_d["designation"],
+                email=emp_d["email"],
+                outlook_email=emp_d["outlook_email"],
+                gov_email=emp_d["gov_email"]
             )
             db.add(emp)
             db.commit()
             db.refresh(emp)
             emp_map[emp_d["code"]] = emp.id
         else:
+            if not existing.email:
+                existing.email = emp_d["email"]
+                existing.outlook_email = emp_d["outlook_email"]
+                existing.gov_email = emp_d["gov_email"]
+                db.commit()
             emp_map[emp_d["code"]] = existing.id
 
     # 3. Users (Accounts)
@@ -1811,6 +1964,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@ds",
             "full_name": "Director Secretary",
             "role": UserRole.DS,
+            "email": "ds.office@cdtrs.gov.in",
+            "outlook_email": "ds.office@outlook.com",
+            "gov_email": "ds.office@nic.in",
             "department_id": dept_map["Administration"],
             "employee_id": None
         },
@@ -1819,6 +1975,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@director",
             "full_name": "The Director",
             "role": UserRole.DIRECTOR,
+            "email": "director@cdtrs.gov.in",
+            "outlook_email": "director@outlook.com",
+            "gov_email": "director@nic.in",
             "department_id": None,
             "employee_id": None
         },
@@ -1827,6 +1986,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@hod",
             "full_name": "Head of Finance",
             "role": UserRole.HOD,
+            "email": "hod.finance@cdtrs.gov.in",
+            "outlook_email": "hod.finance@outlook.com",
+            "gov_email": "hod.finance@nic.in",
             "department_id": dept_map["Finance"],
             "employee_id": None
         },
@@ -1835,6 +1997,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@hod",
             "full_name": "Head of Procurement",
             "role": UserRole.HOD,
+            "email": "hod.procurement@cdtrs.gov.in",
+            "outlook_email": "hod.procurement@outlook.com",
+            "gov_email": "hod.procurement@nic.in",
             "department_id": dept_map["Procurement"],
             "employee_id": None
         },
@@ -1843,6 +2008,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@hod",
             "full_name": "Head of Technical & IT",
             "role": UserRole.HOD,
+            "email": "hod.tech@cdtrs.gov.in",
+            "outlook_email": "hod.tech@outlook.com",
+            "gov_email": "hod.tech@nic.in",
             "department_id": dept_map["Technical"],
             "employee_id": None
         },
@@ -1851,6 +2019,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@hod",
             "full_name": "Head of Human Resources",
             "role": UserRole.HOD,
+            "email": "hod.hr@cdtrs.gov.in",
+            "outlook_email": "hod.hr@outlook.com",
+            "gov_email": "hod.hr@nic.in",
             "department_id": dept_map["HR"],
             "employee_id": None
         },
@@ -1859,6 +2030,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@emp",
             "full_name": "Rahul Sharma",
             "role": UserRole.EMPLOYEE,
+            "email": "rahul.sharma@cdtrs.gov.in",
+            "outlook_email": "rahul.sharma@outlook.com",
+            "gov_email": "rahul.sharma@nic.in",
             "department_id": dept_map["Finance"],
             "employee_id": emp_map.get("EMP-001")
         },
@@ -1867,6 +2041,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@emp",
             "full_name": "Priya Verma",
             "role": UserRole.EMPLOYEE,
+            "email": "priya.verma@cdtrs.gov.in",
+            "outlook_email": "priya.verma@outlook.com",
+            "gov_email": "priya.verma@nic.in",
             "department_id": dept_map["Procurement"],
             "employee_id": emp_map.get("EMP-002")
         },
@@ -1875,6 +2052,9 @@ def seed_data(db: Session) -> None:
             "password": "cdtrs@emp",
             "full_name": "Anil Kumar",
             "role": UserRole.EMPLOYEE,
+            "email": "anil.kumar@cdtrs.gov.in",
+            "outlook_email": "anil.kumar@outlook.com",
+            "gov_email": "anil.kumar@nic.in",
             "department_id": dept_map["Technical"],
             "employee_id": emp_map.get("EMP-003")
         }
@@ -1889,117 +2069,30 @@ def seed_data(db: Session) -> None:
                 password_hash=hash_password(u["password"]),
                 full_name=u["full_name"],
                 role=u["role"],
+                email=u["email"],
+                outlook_email=u["outlook_email"],
+                gov_email=u["gov_email"],
+                preferred_mail_channel="outlook",
                 department_id=u["department_id"],
                 employee_id=u["employee_id"],
             )
             db.add(user)
             db.commit()
             db.refresh(user)
+            user_objs[u["username"]] = user
+        else:
+            if not existing.email:
+                existing.email = u["email"]
+                existing.outlook_email = u["outlook_email"]
+                existing.gov_email = u["gov_email"]
+                db.commit()
+            user_objs[u["username"]] = existing
 
             # Link employee back to user
             if u["employee_id"]:
                 db_emp = db.query(models.Employee).filter(models.Employee.id == u["employee_id"]).first()
                 if db_emp and not db_emp.user_id:
-                    db_emp.user_id = user.id
+                    db_emp.user_id = user_objs[u["username"]].id
                     db.commit()
-            user_objs[u["username"]] = user
-        else:
-            user_objs[u["username"]] = existing
-
-    # 4. Canonical 5 Demonstration Documents (if documents table is empty)
-    ds_user_obj = user_objs.get("ds_user")
-    ds_id = ds_user_obj.id if ds_user_obj else 1
-
-    if db.query(models.Document).count() == 0:
-        now_dt = datetime.now()
-        deadline_7d = now_dt + timedelta(days=7)
-
-        docs_seed = [
-            {
-                "reference_no": "CDTRS-2026-0001",
-                "title": "National Higher Education Accreditation & Governance Compliance Directive",
-                "source": "Ministry of Higher Education",
-                "mode": SourceType.GOVERNMENT_MAIL,
-                "priority": Priority.MEDIUM,
-                "deadline": None,
-                "director_remark": None,
-                "target_dept_id": None
-            },
-            {
-                "reference_no": "CDTRS-2026-0002",
-                "title": "Q3 Financial Audit & Capital Grant Disbursement Notice",
-                "source": "State Audit Bureau",
-                "mode": SourceType.OUTLOOK,
-                "priority": Priority.HIGH,
-                "deadline": None,
-                "director_remark": None,
-                "target_dept_id": dept_map.get("Finance")
-            },
-            {
-                "reference_no": "CDTRS-2026-0003",
-                "title": "Statutory Vendor Tax Clearance & Procurement Verification",
-                "source": "Central Board of Direct Taxes",
-                "mode": SourceType.MANUAL,
-                "priority": Priority.HIGH,
-                "deadline": None,
-                "director_remark": None,
-                "target_dept_id": dept_map.get("Finance")
-            },
-            {
-                "reference_no": "CDTRS-2026-0004",
-                "title": "Urgent Campus Security Infrastructure Upgrade Order (Pre-Reviewed)",
-                "source": "Office of the Director",
-                "mode": SourceType.MANUAL,
-                "priority": Priority.HIGH,
-                "deadline": None,
-                "director_remark": "Approved. Assign to Rahul Sharma for budget allocation.",
-                "target_dept_id": dept_map.get("Finance")
-            },
-            {
-                "reference_no": "CDTRS-2026-0005",
-                "title": "Critical Cybersecurity Firewall Patch & Server Migration Order",
-                "source": "State Cyber Security Agency",
-                "mode": SourceType.MANUAL,
-                "priority": Priority.HIGH,
-                "deadline": deadline_7d,
-                "director_remark": None,
-                "target_dept_id": dept_map.get("Technical")
-            }
-        ]
-
-        for d in docs_seed:
-            doc_obj = models.Document(
-                reference_no=d["reference_no"],
-                title=d["title"],
-                description=d["title"],
-                received_date=now_dt,
-                deadline=d["deadline"],
-                source=d["source"],
-                mode=d["mode"],
-                priority=d["priority"],
-                status=DocumentStatus.RECEIVED,
-                current_stage=WorkflowStage.DS,
-                current_owner_id=ds_id,
-                created_by=ds_id,
-                target_department_id=d.get("target_dept_id"),
-                director_remark=d["director_remark"],
-                ocr_status=OCRStatus.COMPLETED,
-                ocr_text=f"Official extracted text content for {d['title']}. Reference: {d['reference_no']}.",
-                version=1
-            )
-            db.add(doc_obj)
-            db.commit()
-            db.refresh(doc_obj)
-
-            # Insert initial audit history
-            _add_workflow_history(
-                db=db,
-                document_id=doc_obj.doc_id,
-                user_id=ds_id,
-                action="DOCUMENT_RECEIVED",
-                from_role="DS",
-                to_role="DS",
-                details=f"Document ingested and registered as {doc_obj.reference_no}"
-            )
 
     print("Seed data inserted successfully.")

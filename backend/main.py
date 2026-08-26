@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -103,6 +104,32 @@ ALLOWED_EXTENSIONS = {
 
 
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async def _periodic_mailbox_sync():
+        while True:
+            try:
+                await asyncio.sleep(30)
+                from database import SessionLocal
+                from mail.service import mail_service
+                db = SessionLocal()
+                try:
+                    if mail_service.is_configured("outlook"):
+                        mail_service.sync_ds_mailbox(db)
+                finally:
+                    db.close()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    sync_task = asyncio.create_task(_periodic_mailbox_sync())
+    yield
+    sync_task.cancel()
+
+
 # =========================================================
 # FASTAPI APPLICATION
 # =========================================================
@@ -113,6 +140,7 @@ app = FastAPI(
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
@@ -500,6 +528,21 @@ def get_intake_items(
     current_user: models.User = Depends(require_roles(UserRole.DS)),
 ):
     return crud.get_incoming_messages(db)
+
+
+@app.post(
+    f"{API_V1}/intake/sync-outlook",
+    response_model=schemas.OutlookSyncResponse,
+    tags=["Intake"],
+    summary="DS: Synchronize incoming emails from Director Secretary Outlook mailbox",
+)
+def sync_outlook_mailbox(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.DS)),
+):
+    from mail.service import mail_service
+    result = mail_service.sync_ds_mailbox(db)
+    return result
 
 
 @app.post(
@@ -1221,6 +1264,31 @@ def get_document_history(
 # =========================================================
 # REMINDERS & DEADLINE ESCALATION
 # =========================================================
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/remind",
+    response_model=schemas.ReminderSendResponse,
+    tags=["Reminders"],
+    summary="DS / System: Dispatch an official action reminder to the current responsible workflow user",
+)
+def send_document_action_reminder(
+    document_id: int,
+    body: Optional[schemas.ReminderSendRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _get_authorized_doc_or_404(db, document_id, current_user)
+    custom_msg = body.message if body else None
+    result = crud.send_document_reminder(
+        db=db,
+        doc_id=document_id,
+        current_user=current_user,
+        custom_message=custom_msg
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return schemas.ReminderSendResponse(**result)
+
 
 @app.get(
     f"{API_V1}/reminders",
