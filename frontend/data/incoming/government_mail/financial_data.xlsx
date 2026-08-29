@@ -1,0 +1,6 @@
+# Financial Data Workbook - FY26 Q3 Reconciliation
+Department,Allocated_INR,Utilized_INR,Variance_INR,Status
+Finance,15000000,14200000,800000,Reconciled
+Procurement,22000000,21800000,200000,Settled
+HR,8000000,7900000,100000,Settled
+FCTD,35000000,31000000,4000000,Pending Audit

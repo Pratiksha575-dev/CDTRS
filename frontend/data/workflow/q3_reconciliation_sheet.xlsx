@@ -1,0 +1,5 @@
+# Progress Supporting Spreadsheet: Voucher Settlement Ledger
+Voucher_No,Date,Head_Of_Account,Amount_INR,Settlement_Status
+V-2026-8801,2026-08-01,Capital Hardware,450000,Approved
+V-2026-8802,2026-08-05,Data Center Power,120000,Approved
+V-2026-8803,2026-08-10,Software Subscriptions,230000,Approved
