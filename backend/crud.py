@@ -43,7 +43,8 @@ import schemas
 from models import (
     UserRole, DocumentStatus, WorkflowStage, Priority, RouteType,
     SourceType, MessageProcessingStatus, AttachmentType, OCRStatus,
-    RoutingSource, RemarkType, ReminderReason
+    RoutingSource, RemarkType, ReminderReason,
+    ProgressValidationStatus, AssignmentStatus
 )
 
 
@@ -447,10 +448,10 @@ def get_documents(db: Session) -> List[models.Document]:
 def get_inbox(db: Session, user: models.User) -> List[models.Document]:
     """
     Hard-enforced backend scoping:
-    - DS: All documents they created or are current owner of
-    - DIRECTOR: Only documents routed to Director (current_stage = DIRECTOR and current_owner = user)
-    - HOD: Only documents routed to HOD's department (current_stage = HOD and target_dept = user.department_id)
-    - EMPLOYEE: Only documents actively assigned to user or directly routed to user
+    - DS: All documents in DS intake stage
+    - DIRECTOR: Only documents routed to Director (current_stage = DIRECTOR)
+    - HOD: Documents routed to HOD's department (target_department_id OR doc_assignments matching user.department_id)
+    - EMPLOYEE: Documents actively assigned to user via WorkAssignment or DocumentAssignment
     """
     if user.role == UserRole.DS:
         return (
@@ -468,7 +469,10 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
             db.query(models.Document)
             .filter(
                 models.Document.current_stage == WorkflowStage.DIRECTOR,
-                models.Document.current_owner_id == user.id
+                or_(
+                    models.Document.current_owner_id == user.id,
+                    models.Document.current_owner_id == None
+                )
             )
             .order_by(models.Document.updated_at.desc())
             .all()
@@ -477,11 +481,25 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
     elif user.role == UserRole.HOD:
         if not user.department_id:
             return []
+        
+        # Subquery for documents assigned to this department in multi-assignment table
+        multi_dept_doc_ids = (
+            db.query(models.DocumentAssignment.document_id)
+            .filter(models.DocumentAssignment.department_id == user.department_id)
+            .all()
+        )
+        multi_ids = [r[0] for r in multi_dept_doc_ids]
+
         return (
             db.query(models.Document)
             .filter(
-                models.Document.current_stage == WorkflowStage.HOD,
-                models.Document.target_department_id == user.department_id
+                or_(
+                    and_(
+                        models.Document.current_stage == WorkflowStage.HOD,
+                        models.Document.target_department_id == user.department_id
+                    ),
+                    models.Document.doc_id.in_(multi_ids)
+                )
             )
             .order_by(models.Document.updated_at.desc())
             .all()
@@ -496,13 +514,18 @@ def get_inbox(db: Session, user: models.User) -> List[models.Document]:
             )
             .all()
         )
-        assigned_doc_ids = [r[0] for r in assigned_doc_ids]
+        multi_assign_ids = (
+            db.query(models.DocumentAssignment.document_id)
+            .filter(models.DocumentAssignment.assigned_employee_id == user.id)
+            .all()
+        )
+        combined_ids = list(set([r[0] for r in assigned_doc_ids] + [r[0] for r in multi_assign_ids]))
 
         return (
             db.query(models.Document)
             .filter(
                 or_(
-                    models.Document.doc_id.in_(assigned_doc_ids),
+                    models.Document.doc_id.in_(combined_ids),
                     and_(
                         models.Document.current_owner_id == user.id,
                         models.Document.current_stage == WorkflowStage.EMPLOYEE
@@ -521,13 +544,23 @@ def is_document_accessible(db: Session, doc: models.Document, user: models.User)
     if user.role in (UserRole.DS, UserRole.DIRECTOR):
         return True
     elif user.role == UserRole.HOD:
-        return (user.department_id is not None and doc.target_department_id == user.department_id)
+        if user.department_id is not None and doc.target_department_id == user.department_id:
+            return True
+        has_multi = db.query(models.DocumentAssignment).filter(
+            models.DocumentAssignment.document_id == doc.doc_id,
+            models.DocumentAssignment.department_id == user.department_id
+        ).first()
+        return has_multi is not None
     elif user.role == UserRole.EMPLOYEE:
         has_assignment = db.query(models.WorkAssignment).filter(
             models.WorkAssignment.document_id == doc.doc_id,
             models.WorkAssignment.assigned_to_user_id == user.id
         ).first()
-        return (doc.current_owner_id == user.id or has_assignment is not None)
+        has_multi = db.query(models.DocumentAssignment).filter(
+            models.DocumentAssignment.document_id == doc.doc_id,
+            models.DocumentAssignment.assigned_employee_id == user.id
+        ).first()
+        return (doc.current_owner_id == user.id or has_assignment is not None or has_multi is not None)
     return False
 
 
@@ -538,9 +571,18 @@ def get_accessible_documents_for_user(db: Session, user: models.User) -> List[mo
     elif user.role == UserRole.HOD:
         if not user.department_id:
             return []
+        multi_dept_doc_ids = [
+            r[0] for r in db.query(models.DocumentAssignment.document_id)
+            .filter(models.DocumentAssignment.department_id == user.department_id).all()
+        ]
         return (
             db.query(models.Document)
-            .filter(models.Document.target_department_id == user.department_id)
+            .filter(
+                or_(
+                    models.Document.target_department_id == user.department_id,
+                    models.Document.doc_id.in_(multi_dept_doc_ids)
+                )
+            )
             .order_by(models.Document.updated_at.desc())
             .all()
         )
@@ -821,10 +863,24 @@ def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequ
         document_id=doc_id,
         assigned_by_user_id=current_user.id,
         assigned_to_user_id=assign_req.assigned_to_user_id,
+        requires_hod_validation=assign_req.requires_hod_validation,
         instructions=assign_req.instructions,
         is_active=True,
     )
     db.add(assignment)
+
+    # Also record in document_assignments if not already present
+    doc_assign = models.DocumentAssignment(
+        document_id=doc_id,
+        department_id=current_user.department_id,
+        assigned_employee_id=assign_req.assigned_to_user_id,
+        assigned_by_user_id=current_user.id,
+        requires_hod_validation=assign_req.requires_hod_validation,
+        assignment_status=AssignmentStatus.IN_PROGRESS,
+        instructions=assign_req.instructions,
+        created_at=datetime.now()
+    )
+    db.add(doc_assign)
 
     doc.current_stage = WorkflowStage.EMPLOYEE
     doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
@@ -836,7 +892,8 @@ def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequ
     db.refresh(assignment)
 
     assignee_name = assignment.assigned_to.full_name if (assignment.assigned_to and assignment.assigned_to.full_name) else (doc.assigned_employee_name or "Staff")
-    assign_detail = f"Delegated to {assignee_name}: {assign_req.instructions or 'Standard departmental execution'}"
+    val_note = " [HOD Validation Required]" if assign_req.requires_hod_validation else " [Direct to DS]"
+    assign_detail = f"Delegated to {assignee_name}: {assign_req.instructions or 'Standard departmental execution'}{val_note}"
 
     event = _add_workflow_history(
         db=db,
@@ -854,7 +911,7 @@ def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequ
         document_id=doc_id,
         workflow_event_id=event.id,
         title=f"Task assigned: {doc.reference_no}",
-        message=f"You have been assigned to document '{doc.title}'."
+        message=f"You have been assigned to document '{doc.title}' by HOD."
     )
 
     return assignment
@@ -866,13 +923,37 @@ def create_progress_update(db: Session, doc_id: int, prog: schemas.ProgressCreat
     if not doc:
         return None
 
+    # Check if this employee's assignment requires HOD validation
+    active_assign = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.document_id == doc_id,
+        models.WorkAssignment.assigned_to_user_id == current_user.id,
+        models.WorkAssignment.is_active == True
+    ).first()
+
+    multi_assign = db.query(models.DocumentAssignment).filter(
+        models.DocumentAssignment.document_id == doc_id,
+        models.DocumentAssignment.assigned_employee_id == current_user.id
+    ).first()
+
+    requires_hod = False
+    if active_assign and active_assign.requires_hod_validation:
+        requires_hod = True
+    elif multi_assign and multi_assign.requires_hod_validation:
+        requires_hod = True
+
+    val_status = ProgressValidationStatus.PENDING_HOD_REVIEW if requires_hod else ProgressValidationStatus.DIRECT_TO_DS
+
     db_progress = models.ProgressUpdate(
         document_id=doc_id,
         submitted_by_user_id=current_user.id,
         description=prog.description,
+        hod_validation_required=requires_hod,
+        hod_validation_status=val_status
     )
     db.add(db_progress)
 
+    # If direct to DS, advance document status to PROGRESS_UPDATED;
+    # if pending HOD, keep IN_PROGRESS or PROGRESS_UPDATED so HOD sees it in their queue
     doc.status = DocumentStatus.PROGRESS_UPDATED
     doc.updated_at = datetime.now()
     doc.version += 1
@@ -880,28 +961,296 @@ def create_progress_update(db: Session, doc_id: int, prog: schemas.ProgressCreat
     db.commit()
     db.refresh(db_progress)
 
+    if requires_hod:
+        event = _add_workflow_history(
+            db=db,
+            document_id=doc_id,
+            user_id=current_user.id,
+            action="PROGRESS_SUBMITTED_FOR_HOD",
+            from_role="EMPLOYEE",
+            to_role="HOD",
+            details=f'Progress update submitted for HOD validation: "{prog.description}"'
+        )
+
+        # Notify HOD(s)
+        dept_id = current_user.department_id or doc.target_department_id
+        if dept_id:
+            hods = db.query(models.User).filter(
+                models.User.department_id == dept_id,
+                models.User.role == UserRole.HOD,
+                models.User.is_active == True
+            ).all()
+            for hod in hods:
+                _create_notification(
+                    db=db,
+                    user_id=hod.id,
+                    document_id=doc_id,
+                    workflow_event_id=event.id,
+                    title=f"Progress awaiting HOD review: {doc.reference_no}",
+                    message=f"{current_user.full_name} submitted progress on '{doc.title}' requiring your validation."
+                )
+    else:
+        event = _add_workflow_history(
+            db=db,
+            document_id=doc_id,
+            user_id=current_user.id,
+            action="PROGRESS_UPDATED",
+            from_role="EMPLOYEE",
+            to_role="DS",
+            details=f'Progress Report (Direct to DS): "{prog.description}"'
+        )
+
+        # Notify DS creator
+        if doc.created_by:
+            _create_notification(
+                db=db,
+                user_id=doc.created_by,
+                document_id=doc_id,
+                workflow_event_id=event.id,
+                title=f"Progress update on {doc.reference_no}",
+                message=f"{current_user.full_name} updated progress on '{doc.title}'."
+            )
+
+    return db_progress
+
+
+def hod_validate_progress_update(
+    db: Session,
+    doc_id: int,
+    progress_id: int,
+    action: str,
+    note: Optional[str],
+    current_user: models.User
+) -> Optional[models.ProgressUpdate]:
+    progress = db.query(models.ProgressUpdate).filter(
+        models.ProgressUpdate.id == progress_id,
+        models.ProgressUpdate.document_id == doc_id
+    ).first()
+    if not progress:
+        return None
+
+    doc = get_document(db, doc_id)
+    if not doc:
+        return None
+
+    action_lower = action.lower().strip()
+    if action_lower == "approve":
+        progress.hod_validation_status = ProgressValidationStatus.HOD_APPROVED
+        progress.hod_review_note = note
+        progress.hod_reviewed_by_user_id = current_user.id
+        progress.hod_reviewed_at = datetime.now()
+
+        doc.status = DocumentStatus.PROGRESS_UPDATED
+        doc.updated_at = datetime.now()
+        doc.version += 1
+
+        db.commit()
+        db.refresh(progress)
+
+        event = _add_workflow_history(
+            db=db,
+            document_id=doc_id,
+            user_id=current_user.id,
+            action="HOD_PROGRESS_APPROVED",
+            from_role="HOD",
+            to_role="DS",
+            details=f"HOD approved progress update: {note or 'Validated and approved for DS'}"
+        )
+
+        # Notify DS
+        if doc.created_by:
+            _create_notification(
+                db=db,
+                user_id=doc.created_by,
+                document_id=doc_id,
+                workflow_event_id=event.id,
+                title=f"Validated progress on {doc.reference_no}",
+                message=f"HOD approved employee progress on '{doc.title}'."
+            )
+        # Notify employee
+        if progress.submitted_by_user_id:
+            _create_notification(
+                db=db,
+                user_id=progress.submitted_by_user_id,
+                document_id=doc_id,
+                workflow_event_id=event.id,
+                title=f"Progress approved: {doc.reference_no}",
+                message=f"HOD has approved your progress update on '{doc.title}'."
+            )
+
+    elif action_lower == "return":
+        progress.hod_validation_status = ProgressValidationStatus.RETURNED_TO_EMPLOYEE
+        progress.hod_review_note = note
+        progress.hod_reviewed_by_user_id = current_user.id
+        progress.hod_reviewed_at = datetime.now()
+
+        db.commit()
+        db.refresh(progress)
+
+        event = _add_workflow_history(
+            db=db,
+            document_id=doc_id,
+            user_id=current_user.id,
+            action="HOD_PROGRESS_RETURNED",
+            from_role="HOD",
+            to_role="EMPLOYEE",
+            details=f"HOD requested correction: {note or 'Please revise and resubmit.'}"
+        )
+
+        # Notify employee
+        if progress.submitted_by_user_id:
+            _create_notification(
+                db=db,
+                user_id=progress.submitted_by_user_id,
+                document_id=doc_id,
+                workflow_event_id=event.id,
+                title=f"Update returned for correction: {doc.reference_no}",
+                message=f"HOD requested correction on your update for '{doc.title}':\n{note or 'Please review remarks.'}"
+            )
+    else:
+        return None
+
+    return progress
+
+
+def create_document_assignments(
+    db: Session,
+    doc_id: int,
+    assignments_data: List[schemas.DocumentAssignmentCreate],
+    by_user: models.User
+) -> List[models.DocumentAssignment]:
+    doc = get_document(db, doc_id)
+    if not doc:
+        return []
+
+    created_assignments = []
+    first_dept_id = None
+
+    for item in assignments_data:
+        assign = models.DocumentAssignment(
+            document_id=doc_id,
+            department_id=item.department_id,
+            assigned_employee_id=item.assigned_employee_id,
+            assigned_by_user_id=by_user.id,
+            requires_hod_validation=item.requires_hod_validation,
+            assignment_status=AssignmentStatus.PENDING_EMPLOYEE if not item.assigned_employee_id else AssignmentStatus.IN_PROGRESS,
+            instructions=item.instructions,
+            created_at=datetime.now()
+        )
+        db.add(assign)
+        created_assignments.append(assign)
+        if item.department_id and not first_dept_id:
+            first_dept_id = item.department_id
+
+    # Update document primary department if not set
+    if first_dept_id and not doc.target_department_id:
+        doc.target_department_id = first_dept_id
+
+    doc.current_stage = WorkflowStage.HOD if any(a.department_id and not a.assigned_employee_id for a in assignments_data) else WorkflowStage.EMPLOYEE
+    doc.status = DocumentStatus.UNDER_HOD_PROCESSING if doc.current_stage == WorkflowStage.HOD else DocumentStatus.ASSIGNED_FOR_EXECUTION
+    doc.updated_at = datetime.now()
+    doc.version += 1
+
+    db.commit()
+    for a in created_assignments:
+        db.refresh(a)
+
+    summary = f"Multi-department/employee routing configured ({len(created_assignments)} assignments)"
     event = _add_workflow_history(
         db=db,
         document_id=doc_id,
-        user_id=current_user.id,
-        action="PROGRESS_UPDATED",
-        from_role="EMPLOYEE",
-        to_role=None,
-        details=f'Progress Report: "{prog.description}"'
+        user_id=by_user.id,
+        action="MULTI_ASSIGNMENT_CREATED",
+        from_role="DS",
+        to_role="HOD",
+        details=summary
     )
 
-    # Notify DS creator
-    if doc.created_by:
-        _create_notification(
-            db=db,
-            user_id=doc.created_by,
-            document_id=doc_id,
-            workflow_event_id=event.id,
-            title=f"Progress update on {doc.reference_no}",
-            message=f"Employee updated progress on '{doc.title}'."
-        )
+    for assign in created_assignments:
+        if assign.assigned_employee_id:
+            _create_notification(
+                db=db,
+                user_id=assign.assigned_employee_id,
+                document_id=doc_id,
+                workflow_event_id=event.id,
+                title=f"New Assignment: {doc.reference_no}",
+                message=f"You have been assigned to document '{doc.title}'."
+            )
+        elif assign.department_id:
+            dept_hods = db.query(models.User).filter(
+                models.User.department_id == assign.department_id,
+                models.User.role == UserRole.HOD,
+                models.User.is_active == True
+            ).all()
+            for hod in dept_hods:
+                _create_notification(
+                    db=db,
+                    user_id=hod.id,
+                    document_id=doc_id,
+                    workflow_event_id=event.id,
+                    title=f"New Department Task: {doc.reference_no}",
+                    message=f"Document '{doc.title}' assigned to your department."
+                )
 
-    return db_progress
+    return created_assignments
+
+
+def get_document_assignments(db: Session, doc_id: int) -> List[models.DocumentAssignment]:
+    return (
+        db.query(models.DocumentAssignment)
+        .filter(models.DocumentAssignment.document_id == doc_id)
+        .order_by(models.DocumentAssignment.created_at)
+        .all()
+    )
+
+
+def update_document_assignment(
+    db: Session,
+    assignment_id: int,
+    assigned_employee_id: Optional[int],
+    instructions: Optional[str],
+    requires_hod_validation: Optional[bool],
+    user: models.User
+) -> Optional[models.DocumentAssignment]:
+    assign = db.query(models.DocumentAssignment).filter(
+        models.DocumentAssignment.id == assignment_id
+    ).first()
+    if not assign:
+        return None
+
+    if assigned_employee_id is not None:
+        assign.assigned_employee_id = assigned_employee_id
+        assign.assignment_status = AssignmentStatus.IN_PROGRESS
+    if instructions is not None:
+        assign.instructions = instructions
+    if requires_hod_validation is not None:
+        assign.requires_hod_validation = requires_hod_validation
+
+    db.commit()
+    db.refresh(assign)
+
+    if assign.assigned_employee_id:
+        doc = get_document(db, assign.document_id)
+        if doc:
+            event = _add_workflow_history(
+                db=db,
+                document_id=doc.doc_id,
+                user_id=user.id,
+                action="EMPLOYEE_ASSIGNED",
+                from_role="HOD",
+                to_role="EMPLOYEE",
+                details=f"Assigned staff {assign.employee_name or 'Staff'}"
+            )
+            _create_notification(
+                db=db,
+                user_id=assign.assigned_employee_id,
+                document_id=doc.doc_id,
+                workflow_event_id=event.id,
+                title=f"Task Assigned: {doc.reference_no}",
+                message=f"You have been assigned to document '{doc.title}'."
+            )
+
+    return assign
 
 
 def get_progress_updates(db: Session, doc_id: int) -> List[models.ProgressUpdate]:
@@ -1896,6 +2245,21 @@ def _create_notification(
     db.add(notif)
     db.commit()
     db.refresh(notif)
+
+    # Attempt workflow email dispatch if document_id is present
+    if document_id:
+        try:
+            from mail.service import mail_service
+            mail_service.send_workflow_notification(
+                db=db,
+                doc_id=document_id,
+                recipient_user_id=user_id,
+                title=title,
+                message=message
+            )
+        except Exception:
+            pass
+
     return notif
 
 
@@ -2097,13 +2461,21 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
 
 def seed_data(db: Session) -> None:
     """
-    Populates the database with:
-    - 3 canonical departments: Finance (FIN), HR (HR), Technical (TECH)
-    - 6 employees (2 per department) with email and system identities
-    - 3 HOD accounts, DS account, and Director account
+    Populates the database with departments, system accounts, and employees.
+    Dynamically loads from backend/data/seed_data.json if present.
     """
-    # 1. Departments (Finance, HR, Technical)
-    depts_data = [
+    import json
+    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "seed_data.json")
+    loaded_json = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                loaded_json = json.load(f)
+        except Exception as ex:
+            print(f"[WARN] Could not parse seed_data.json: {ex}")
+
+    # 1. Departments
+    depts_data = loaded_json.get("departments") or [
         {"name": "Finance", "code": "FIN"},
         {"name": "HR", "code": "HR"},
         {"name": "Technical", "code": "TECH"},
@@ -2121,47 +2493,48 @@ def seed_data(db: Session) -> None:
         else:
             dept_map[d["name"]] = existing.id
 
-    # 2. Employees (Exact 6: 2 per department)
-    employees_data = [
-        # Finance
-        {"code": "EMP-FIN-001", "name": "Rahul Sharma", "dept": "Finance", "designation": "Accounts Officer", "email": "rahul.sharma@cdtrs.gov.in", "outlook_email": "rahul.sharma@outlook.com", "gov_email": "rahul.sharma@nic.in"},
-        {"code": "EMP-FIN-002", "name": "Sunil Gupta", "dept": "Finance", "designation": "Senior Accountant", "email": "sunil.gupta@cdtrs.gov.in", "outlook_email": "sunil.gupta@outlook.com", "gov_email": "sunil.gupta@nic.in"},
-        # HR
-        {"code": "EMP-HR-001", "name": "Sneha Deshmukh", "dept": "HR", "designation": "HR Officer", "email": "sneha.deshmukh@cdtrs.gov.in", "outlook_email": "sneha.deshmukh@outlook.com", "gov_email": "sneha.deshmukh@nic.in"},
-        {"code": "EMP-HR-002", "name": "Pooja Nair", "dept": "HR", "designation": "Establishment Specialist", "email": "pooja.nair@cdtrs.gov.in", "outlook_email": "pooja.nair@outlook.com", "gov_email": "pooja.nair@nic.in"},
-        # Technical
-        {"code": "EMP-TECH-001", "name": "Anil Kumar", "dept": "Technical", "designation": "Systems Engineer", "email": "anil.kumar@cdtrs.gov.in", "outlook_email": "anil.kumar@outlook.com", "gov_email": "anil.kumar@nic.in"},
-        {"code": "EMP-TECH-002", "name": "Vikram Malhotra", "dept": "Technical", "designation": "Network & IT Admin", "email": "vikram.malhotra@cdtrs.gov.in", "outlook_email": "vikram.malhotra@outlook.com", "gov_email": "vikram.malhotra@nic.in"},
+    # 2. Employees
+    raw_employees = loaded_json.get("employees") or [
+        {"employee_code": "EMP-FIN-001", "username": "emp_rahul", "full_name": "Rahul Sharma", "department": "Finance", "designation": "Accounts Officer", "email": "rahul.sharma@cdtrs.gov.in", "outlook_email": "rahul.sharma@outlook.com", "gov_email": "rahul.sharma@nic.in", "default_password": "cdtrs@emp"},
+        {"employee_code": "EMP-FIN-002", "username": "emp_sunil", "full_name": "Sunil Gupta", "department": "Finance", "designation": "Senior Accountant", "email": "sunil.gupta@cdtrs.gov.in", "outlook_email": "sunil.gupta@outlook.com", "gov_email": "sunil.gupta@nic.in", "default_password": "cdtrs@emp"},
+        {"employee_code": "EMP-HR-001", "username": "emp_sneha", "full_name": "Sneha Deshmukh", "department": "HR", "designation": "HR Officer", "email": "sneha.deshmukh@cdtrs.gov.in", "outlook_email": "sneha.deshmukh@outlook.com", "gov_email": "sneha.deshmukh@nic.in", "default_password": "cdtrs@emp"},
+        {"employee_code": "EMP-HR-002", "username": "emp_pooja", "full_name": "Pooja Nair", "department": "HR", "designation": "Establishment Specialist", "email": "pooja.nair@cdtrs.gov.in", "outlook_email": "pooja.nair@outlook.com", "gov_email": "pooja.nair@nic.in", "default_password": "cdtrs@emp"},
+        {"employee_code": "EMP-TECH-001", "username": "emp_anil", "full_name": "Anil Kumar", "department": "Technical", "designation": "Systems Engineer", "email": "anil.kumar@cdtrs.gov.in", "outlook_email": "anil.kumar@outlook.com", "gov_email": "anil.kumar@nic.in", "default_password": "cdtrs@emp"},
+        {"employee_code": "EMP-TECH-002", "username": "emp_vikram", "full_name": "Vikram Malhotra", "department": "Technical", "designation": "Network & IT Admin", "email": "vikram.malhotra@cdtrs.gov.in", "outlook_email": "vikram.malhotra@outlook.com", "gov_email": "vikram.malhotra@nic.in", "default_password": "cdtrs@emp"},
     ]
 
     emp_map = {}
-    for emp_d in employees_data:
-        existing = db.query(models.Employee).filter(models.Employee.employee_code == emp_d["code"]).first()
+    for emp_d in raw_employees:
+        code_val = emp_d.get("employee_code") or emp_d.get("code")
+        dept_name = emp_d.get("department") or emp_d.get("dept") or "General"
+        dept_id = dept_map.get(dept_name)
+        if not dept_id and dept_map:
+            dept_id = next(iter(dept_map.values()))
+
+        existing = db.query(models.Employee).filter(models.Employee.employee_code == code_val).first()
         if not existing:
             emp = models.Employee(
-                employee_code=emp_d["code"],
-                full_name=emp_d["name"],
-                department_id=dept_map[emp_d["dept"]],
-                designation=emp_d["designation"],
-                email=emp_d["email"],
-                outlook_email=emp_d["outlook_email"],
-                gov_email=emp_d["gov_email"]
+                employee_code=code_val,
+                full_name=emp_d.get("full_name") or emp_d.get("name"),
+                department_id=dept_id,
+                designation=emp_d.get("designation") or "Staff",
+                email=emp_d.get("email"),
+                outlook_email=emp_d.get("outlook_email"),
+                gov_email=emp_d.get("gov_email")
             )
             db.add(emp)
             db.commit()
             db.refresh(emp)
-            emp_map[emp_d["code"]] = emp.id
+            emp_map[code_val] = emp.id
         else:
-            if not existing.email:
-                existing.email = emp_d["email"]
-                existing.outlook_email = emp_d["outlook_email"]
-                existing.gov_email = emp_d["gov_email"]
-                db.commit()
-            emp_map[emp_d["code"]] = existing.id
+            existing.email = emp_d.get("email")
+            existing.outlook_email = emp_d.get("outlook_email")
+            existing.gov_email = emp_d.get("gov_email")
+            db.commit()
+            emp_map[code_val] = existing.id
 
     # 3. Users (System & Role Accounts)
-    users_data = [
-        # Ingestion / Executive
+    raw_system_users = loaded_json.get("system_users") or [
         {
             "username": "ds_user",
             "password": "cdtrs@ds",
@@ -2184,7 +2557,6 @@ def seed_data(db: Session) -> None:
             "department_id": None,
             "employee_id": None
         },
-        # HODs
         {
             "username": "hod_finance",
             "password": "cdtrs@hod",
@@ -2193,7 +2565,7 @@ def seed_data(db: Session) -> None:
             "email": "hod.finance@cdtrs.gov.in",
             "outlook_email": "hod.finance@outlook.com",
             "gov_email": "hod.finance@nic.in",
-            "department_id": dept_map["Finance"],
+            "department_id": dept_map.get("Finance"),
             "employee_id": None
         },
         {
@@ -2204,7 +2576,7 @@ def seed_data(db: Session) -> None:
             "email": "hod.hr@cdtrs.gov.in",
             "outlook_email": "hod.hr@outlook.com",
             "gov_email": "hod.hr@nic.in",
-            "department_id": dept_map["HR"],
+            "department_id": dept_map.get("HR"),
             "employee_id": None
         },
         {
@@ -2215,79 +2587,51 @@ def seed_data(db: Session) -> None:
             "email": "hod.tech@cdtrs.gov.in",
             "outlook_email": "hod.tech@outlook.com",
             "gov_email": "hod.tech@nic.in",
-            "department_id": dept_map["Technical"],
+            "department_id": dept_map.get("Technical"),
             "employee_id": None
         },
-        # Staff: Finance
-        {
-            "username": "emp_rahul",
-            "password": "cdtrs@emp",
-            "full_name": "Rahul Sharma",
-            "role": UserRole.EMPLOYEE,
-            "email": "rahul.sharma@cdtrs.gov.in",
-            "outlook_email": "rahul.sharma@outlook.com",
-            "gov_email": "rahul.sharma@nic.in",
-            "department_id": dept_map["Finance"],
-            "employee_id": emp_map.get("EMP-FIN-001")
-        },
-        {
-            "username": "emp_sunil",
-            "password": "cdtrs@emp",
-            "full_name": "Sunil Gupta",
-            "role": UserRole.EMPLOYEE,
-            "email": "sunil.gupta@cdtrs.gov.in",
-            "outlook_email": "sunil.gupta@outlook.com",
-            "gov_email": "sunil.gupta@nic.in",
-            "department_id": dept_map["Finance"],
-            "employee_id": emp_map.get("EMP-FIN-002")
-        },
-        # Staff: HR
-        {
-            "username": "emp_sneha",
-            "password": "cdtrs@emp",
-            "full_name": "Sneha Deshmukh",
-            "role": UserRole.EMPLOYEE,
-            "email": "sneha.deshmukh@cdtrs.gov.in",
-            "outlook_email": "sneha.deshmukh@outlook.com",
-            "gov_email": "sneha.deshmukh@nic.in",
-            "department_id": dept_map["HR"],
-            "employee_id": emp_map.get("EMP-HR-001")
-        },
-        {
-            "username": "emp_pooja",
-            "password": "cdtrs@emp",
-            "full_name": "Pooja Nair",
-            "role": UserRole.EMPLOYEE,
-            "email": "pooja.nair@cdtrs.gov.in",
-            "outlook_email": "pooja.nair@outlook.com",
-            "gov_email": "pooja.nair@nic.in",
-            "department_id": dept_map["HR"],
-            "employee_id": emp_map.get("EMP-HR-002")
-        },
-        # Staff: Technical
-        {
-            "username": "emp_anil",
-            "password": "cdtrs@emp",
-            "full_name": "Anil Kumar",
-            "role": UserRole.EMPLOYEE,
-            "email": "anil.kumar@cdtrs.gov.in",
-            "outlook_email": "anil.kumar@outlook.com",
-            "gov_email": "anil.kumar@nic.in",
-            "department_id": dept_map["Technical"],
-            "employee_id": emp_map.get("EMP-TECH-001")
-        },
-        {
-            "username": "emp_vikram",
-            "password": "cdtrs@emp",
-            "full_name": "Vikram Malhotra",
-            "role": UserRole.EMPLOYEE,
-            "email": "vikram.malhotra@cdtrs.gov.in",
-            "outlook_email": "vikram.malhotra@outlook.com",
-            "gov_email": "vikram.malhotra@nic.in",
-            "department_id": dept_map["Technical"],
-            "employee_id": emp_map.get("EMP-TECH-002")
-        }
     ]
+
+    users_data = []
+    # Add system users
+    for su in raw_system_users:
+        dept_name = su.get("department")
+        dept_id = dept_map.get(dept_name) if dept_name else su.get("department_id")
+        role_val = UserRole(su.get("role")) if isinstance(su.get("role"), str) else su.get("role")
+        users_data.append({
+            "username": su["username"],
+            "password": su.get("default_password") or su.get("password") or "cdtrs@123",
+            "full_name": su["full_name"],
+            "role": role_val,
+            "email": su.get("email"),
+            "outlook_email": su.get("outlook_email"),
+            "gov_email": su.get("gov_email"),
+            "department_id": dept_id,
+            "employee_id": su.get("employee_id")
+        })
+
+    # Add employee user accounts
+    for emp_d in raw_employees:
+        code_val = emp_d.get("employee_code") or emp_d.get("code")
+        dept_name = emp_d.get("department") or emp_d.get("dept") or "General"
+        dept_id = dept_map.get(dept_name)
+        username = emp_d.get("username")
+        if not username:
+            parts = emp_d.get("full_name", "emp").lower().split()
+            username = f"emp_{parts[0]}" if len(parts) == 1 else f"emp_{parts[0]}_{parts[-1]}"
+
+        users_data.append({
+            "username": username,
+            "password": emp_d.get("default_password") or "cdtrs@emp",
+            "full_name": emp_d.get("full_name") or emp_d.get("name"),
+            "role": UserRole.EMPLOYEE,
+            "email": emp_d.get("email"),
+            "outlook_email": emp_d.get("outlook_email"),
+            "gov_email": emp_d.get("gov_email"),
+            "department_id": dept_id,
+            "employee_id": emp_map.get(code_val)
+        })
+
 
     user_objs = {}
     for u in users_data:

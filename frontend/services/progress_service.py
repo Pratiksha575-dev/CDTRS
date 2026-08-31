@@ -45,6 +45,17 @@ class ProgressService:
         repo = get_repository()
         return repo.get_progress_updates(document_id)
 
+    def hod_validate_progress(
+        self,
+        document_id: int,
+        progress_id: int,
+        action: str,
+        note: Optional[str] = None
+    ) -> ProgressUpdateModel:
+        """HOD approves or returns an employee progress update."""
+        repo = get_repository()
+        return repo.hod_validate_progress(document_id, progress_id, action, note)
+
     def upload_attachment(
         self,
         document_id: int,

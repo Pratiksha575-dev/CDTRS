@@ -5,7 +5,8 @@ from datetime import date, datetime
 from models import (
     UserRole, DocumentStatus, WorkflowStage, Priority, RouteType,
     SourceType, MessageProcessingStatus, AttachmentType, OCRStatus,
-    RoutingSource, RemarkType, ReminderReason
+    RoutingSource, RemarkType, ReminderReason,
+    ProgressValidationStatus, AssignmentStatus
 )
 
 
@@ -191,6 +192,34 @@ class DocumentCreate(BaseModel):
     director_remark:         Optional[str] = None
 
 
+class DocumentAssignmentCreate(BaseModel):
+    department_id:           Optional[int] = None
+    assigned_employee_id:    Optional[int] = None
+    requires_hod_validation: bool = False
+    instructions:            Optional[str] = None
+
+
+class DocumentAssignmentResponse(BaseModel):
+    id:                      int
+    document_id:             int
+    department_id:           Optional[int] = None
+    department_name:         Optional[str] = None
+    assigned_employee_id:    Optional[int] = None
+    employee_name:           Optional[str] = None
+    assigned_by_user_id:     int
+    requires_hod_validation: bool
+    assignment_status:       AssignmentStatus
+    instructions:            Optional[str] = None
+    created_at:              datetime
+    completed_at:            Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MultiAssignRequest(BaseModel):
+    assignments: List[DocumentAssignmentCreate]
+
+
 class DocumentResponse(BaseModel):
     doc_id:                 int
     reference_no:           str
@@ -221,6 +250,7 @@ class DocumentResponse(BaseModel):
     version:                int
     director_remark:        Optional[str] = None
     hod_remark:             Optional[str] = None
+    doc_assignments:        List[DocumentAssignmentResponse] = []
     created_at:             datetime
     updated_at:             datetime
     closed_at:              Optional[datetime] = None
@@ -254,6 +284,7 @@ class DocumentListResponse(BaseModel):
     version:                int
     received_date:          date
     deadline:               Optional[date] = None
+    doc_assignments:        List[DocumentAssignmentResponse] = []
     created_at:             datetime
     updated_at:             datetime
 
@@ -297,20 +328,22 @@ class HODRemarkUpdate(BaseModel):
 
 
 class AssignmentRequest(BaseModel):
-    assigned_to_user_id: int
-    instructions:        Optional[str] = None
-    expected_version:    Optional[int] = None
+    assigned_to_user_id:     int
+    requires_hod_validation: bool = False
+    instructions:            Optional[str] = None
+    expected_version:        Optional[int] = None
 
 
 class AssignmentResponse(BaseModel):
-    id:                  int
-    document_id:         int
-    assigned_by_user_id: int
-    assigned_to_user_id: int
-    instructions:        Optional[str] = None
-    is_active:           bool
-    assigned_at:         datetime
-    completed_at:        Optional[datetime] = None
+    id:                      int
+    document_id:             int
+    assigned_by_user_id:     int
+    assigned_to_user_id:     int
+    requires_hod_validation: bool = False
+    instructions:            Optional[str] = None
+    is_active:               bool
+    assigned_at:             datetime
+    completed_at:            Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -340,13 +373,24 @@ class ProgressCreate(BaseModel):
     description: str
 
 
+class HODValidationRequest(BaseModel):
+    action: str                       # "approve" or "return"
+    note:   Optional[str] = None      # Optional correction or approval guidance
+
+
 class ProgressResponse(BaseModel):
-    id:                   int
-    document_id:          int
-    submitted_by_user_id: int
-    user_name:            Optional[str] = None
-    description:          str
-    created_at:           datetime
+    id:                      int
+    document_id:             int
+    submitted_by_user_id:    int
+    user_name:               Optional[str] = None
+    description:             str
+    hod_validation_required: bool = False
+    hod_validation_status:   ProgressValidationStatus = ProgressValidationStatus.DIRECT_TO_DS
+    hod_review_note:         Optional[str] = None
+    hod_reviewed_by_user_id: Optional[int] = None
+    hod_reviewer_name:       Optional[str] = None
+    hod_reviewed_at:         Optional[datetime] = None
+    created_at:              datetime
 
     model_config = ConfigDict(from_attributes=True)
 

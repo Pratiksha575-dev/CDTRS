@@ -877,6 +877,73 @@ async def assign_employee(
 
 
 @app.post(
+    f"{API_V1}/documents/{{document_id}}/assign-multi",
+    response_model=List[schemas.DocumentAssignmentResponse],
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="DS: Configure multi-department / multi-employee assignments for a document",
+)
+async def assign_multi(
+    document_id: int,
+    body: schemas.MultiAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.DS)),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    result = crud.create_document_assignments(db, document_id, body.assignments, current_user)
+    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
+    return result
+
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/assignments",
+    response_model=List[schemas.DocumentAssignmentResponse],
+    tags=["Documents — Workflow"],
+    summary="Get all assignments for a document",
+)
+def get_assignments(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _get_authorized_doc_or_404(db, document_id, current_user)
+    return crud.get_document_assignments(db, document_id)
+
+
+@app.patch(
+    f"{API_V1}/documents/{{document_id}}/assignments/{{assignment_id}}",
+    response_model=schemas.DocumentAssignmentResponse,
+    tags=["Documents — Workflow"],
+    summary="HOD / DS: Update an assignment (assign employee / change validation rule)",
+)
+async def update_assignment(
+    document_id: int,
+    assignment_id: int,
+    body: schemas.DocumentAssignmentCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.DS, UserRole.HOD)),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    result = crud.update_document_assignment(
+        db,
+        assignment_id=assignment_id,
+        assigned_employee_id=body.assigned_employee_id,
+        instructions=body.instructions,
+        requires_hod_validation=body.requires_hod_validation,
+        user=current_user
+    )
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found.")
+
+    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
+    return result
+
+
+@app.post(
     f"{API_V1}/documents/{{document_id}}/progress",
     response_model=schemas.ProgressResponse,
     status_code=status.HTTP_201_CREATED,
@@ -895,6 +962,37 @@ async def submit_progress(
     result = crud.create_progress_update(db, document_id, prog, current_user)
     if not result:
         raise HTTPException(status_code=404, detail="Document not found.")
+
+    await crud.event_manager.broadcast("PROGRESS_SUBMITTED", document_id=document_id, user_id=current_user.id)
+    return result
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/progress/{{progress_id}}/hod-validate",
+    response_model=schemas.ProgressResponse,
+    tags=["Documents — Progress"],
+    summary="HOD: Review, approve, or request correction on employee progress update",
+)
+async def hod_validate_progress(
+    document_id: int,
+    progress_id: int,
+    val_req: schemas.HODValidationRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.HOD)),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    result = crud.hod_validate_progress_update(
+        db,
+        doc_id=document_id,
+        progress_id=progress_id,
+        action=val_req.action,
+        note=val_req.note,
+        current_user=current_user
+    )
+    if not result:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not validate progress update. Check IDs and action.")
 
     await crud.event_manager.broadcast("PROGRESS_SUBMITTED", document_id=document_id, user_id=current_user.id)
     return result

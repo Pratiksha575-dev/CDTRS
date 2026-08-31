@@ -44,8 +44,8 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Sidebar
-        self.sidebar = Sidebar(self.role)
+        # Sidebar — pass username so it shows name + role
+        self.sidebar = Sidebar(self.role, username=self.username)
         self.sidebar.logout_button.clicked.connect(self.logout)
 
         # Page Container Stack
@@ -114,13 +114,9 @@ class MainWindow(QMainWindow):
                 lambda: self._navigate_to(self.dashboard_page, "Dashboard")
             )
 
-        # Inbox / Department Tasks / My Tasks
+        # Inbox / Department Tasks / My Tasks / Review Queue
         if "Inbox" in self.sidebar.buttons:
-            if self.role == RoleEnum.DIRECTOR.value:
-                self.sidebar.buttons["Inbox"].clicked.connect(
-                    lambda: self._navigate_to(self.director_inbox_page, "Inbox")
-                )
-            elif self.role in (RoleEnum.HOD.value, "HOD", "HOD PA"):
+            if self.role in (RoleEnum.HOD.value, "HOD", "HOD PA"):
                 self.sidebar.buttons["Inbox"].clicked.connect(
                     lambda: self._navigate_to(self.hod_inbox_page, "Inbox")
                 )
@@ -132,6 +128,12 @@ class MainWindow(QMainWindow):
                 self.sidebar.buttons["Inbox"].clicked.connect(
                     lambda: self._navigate_to(self.inbox_page, "Inbox")
                 )
+
+        # Director uses "Review Queue" label (not "Inbox")
+        if "Review Queue" in self.sidebar.buttons:
+            self.sidebar.buttons["Review Queue"].clicked.connect(
+                lambda: self._navigate_to(self.director_inbox_page, "Review Queue")
+            )
 
         if "My Tasks" in self.sidebar.buttons:
             self.sidebar.buttons["My Tasks"].clicked.connect(
@@ -173,7 +175,10 @@ class MainWindow(QMainWindow):
     def _handle_dashboard_navigate(self, target_page_name: str, filters: Optional[dict] = None):
         if target_page_name == "Inbox":
             if self.role == RoleEnum.DIRECTOR.value:
-                self._navigate_to(self.director_inbox_page, "Inbox")
+                nav_key = "Review Queue" if "Review Queue" in self.sidebar.buttons else "Inbox"
+                self._navigate_to(self.director_inbox_page, nav_key, skip_reload=bool(filters))
+                if filters and hasattr(self.director_inbox_page, "set_filters"):
+                    self.director_inbox_page.set_filters(**filters)
             elif self.role in (RoleEnum.HOD.value, "HOD"):
                 self._navigate_to(self.hod_inbox_page, "Department Tasks" if "Department Tasks" in self.sidebar.buttons else "Inbox")
             elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
@@ -181,11 +186,18 @@ class MainWindow(QMainWindow):
             else:
                 self._navigate_to(self.inbox_page, "Inbox")
         elif target_page_name in ("Reviewed Documents", "Reviewed"):
-            self._navigate_to(self.director_reviewed_page, "Reviewed Documents")
+            if self.role == RoleEnum.DIRECTOR.value:
+                nav_key = "Review Queue" if "Review Queue" in self.sidebar.buttons else "Inbox"
+                self._navigate_to(self.director_inbox_page, nav_key, skip_reload=True)
+                if hasattr(self.director_inbox_page, "set_filters"):
+                    self.director_inbox_page.set_filters(category="Reviewed & Returned to DS")
+            else:
+                self._navigate_to(self.director_reviewed_page, "Reviewed Documents")
         elif target_page_name in ("Documents", "All Documents"):
             self._navigate_to(self.documents_page, "Documents" if "Documents" in self.sidebar.buttons else "All Documents", skip_reload=bool(filters))
             if filters and hasattr(self.documents_page, "set_filters"):
                 self.documents_page.set_filters(**filters)
+
 
     def _navigate_to(self, target_widget: QWidget, menu_key: str, skip_reload: bool = False):
         # Clean up any active DocumentViewer if navigating away to top-level tabs

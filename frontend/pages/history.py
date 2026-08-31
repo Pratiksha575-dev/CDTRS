@@ -195,7 +195,7 @@ class HistoryPage(QWidget):
         filter_layout.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 Filter by title, reference #, or keyword...")
+        self.search_input.setPlaceholderText("🔍 Search by document title, reference, or event details...")
         self.search_input.textChanged.connect(lambda: self._search_timer.start())
 
         self.role_filter = QComboBox()
@@ -317,13 +317,13 @@ class HistoryPage(QWidget):
                     fr = (event.from_role or "").strip().lower()
                     actor = (event.performed_by_name or "").strip().lower()
                     if "director secretary" in target_f or "ds" in target_f:
-                        return fr in ("ds", "director secretary", "master") or "secretary" in actor or "ds" in actor
+                        return fr in ("ds", "director secretary", "master") or "secretary" in actor
                     elif "director" in target_f:
                         return fr in ("director", "the director") and fr not in ("ds", "director secretary", "master")
                     elif "hod" in target_f:
-                        return fr in ("hod", "head of department") or "hod" in actor
+                        return fr in ("hod", "head of department", "head_of_department") or "hod" in actor
                     elif "employee" in target_f:
-                        return fr in ("employee", "staff") or "emp" in actor or "rahul" in actor or "priya" in actor
+                        return fr in ("employee", "staff", "emp") or "employee" in fr
                     return fr == target_f
 
                 doc_evs = [e for e in doc_evs if _matches_role(e)]

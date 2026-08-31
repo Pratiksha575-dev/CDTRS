@@ -49,6 +49,7 @@ class DocumentModel:
     has_prior_director_remark: bool = False
     attachment_count: int = 0
     attachments_list: List[str] = field(default_factory=list)
+    doc_assignments: List[Dict[str, Any]] = field(default_factory=list)
     created_by: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -135,6 +136,7 @@ class DocumentModel:
             has_prior_director_remark=bool(data.get("has_prior_director_remark", False)),
             attachment_count=int(data.get("attachment_count", 0)),
             attachments_list=data.get("attachments_list") or [],
+            doc_assignments=data.get("doc_assignments") or [],
             created_by=data.get("created_by"),
             created_at=str(data.get("created_at")) if data.get("created_at") else None,
             updated_at=str(data.get("updated_at")) if data.get("updated_at") else None,
@@ -181,6 +183,7 @@ class DocumentModel:
             "has_prior_director_remark": self.has_prior_director_remark,
             "attachment_count": self.attachment_count,
             "attachments_list": self.attachments_list,
+            "doc_assignments": self.doc_assignments,
             "created_by": self.created_by,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

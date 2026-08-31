@@ -1,10 +1,12 @@
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -24,8 +26,6 @@ class InboxPage(QWidget):
     Director Secretary (DS) Incoming Communications & Document Intake Queue.
     Displays incoming dispatches, government emails, and departmental communications
     awaiting OCR text extraction and canonical workflow registration.
-    Director Secretary (DS) Incoming Mail & Ingestion Queue.
-    Awaiting document registration, OCR processing, and director review routing.
     """
 
     process_requested = Signal(object)
@@ -33,12 +33,8 @@ class InboxPage(QWidget):
     def __init__(self):
         super().__init__()
         self.documents: List[DocumentModel] = []
+        self._displayed_docs: List[Any] = []
         self.setup_ui()
-        
-        # Periodic Background Auto-Sync (Every 30 seconds)
-        self._autosync_timer = QTimer(self)
-        self._autosync_timer.timeout.connect(self._background_autosync)
-        self._autosync_timer.start(30000)
 
         from services.event_bus import event_bus
         event_bus.inbox_updated.connect(self.load_documents)
@@ -47,15 +43,12 @@ class InboxPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.load_documents()
-        # Silent auto-sync on page view
-        QTimer.singleShot(500, self._background_autosync)
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(14)
 
-        # --------------------------------
         # --------------------------------
         # PAGE HEADER & ACTIONS
         # --------------------------------
@@ -75,8 +68,8 @@ class InboxPage(QWidget):
         header_vbox.addWidget(subtitle)
         header_row.addLayout(header_vbox, 1)
 
-        # Auto-Sync Status Badge
-        self.sync_badge = QLabel("🟢 Auto-Sync Active • Ready")
+        # Sync Status Badge
+        self.sync_badge = QLabel("🟢 Ready")
         self.sync_badge.setStyleSheet(
             "background-color: #F0FDF4; color: #166534; border: 1px solid #BBF7D0; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 600;"
         )
@@ -90,6 +83,35 @@ class InboxPage(QWidget):
         header_row.addWidget(self.sync_outlook_btn)
 
         main_layout.addLayout(header_row)
+
+        # --------------------------------
+        # SEARCH & FILTER BAR
+        # --------------------------------
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search by sender, subject, reference, or keywords...")
+        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.textChanged.connect(self.apply_filters)
+
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems([
+            "All Incoming Items",
+            "With Attached Files",
+            "Email Body / No Attachment"
+        ])
+        self.filter_combo.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.filter_combo.currentIndexChanged.connect(self.apply_filters)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
+        clear_btn.clicked.connect(self._clear_filters)
+
+        filter_row.addWidget(self.search_input, 2)
+        filter_row.addWidget(self.filter_combo, 1)
+        filter_row.addWidget(clear_btn)
+        main_layout.addLayout(filter_row)
 
         # --------------------------------
         # TABLE & EMPTY STATE CONTAINER
@@ -112,6 +134,8 @@ class InboxPage(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.doubleClicked.connect(self.process_selected)
+        # Enable process button only when a row is actually selected
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -124,8 +148,8 @@ class InboxPage(QWidget):
         header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
 
         self.empty_widget = EmptyStateWidget(
-            title="No new incoming documents",
-            message="All incoming mail, dispatches, and emails have been processed and registered."
+            title="No incoming documents found",
+            message="All incoming mail, dispatches, and emails have been processed, or no items match your search."
         )
 
         self.table_stack.addWidget(self.table)
@@ -140,11 +164,13 @@ class InboxPage(QWidget):
 
         self.process_button = QPushButton("⚡ Run OCR & Process Document")
         self.process_button.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 24px; border-radius: 5px;")
+        self.process_button.setEnabled(False)  # Disabled until a row is selected
         self.process_button.clicked.connect(self.process_selected)
         button_layout.addWidget(self.process_button)
 
         main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
+
 
     def load_documents(self):
         raw_inbox = document_service.get_inbox()
@@ -153,17 +179,52 @@ class InboxPage(QWidget):
             d for d in raw_inbox
             if (d.mode if isinstance(d, DocumentModel) else (d.get("mode") or d.get("source_type"))) not in ("Manual Upload", "MANUAL_UPLOAD")
         ]
+        self.apply_filters()
 
-        if not self.documents:
+    def apply_filters(self):
+        search_query = self.search_input.text().strip().lower()
+        filter_type = self.filter_combo.currentText()
+
+        filtered = []
+        for doc in self.documents:
+            source = str((doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "").lower()
+            sender = str((doc.created_by if isinstance(doc, DocumentModel) else doc.get("created_by")) or "").lower()
+            title = str((doc.title if isinstance(doc, DocumentModel) else doc.get("title")) or "").lower()
+            mode = str((doc.mode if isinstance(doc, DocumentModel) else doc.get("mode")) or "").lower()
+            att_cnt = (doc.attachment_count if isinstance(doc, DocumentModel) else doc.get("attachment_count")) or 0
+
+            # Filter Dropdown (matching renamed labels)
+            if filter_type == "With Attached Files" and att_cnt < 1:
+                continue
+            if filter_type == "Email Body / No Attachment" and att_cnt > 0:
+                continue
+
+            # Search Text Filter
+            if search_query:
+                match = (
+                    search_query in source
+                    or search_query in sender
+                    or search_query in title
+                    or search_query in mode
+                )
+                if not match:
+                    continue
+
+            filtered.append(doc)
+
+        self._displayed_docs = filtered
+        if not filtered:
             self.table_stack.setCurrentWidget(self.empty_widget)
             self.process_button.setEnabled(False)
             return
 
         self.table_stack.setCurrentWidget(self.table)
-        self.process_button.setEnabled(True)
-        self.table.setRowCount(len(self.documents))
+        # Don't auto-enable button here — only enable when a row is selected
+        self.process_button.setEnabled(self.table.currentRow() >= 0)
+        self.table.setRowCount(len(filtered))
 
-        for row, doc in enumerate(self.documents):
+
+        for row, doc in enumerate(filtered):
             source = (doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "External"
 
             # Use actual sender data from backend — prefer created_by (email/username), fall back to source
@@ -200,11 +261,19 @@ class InboxPage(QWidget):
             status_item.setForeground(Qt.darkBlue)
             self.table.setItem(row, 7, status_item)
 
+    def _clear_filters(self):
+        self.search_input.clear()
+        self.filter_combo.setCurrentIndex(0)
+
+    def _on_selection_changed(self):
+        """Enable process button only when a row is actually selected."""
+        has_selection = self.table.currentRow() >= 0
+        self.process_button.setEnabled(has_selection)
 
     def process_selected(self):
         """Emits selected intake item for OCR extraction and document processing."""
         row = self.table.currentRow()
-        if row < 0 or row >= len(self.documents):
+        if row < 0 or row >= len(self._displayed_docs):
             QMessageBox.information(
                 self,
                 "No Document Selected",
@@ -212,7 +281,7 @@ class InboxPage(QWidget):
             )
             return
 
-        selected_item = self.documents[row]
+        selected_item = self._displayed_docs[row]
         self.process_requested.emit(selected_item)
 
     def _background_autosync(self):

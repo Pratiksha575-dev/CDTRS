@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -43,7 +44,7 @@ class HODInboxPage(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(14)
 
         # --------------------------------
         # HEADER
@@ -58,22 +59,34 @@ class HODInboxPage(QWidget):
         main_layout.addWidget(subtitle)
 
         # --------------------------------
-        # FILTER BAR
+        # SEARCH & FILTER BAR
         # --------------------------------
         filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search by title, reference, staff, priority, status...")
+        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.textChanged.connect(self.apply_filter)
 
         self.filter_combo = QComboBox()
         self.filter_combo.addItems([
-            "All Department Documents",
+            "All Active Documents",
             "Awaiting Assignment",
             "Assigned / In Progress",
-            "Progress Updated"
+            "Progress Updates Received",
+            "Closed Documents"
         ])
+        self.filter_combo.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
         self.filter_combo.currentIndexChanged.connect(self.apply_filter)
 
-        filter_layout.addWidget(QLabel("Workload View:"))
-        filter_layout.addWidget(self.filter_combo)
-        filter_layout.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
+        clear_btn.clicked.connect(self._clear_filters)
+
+        filter_layout.addWidget(self.search_input, 2)
+        filter_layout.addWidget(self.filter_combo, 1)
+        filter_layout.addWidget(clear_btn)
 
         main_layout.addLayout(filter_layout)
 
@@ -81,15 +94,14 @@ class HODInboxPage(QWidget):
         # TABLE
         # --------------------------------
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
             "Reference No",
             "Title / Subject",
             "Priority",
             "Assigned Employee",
             "Deadline",
-            "Status",
-            "Stage"
+            "Status"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -102,7 +114,6 @@ class HODInboxPage(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
 
         main_layout.addWidget(self.table)
 
@@ -121,7 +132,7 @@ class HODInboxPage(QWidget):
         self.setLayout(main_layout)
 
     def load_inbox(self):
-        """Loads documents formally routed to the authenticated HOD's department."""
+        """Loads documents routed to HOD's department — excludes CLOSED by default (use filter to view closed)."""
         all_docs = document_service.get_documents()
         self.documents = [
             d for d in all_docs
@@ -129,21 +140,43 @@ class HODInboxPage(QWidget):
         ]
         self.apply_filter()
 
+
+    def _clear_filters(self):
+        self.search_input.clear()
+        self.filter_combo.setCurrentIndex(0)
+
     def apply_filter(self):
         filter_text = self.filter_combo.currentText()
+        query = self.search_input.text().strip().lower()
         filtered = []
 
         for doc in self.documents:
+            is_closed = doc.current_stage == WorkflowStageEnum.CLOSED.value or (doc.status or "").lower() == "closed"
             is_unassigned = doc.current_stage == WorkflowStageEnum.HOD.value and not doc.assigned_employee_name
             is_assigned = doc.current_stage == WorkflowStageEnum.EMPLOYEE.value or bool(doc.assigned_employee_name)
             is_progress = doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value
 
+            # Default "All Active Documents" excludes closed — must explicitly choose "Closed Documents"
+            if filter_text == "All Active Documents" and is_closed:
+                continue
             if filter_text == "Awaiting Assignment" and not is_unassigned:
                 continue
             if filter_text == "Assigned / In Progress" and not (is_assigned and not is_progress):
                 continue
-            if filter_text == "Progress Updated" and not is_progress:
+            if filter_text == "Progress Updates Received" and not is_progress:
                 continue
+            if filter_text == "Closed Documents" and not is_closed:
+                continue
+
+            if query:
+                ref = str(doc.reference or "").lower()
+                title = str(doc.title or "").lower()
+                emp = str(doc.assigned_employee_name or "").lower()
+                prio = str(doc.priority or "").lower()
+                status = str(doc.status or "").lower()
+
+                if not (query in ref or query in title or query in emp or query in prio or query in status):
+                    continue
 
             filtered.append(doc)
 
@@ -154,7 +187,7 @@ class HODInboxPage(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
             self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
             self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
-            
+
             emp_item = QTableWidgetItem(doc.assigned_employee_name or "— Unassigned —")
             if not doc.assigned_employee_name:
                 emp_item.setForeground(Qt.red)
@@ -162,7 +195,7 @@ class HODInboxPage(QWidget):
 
             self.table.setItem(row, 4, QTableWidgetItem(doc.deadline or "-"))
             self.table.setItem(row, 5, QTableWidgetItem(doc.status or "-"))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage or "-"))
+
 
     def open_document(self):
         row = self.table.currentRow()

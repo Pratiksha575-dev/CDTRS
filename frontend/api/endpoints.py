@@ -43,12 +43,16 @@ class Endpoints:
     HOD_REMARK = lambda doc_id: f"/documents/{doc_id}/hod-remark"
     DOCUMENT_REMARKS_HISTORY = lambda doc_id: f"/documents/{doc_id}/remarks"
 
-    # --- Work Assignment (HOD -> Employee Delegation) ---
+    # --- Work Assignment (HOD -> Employee Delegation & Multi-Assign) ---
     DOCUMENT_ASSIGN = lambda doc_id: f"/documents/{doc_id}/assign"
+    DOCUMENT_ASSIGN_MULTI = lambda doc_id: f"/documents/{doc_id}/assign-multi"
+    DOCUMENT_ASSIGNMENTS = lambda doc_id: f"/documents/{doc_id}/assignments"
+    DOCUMENT_ASSIGNMENT_UPDATE = lambda doc_id, assign_id: f"/documents/{doc_id}/assignments/{assign_id}"
 
-    # --- Employee Progress Updates ---
+    # --- Employee Progress Updates & HOD Validation ---
     PROGRESS_CREATE = lambda doc_id: f"/documents/{doc_id}/progress"
     PROGRESS_LIST = lambda doc_id: f"/documents/{doc_id}/progress"
+    PROGRESS_HOD_VALIDATE = lambda doc_id, prog_id: f"/documents/{doc_id}/progress/{prog_id}/hod-validate"
 
     # --- Attachments ---
     ATTACHMENT_UPLOAD = lambda doc_id: f"/documents/{doc_id}/attachments"

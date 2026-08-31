@@ -444,18 +444,42 @@ class APIRepository(BaseRepository):
         self,
         document_id: int,
         assigned_to_id: int,
-        instructions: Optional[str] = None
+        instructions: Optional[str] = None,
+        requires_hod_validation: bool = False
     ) -> WorkAssignmentModel:
         """
         HOD delegates work on a document to an employee.
-        Sends backend expected assigned_to_user_id field.
+        Sends backend expected assigned_to_user_id and requires_hod_validation fields.
         """
         payload = {
             "assigned_to_user_id": assigned_to_id,
-            "instructions": instructions
+            "instructions": instructions,
+            "requires_hod_validation": requires_hod_validation
         }
         data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
         return WorkAssignmentModel.from_dict(data)
+
+    def assign_multi(self, document_id: int, assignments_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """DS configures multi-department/employee routing."""
+        payload = {"assignments": assignments_list}
+        return api_client.post(Endpoints.DOCUMENT_ASSIGN_MULTI(document_id), json=payload) or []
+
+    def get_document_assignments(self, document_id: int) -> List[Dict[str, Any]]:
+        """Retrieves multi-assignment records for a document."""
+        try:
+            return api_client.get(Endpoints.DOCUMENT_ASSIGNMENTS(document_id)) or []
+        except Exception:
+            return []
+
+    def update_document_assignment(self, document_id: int, assignment_id: int, update_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """HOD updates an assignment record."""
+        return api_client.patch(Endpoints.DOCUMENT_ASSIGNMENT_UPDATE(document_id, assignment_id), json=update_dict) or {}
+
+    def hod_validate_progress(self, document_id: int, progress_id: int, action: str, note: Optional[str] = None) -> ProgressUpdateModel:
+        """HOD validates (approve or return) an employee progress update."""
+        payload = {"action": action, "note": note}
+        data = api_client.post(Endpoints.PROGRESS_HOD_VALIDATE(document_id, progress_id), json=payload)
+        return ProgressUpdateModel.from_dict(data)
 
     def get_assignments(self, document_id: int) -> List[WorkAssignmentModel]:
         """Retrieves assignment records for a document."""

@@ -18,8 +18,70 @@ import crud
 
 from .base import BaseMailProvider, EmailAttachmentDTO, IncomingEmailDTO, OutgoingEmailDTO
 from .outlook_provider import OutlookGraphProvider
+from .intranet_provider import IntranetMailProvider
 
 logger = logging.getLogger("cdtrs.mail.service")
+
+
+# ==============================================================================
+# TEST RECIPIENT EMAIL OVERRIDE (FOR TESTING & DEMO)
+# ------------------------------------------------------------------------------
+# When this is set to an email string (e.g. "pratikshazodge575@gmail.com"),
+# ALL outgoing workflow notifications and reminder emails will be sent to this address,
+# while the sender remains your authenticated Outlook mailbox (pratiksha@outlook.com).
+#
+# TO RESTORE ORIGINAL USER DATABASE EMAILS (HODs, Employees, Director):
+# Simply change this value to None:
+_env_override = os.getenv("OVERRIDE_TEST_RECIPIENT_EMAIL", "pratikshazodge575@gmail.com")
+OVERRIDE_TEST_RECIPIENT_EMAIL: Optional[str] = None if (_env_override and _env_override.lower() in ("none", "false", "off", "")) else _env_override
+
+
+NOTIFICATION_TEMPLATES: Dict[str, tuple] = {
+    "DOCUMENT_SENT_TO_DIRECTOR": (
+        "Document Sent for Director Review",
+        "Document {ref} ('{title}') has been submitted for your executive review."
+    ),
+    "DOCUMENT_RETURNED_TO_DS": (
+        "Director Review Completed",
+        "Director has completed review for document {ref} ('{title}') and returned it with guidance."
+    ),
+    "DOCUMENT_ROUTED_TO_HOD": (
+        "Document Routed to Your Department",
+        "Document {ref} ('{title}') has been assigned to your department for processing."
+    ),
+    "EMPLOYEE_ASSIGNED": (
+        "New Work Assignment",
+        "You have been assigned to execute document {ref} ('{title}')."
+    ),
+    "EMPLOYEE_UPDATE_PENDING_HOD": (
+        "Execution Progress Requires HOD Validation",
+        "Staff member {employee_name} has submitted a progress update for document {ref} that requires your review and approval."
+    ),
+    "HOD_APPROVED_UPDATE": (
+        "Progress Update Approved by HOD",
+        "Department Head has approved the progress update for document {ref} ('{title}') and forwarded it to DS."
+    ),
+    "HOD_RETURNED_UPDATE": (
+        "Progress Update Returned for Correction",
+        "Department Head has reviewed your update for document {ref} and requested corrections:\n{note}"
+    ),
+    "EMPLOYEE_UPDATE_DIRECT_TO_DS": (
+        "Progress Update Submitted",
+        "Staff member {employee_name} has submitted an execution progress update for document {ref} ('{title}')."
+    ),
+    "DIRECTOR_FOLLOWUP_SUBMITTED": (
+        "Progress Follow-Up for Director",
+        "Execution progress updates for document {ref} ('{title}') have been forwarded for Director review."
+    ),
+    "ACTION_REMINDER": (
+        "Action Reminder",
+        "Official action reminder: Action is pending on document {ref} ('{title}')."
+    ),
+    "DOCUMENT_CLOSED": (
+        "Document Lifecycle Closed",
+        "Document {ref} ('{title}') has been closed."
+    ),
+}
 
 
 class MailService:
@@ -32,34 +94,44 @@ class MailService:
     def __init__(self):
         self._providers: Dict[str, BaseMailProvider] = {
             "outlook": OutlookGraphProvider(),
-            # Future: "gov_mail": GovernmentNICMailProvider()
+            "intranet": IntranetMailProvider(),
+            "local": IntranetMailProvider(),
+            "smtp_imap": IntranetMailProvider(),
+            "gov_mail": IntranetMailProvider(),
         }
         self.upload_dir = Path(os.getenv("UPLOAD_DIR", "./uploads"))
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_provider(self, channel: str = "outlook") -> BaseMailProvider:
-        return self._providers.get(channel.lower()) or self._providers["outlook"]
+    def get_default_channel(self) -> str:
+        return os.getenv("MAIL_CHANNEL", "outlook").lower()
 
-    def is_configured(self, channel: str = "outlook") -> bool:
+    def get_provider(self, channel: Optional[str] = None) -> BaseMailProvider:
+        target_channel = (channel or self.get_default_channel()).lower()
+        return self._providers.get(target_channel) or self._providers["outlook"]
+
+    def is_configured(self, channel: Optional[str] = None) -> bool:
         provider = self.get_provider(channel)
         return provider.is_configured()
 
-    def sync_ds_mailbox(self, db: Session, max_count: int = 50) -> schemas.OutlookSyncResponse:
+    def sync_ds_mailbox(self, db: Session, max_count: int = 50, channel: Optional[str] = None) -> schemas.OutlookSyncResponse:
         """
-        Synchronizes the DS Outlook mailbox:
+        Synchronizes the DS mailbox (via Cloud Outlook Graph API or Local Intranet IMAP):
         1. Checks configuration.
-        2. Retrieves new incoming messages with attachments via Graph API.
+        2. Retrieves new incoming messages with attachments.
         3. Enforces idempotency via external_message_id.
         4. Persists attachments to server filesystem (uploads/<year>/intake_<msg_id>/<file>).
         5. Registers IncomingMessage and Attachment records.
         """
-        provider = self.get_provider("outlook")
+        active_channel = channel or self.get_default_channel()
+        provider = self.get_provider(active_channel)
+        channel_label = "Intranet IMAP" if active_channel in ("intranet", "local", "smtp_imap") else "Outlook"
+
         if not provider.is_configured():
             return schemas.OutlookSyncResponse(
                 status="not_configured",
                 synced_count=0,
                 ignored_duplicates=0,
-                message="Outlook integration is not configured. Please set OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_TENANT_ID, and OUTLOOK_MAILBOX in environment variables."
+                message=f"{channel_label} mail integration is not configured. Check your environment settings."
             )
 
         try:
@@ -70,7 +142,7 @@ class MailService:
                 status="error",
                 synced_count=0,
                 ignored_duplicates=0,
-                message=f"Outlook sync failed: {str(ex)}"
+                message=f"{channel_label} sync failed: {str(ex)}"
             )
 
         synced_count = 0
@@ -162,7 +234,13 @@ class MailService:
         )
 
     def resolve_user_email(self, user: models.User) -> Optional[str]:
-        """Resolves the authoritative email address for a user according to preferred channel."""
+        """
+        Resolves the authoritative email address for a user according to preferred channel.
+        If OVERRIDE_TEST_RECIPIENT_EMAIL is configured, routes all test emails to that address.
+        """
+        if OVERRIDE_TEST_RECIPIENT_EMAIL:
+            return OVERRIDE_TEST_RECIPIENT_EMAIL
+
         if not user:
             return None
         pref = (user.preferred_mail_channel or "outlook").lower()
@@ -171,6 +249,63 @@ class MailService:
         elif pref == "gov_mail" and user.gov_email:
             return user.gov_email
         return user.email or user.outlook_email or user.gov_email
+
+    def dispatch_workflow_event(
+        self,
+        db: Session,
+        event_type: str,
+        doc_id: int,
+        recipient_user_id: int,
+        context: Optional[Dict[str, Any]] = None,
+        channel: Optional[str] = None
+    ) -> bool:
+        """
+        Centrally dispatches in-app notification and email notification for a workflow event.
+        Template is resolved from NOTIFICATION_TEMPLATES.
+        """
+        ctx = context or {}
+        template_info = NOTIFICATION_TEMPLATES.get(event_type)
+        if not template_info:
+            title = ctx.get("title", f"Workflow Notice ({event_type})")
+            message = ctx.get("message", "A workflow action was performed on this document.")
+        else:
+            title_tpl, msg_tpl = template_info
+            try:
+                title = title_tpl.format(**ctx)
+                message = msg_tpl.format(**ctx)
+            except Exception:
+                title = title_tpl
+                message = msg_tpl
+
+        # 1. Create In-App Notification (Always succeeds)
+        try:
+            notif = models.Notification(
+                user_id=recipient_user_id,
+                document_id=doc_id,
+                title=title,
+                message=message,
+                is_read=False,
+                created_at=datetime.now()
+            )
+            db.add(notif)
+            db.commit()
+        except Exception as ex:
+            logger.warning(f"Failed to create in-app notification: {ex}")
+            db.rollback()
+
+        # 2. Dispatch Email (if provider is configured and recipient email exists)
+        try:
+            return self.send_workflow_notification(
+                db=db,
+                doc_id=doc_id,
+                recipient_user_id=recipient_user_id,
+                title=title,
+                message=message,
+                channel=channel
+            )
+        except Exception as ex:
+            logger.warning(f"Failed to dispatch workflow email for event '{event_type}': {ex}")
+            return False
 
     def send_workflow_notification(
         self,
@@ -194,7 +329,7 @@ class MailService:
             logger.warning(f"User {user.username} (ID: {user.id}) has no configured email address. Email skipped.")
             return False
 
-        use_channel = channel or user.preferred_mail_channel or "outlook"
+        use_channel = channel or user.preferred_mail_channel or self.get_default_channel()
         provider = self.get_provider(use_channel)
 
         if not provider.is_configured():

@@ -1,13 +1,16 @@
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -29,7 +32,9 @@ class RouteToHODDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Route to HOD - {document.reference}")
-        self.setFixedWidth(440)
+        self.setMinimumWidth(400)
+        self.setMaximumWidth(580)
+        self.setSizeGripEnabled(True)
         self.setup_ui()
 
     def setup_ui(self):
@@ -136,7 +141,9 @@ class RouteToEmployeeDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Route to Employee - {document.reference}")
-        self.setFixedWidth(450)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(600)
+        self.setSizeGripEnabled(True)
         self.setup_ui()
 
     def setup_ui(self):
@@ -185,7 +192,6 @@ class RouteToEmployeeDialog(QDialog):
             # Backend unreachable — show placeholder; do not insert hardcoded employees
             self.emp_combo.addItem("⚠ Could not load employees — check connection", None)
 
-
         form.addRow("Select Staff:", self.emp_combo)
         layout.addLayout(form)
 
@@ -225,6 +231,7 @@ class RouteToEmployeeDialog(QDialog):
 class HODAssignEmployeeDialog(QDialog):
     """
     Modal dialog for Department Head (HOD) delegating execution of a document to a departmental Employee.
+    Includes option to require HOD validation before progress reports reach DS.
     """
 
     def __init__(self, document: DocumentModel, parent: Optional[QWidget] = None):
@@ -233,7 +240,9 @@ class HODAssignEmployeeDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Assign Document - {document.reference}")
-        self.setFixedWidth(460)
+        self.setMinimumWidth(440)
+        self.setMaximumWidth(620)
+        self.setSizeGripEnabled(True)
         self.setup_ui()
 
     def setup_ui(self):
@@ -267,16 +276,24 @@ class HODAssignEmployeeDialog(QDialog):
                 label = f"{emp.full_name} ({emp.department_name or 'General'})"
                 self.emp_combo.addItem(label, emp.id)
         else:
-            # Backend unreachable — show placeholder; do not insert hardcoded employees
             self.emp_combo.addItem("⚠ Could not load employees — check connection", None)
 
-        self.instructions_input = QTextEdit()
-        self.instructions_input.setPlaceholderText("Enter specific task instructions, deliverables, or target timeline...")
-        self.instructions_input.setMaximumHeight(85)
-
         form.addRow("Assign To:", self.emp_combo)
-        form.addRow("Task Instructions:", self.instructions_input)
+
+        # Show existing HOD remark that will be forwarded
+        if getattr(self.document, "hod_remark", None):
+            rem_note = QLabel(f"<b>Forwarded HOD Remark:</b> <i>{self.document.hod_remark}</i>")
+            rem_note.setStyleSheet("color: #0284C7; font-size: 11px; padding: 4px 0px;")
+            rem_note.setWordWrap(True)
+            form.addRow("", rem_note)
+
+        self.val_checkbox = QCheckBox("Require HOD validation before progress updates reach DS")
+        self.val_checkbox.setStyleSheet("color: #0F172A; font-weight: 600; font-size: 12px; margin-top: 4px;")
+        self.val_checkbox.setChecked(False)
+
+        form.addRow("", self.val_checkbox)
         layout.addLayout(form)
+
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -302,13 +319,201 @@ class HODAssignEmployeeDialog(QDialog):
         self.accept()
 
     def get_data(self) -> Dict[str, Any]:
-        emp_id = self.emp_combo.currentData()  # None if no real employee loaded
+        emp_id = self.emp_combo.currentData()
         emp_text = self.emp_combo.currentText().split(" (")[0]
         return {
             "assigned_to_id": emp_id,
             "employee_name": emp_text,
-            "instructions": self.instructions_input.toPlainText().strip()
+            "instructions": getattr(self.document, "hod_remark", "") or None,
+            "requires_hod_validation": self.val_checkbox.isChecked()
         }
+
+
+
+class MultiDeptAssignDialog(QDialog):
+    """
+    Modal dialog for DS configuring Multi-Department and Multi-Employee routing for a document.
+    Allows dynamically adding multiple departmental assignments.
+    """
+
+    def __init__(self, document: DocumentModel, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.document = document
+        self.setModal(True)
+        self._is_confirmed = False
+        self.setWindowTitle(f"Multi-Department Routing - {document.reference}")
+        self.setMinimumWidth(560)
+        self.setMaximumWidth(780)
+        self.setMinimumHeight(420)
+        self.setSizeGripEnabled(True)
+        self.row_items: List[Dict[str, Any]] = []
+        self._departments = []
+        self._all_employees = []
+        self.setup_ui()
+
+    def setup_ui(self):
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(22, 20, 22, 20)
+        root_layout.setSpacing(12)
+
+        title = QLabel("Multi-Department / Multi-Employee Routing")
+        title.setStyleSheet("font-size: 15px; font-weight: 700; color: #0F172A;")
+
+        subtitle = QLabel(f"Document: {self.document.title}\nAssign this document to multiple departments and staff simultaneously.")
+        subtitle.setStyleSheet("color: #64748B; font-size: 12px;")
+        subtitle.setWordWrap(True)
+
+        root_layout.addWidget(title)
+        root_layout.addWidget(subtitle)
+
+        # Load departments and employees once
+        repo = get_repository()
+        self._departments = [d for d in repo.get_departments() if d.name.lower() != "administration"]
+        self._all_employees = repo.get_users(role="Employee")
+
+        # Scroll area for assignment rows
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("QScrollArea { border: 1px solid #E2E8F0; border-radius: 6px; background: #FFFFFF; }")
+
+        self.rows_container = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_container)
+        self.rows_layout.setContentsMargins(10, 10, 10, 10)
+        self.rows_layout.setSpacing(10)
+        self.rows_layout.addStretch()
+
+        self.scroll_area.setWidget(self.rows_container)
+        root_layout.addWidget(self.scroll_area, 1)
+
+        # Add initial row
+        self._add_row()
+
+        # Add row button
+        add_btn_row = QHBoxLayout()
+        self.add_row_btn = QPushButton("➕ Add Another Department / Assignment")
+        self.add_row_btn.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; font-weight: 600; padding: 6px 14px; border-radius: 4px;")
+        self.add_row_btn.clicked.connect(self._add_row)
+        add_btn_row.addWidget(self.add_row_btn)
+        add_btn_row.addStretch()
+        root_layout.addLayout(add_btn_row)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        confirm_btn = QPushButton("Confirm Multi-Routing")
+        confirm_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 18px; border-radius: 5px;")
+        confirm_btn.clicked.connect(self._on_confirm)
+
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        root_layout.addLayout(btn_layout)
+
+        self.setLayout(root_layout)
+
+    def _add_row(self):
+        row_frame = QFrame()
+        row_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px;")
+        row_vbox = QVBoxLayout(row_frame)
+        row_vbox.setContentsMargins(8, 8, 8, 8)
+        row_vbox.setSpacing(6)
+
+        hdr_row = QHBoxLayout()
+        row_idx = len(self.row_items) + 1
+        hdr_lbl = QLabel(f"Assignment #{row_idx}")
+        hdr_lbl.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 12px;")
+        hdr_row.addWidget(hdr_lbl)
+        hdr_row.addStretch()
+
+        remove_btn = QPushButton("✕ Remove")
+        remove_btn.setStyleSheet("background: transparent; color: #DC2626; font-size: 11px; font-weight: 600; border: none;")
+        hdr_row.addWidget(remove_btn)
+        row_vbox.addLayout(hdr_row)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+
+        dept_combo = QComboBox()
+        dept_combo.addItem("-- Select Department --", None)
+        for d in self._departments:
+            dept_combo.addItem(d.name, d.id)
+
+        emp_combo = QComboBox()
+        emp_combo.addItem("-- Assign Directly to Staff (Optional) --", None)
+
+        def _on_dept_change():
+            sel_dept_id = dept_combo.currentData()
+            emp_combo.clear()
+            emp_combo.addItem("-- Assign Directly to Staff (Optional) --", None)
+            for emp in self._all_employees:
+                if sel_dept_id is None or emp.department_id == sel_dept_id:
+                    emp_combo.addItem(f"{emp.full_name} ({emp.department_name or 'General'})", emp.id)
+
+        dept_combo.currentIndexChanged.connect(_on_dept_change)
+        _on_dept_change()
+
+        instr_edit = QTextEdit()
+        instr_edit.setPlaceholderText("Instructions for this department / employee...")
+        instr_edit.setMaximumHeight(50)
+
+        val_cb = QCheckBox("Require HOD validation before progress reaches DS")
+        val_cb.setChecked(False)
+
+        form.addRow("Department:", dept_combo)
+        form.addRow("Specific Staff:", emp_combo)
+        form.addRow("Instructions:", instr_edit)
+        form.addRow("", val_cb)
+        row_vbox.addLayout(form)
+
+        row_item = {
+            "frame": row_frame,
+            "dept_combo": dept_combo,
+            "emp_combo": emp_combo,
+            "instr_edit": instr_edit,
+            "val_cb": val_cb
+        }
+
+        def _remove():
+            if len(self.row_items) <= 1:
+                QMessageBox.information(self, "Notice", "At least one assignment row is required.")
+                return
+            self.rows_layout.removeWidget(row_frame)
+            row_frame.deleteLater()
+            self.row_items.remove(row_item)
+
+        remove_btn.clicked.connect(_remove)
+
+        # Insert before stretch
+        self.rows_layout.insertWidget(self.rows_layout.count() - 1, row_frame)
+        self.row_items.append(row_item)
+
+    def _on_confirm(self):
+        valid_items = self.get_assignments()
+        if not valid_items:
+            QMessageBox.warning(self, "Validation", "Please select at least one department or staff member.")
+            return
+        self._is_confirmed = True
+        self.accept()
+
+    def get_assignments(self) -> List[Dict[str, Any]]:
+        results = []
+        for r in self.row_items:
+            dept_id = r["dept_combo"].currentData()
+            emp_id = r["emp_combo"].currentData()
+            instructions = r["instr_edit"].toPlainText().strip()
+            requires_val = r["val_cb"].isChecked()
+
+            if dept_id is not None or emp_id is not None:
+                results.append({
+                    "department_id": dept_id,
+                    "assigned_employee_id": emp_id,
+                    "instructions": instructions or None,
+                    "requires_hod_validation": requires_val
+                })
+        return results
 
 
 class CloseDocumentDialog(QDialog):
@@ -322,7 +527,9 @@ class CloseDocumentDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Close Document - {document.reference}")
-        self.setFixedWidth(450)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(580)
+        self.setSizeGripEnabled(True)
         self.setup_ui()
 
     def setup_ui(self):
@@ -392,7 +599,9 @@ class SendReminderDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Send Reminder - {document.reference}")
-        self.setFixedWidth(460)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(600)
+        self.setSizeGripEnabled(True)
         self.setup_ui()
 
     def setup_ui(self):

@@ -13,12 +13,14 @@ class Sidebar(QFrame):
     Role-based primary sidebar navigation for CDTRS.
     """
 
-    def __init__(self, role: str):
+    def __init__(self, role: str, username: str = ""):
         super().__init__()
         self.role = RoleEnum.normalize(role)
+        self.username = username
 
         self.setObjectName("sidebar")
-        self.setFixedWidth(230)
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(260)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 20, 15, 20)
@@ -30,13 +32,19 @@ class Sidebar(QFrame):
         title = QLabel("CDTRS")
         title.setObjectName("sidebarTitle")
 
-        user_label = QLabel(self.role)
+        # Format user display text cleanly
+        if self.username and self.username.strip().lower() != self.role.strip().lower():
+            user_text = f"{self.username}\n{self.role}"
+        else:
+            user_text = self.role
+
+        user_label = QLabel(user_text)
         user_label.setObjectName("sidebarUser")
         user_label.setWordWrap(True)
 
         layout.addWidget(title)
         layout.addWidget(user_label)
-        layout.addSpacing(15)
+        layout.addSpacing(14)
 
         # -------------------------
         # Role-based menu
@@ -78,8 +86,7 @@ class Sidebar(QFrame):
             ],
             RoleEnum.DIRECTOR.value: [
                 "Dashboard",
-                "Inbox",
-                "Reviewed Documents",
+                "Review Queue",
                 "History / Audit"
             ],
             RoleEnum.HOD.value: [
@@ -87,6 +94,7 @@ class Sidebar(QFrame):
                 "Department Tasks",
                 "History / Audit"
             ],
+
             "HOD PA": [
                 "Dashboard",
                 "Department Tasks",

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -18,7 +19,6 @@ from models.document import DocumentModel
 from models.enums import DocumentStatusEnum, WorkflowStageEnum
 from services.auth_service import auth_service
 from services.document_service import document_service
-from services.progress_service import progress_service
 
 
 class EmployeeTasksPage(QWidget):
@@ -34,6 +34,7 @@ class EmployeeTasksPage(QWidget):
         super().__init__()
         self._custom_employee_id = employee_id
         self.documents: List[DocumentModel] = []
+        self._displayed_docs: List[DocumentModel] = []
         self.setup_ui()
         self.load_tasks()
         from services.event_bus import event_bus
@@ -55,7 +56,7 @@ class EmployeeTasksPage(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(14)
 
         # --------------------------------
         # HEADER
@@ -70,22 +71,33 @@ class EmployeeTasksPage(QWidget):
         main_layout.addWidget(subtitle)
 
         # --------------------------------
-        # FILTER BAR
+        # SEARCH & FILTER BAR
         # --------------------------------
         filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search by task title, reference, sender/origin, priority, status...")
+        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.textChanged.connect(self.apply_filter)
 
         self.filter_combo = QComboBox()
         self.filter_combo.addItems([
             "All Assigned Tasks",
-            "New Assignments",
+            "Not Yet Started",
             "In Progress / Updated",
             "High Priority / Urgent"
         ])
+        self.filter_combo.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
         self.filter_combo.currentIndexChanged.connect(self.apply_filter)
 
-        filter_layout.addWidget(QLabel("Task Filter:"))
-        filter_layout.addWidget(self.filter_combo)
-        filter_layout.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
+        clear_btn.clicked.connect(self._clear_filters)
+
+        filter_layout.addWidget(self.search_input, 2)
+        filter_layout.addWidget(self.filter_combo, 1)
+        filter_layout.addWidget(clear_btn)
 
         main_layout.addLayout(filter_layout)
 
@@ -93,19 +105,19 @@ class EmployeeTasksPage(QWidget):
         # TABLE
         # --------------------------------
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
             "Reference No",
             "Task / Subject",
             "Priority",
-            "Department / Origin",
+            "Source / Origin",
             "Deadline",
-            "Status",
-            "Stage"
+            "HOD Remark"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self.open_task)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -113,8 +125,8 @@ class EmployeeTasksPage(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+
 
         main_layout.addWidget(self.table)
 
@@ -135,7 +147,8 @@ class EmployeeTasksPage(QWidget):
     def load_tasks(self):
         """
         Loads tasks assigned strictly to the authenticated employee.
-        Enforces strict employee isolation: only includes tasks where assigned_employee_id == auth_id.
+        Enforces strict employee isolation: only includes tasks where assigned_employee_id == auth_id
+        or user is assigned via multi-department assignments.
         """
         emp_id = self.get_authenticated_employee_id()
         all_docs = document_service.get_documents()
@@ -149,34 +162,49 @@ class EmployeeTasksPage(QWidget):
                     d.assigned_employee_id == emp_id
                     or d.current_owner_id == emp_id
                     or getattr(d, "employee_id", None) == emp_id
+                    or any(
+                        isinstance(da, dict) and da.get("assigned_employee_id") == emp_id
+                        for da in getattr(d, "doc_assignments", [])
+                    )
                 )
                 and d.current_stage in (WorkflowStageEnum.EMPLOYEE.value, WorkflowStageEnum.CLOSED.value, "EMPLOYEE", "Employee", "Closed")
             ]
 
         self.apply_filter()
 
+    def _clear_filters(self):
+        self.search_input.clear()
+        self.filter_combo.setCurrentIndex(0)
+
     def apply_filter(self):
         filter_text = self.filter_combo.currentText()
+        query = self.search_input.text().strip().lower()
         filtered = []
 
         for doc in self.documents:
-            # Check progress updates from document attributes if available or fetch
-            has_progress = bool(doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value or getattr(doc, "has_progress_updates", False))
-            if not has_progress and doc.id and filter_text in ("New Assignments", "In Progress / Updated"):
-                try:
-                    p_updates = progress_service.get_progress_updates(doc.id)
-                    has_progress = len(p_updates) > 0
-                except Exception:
-                    has_progress = False
+            has_progress = bool(
+                doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value
+                or getattr(doc, "has_progress_updates", False)
+            )
+            is_urgent = (doc.priority or "").lower() in ("high", "urgent", "red")
 
-            is_urgent = (doc.priority or "").lower() in ("high", "urgent")
-
-            if filter_text == "New Assignments" and has_progress:
+            if filter_text == "Not Yet Started" and has_progress:
                 continue
             if filter_text == "In Progress / Updated" and not has_progress:
                 continue
             if filter_text == "High Priority / Urgent" and not is_urgent:
                 continue
+
+            if query:
+                ref = str(doc.reference or "").lower()
+                title = str(doc.title or "").lower()
+                source = str(doc.source or doc.created_by or "").lower()
+                prio = str(doc.priority or "").lower()
+                status = str(doc.status or "").lower()
+                hod_rem_text = str(doc.hod_remark or getattr(doc, "hod_instructions", "") or getattr(doc, "assignment_instructions", "") or "").lower()
+
+                if not (query in ref or query in title or query in source or query in prio or query in status or query in hod_rem_text):
+                    continue
 
             filtered.append(doc)
 
@@ -187,10 +215,13 @@ class EmployeeTasksPage(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
             self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
             self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
-            self.table.setItem(row, 3, QTableWidgetItem(doc.department or doc.source or "-"))
+            self.table.setItem(row, 3, QTableWidgetItem(doc.source or "Official Dispatch"))
             self.table.setItem(row, 4, QTableWidgetItem(doc.deadline or "-"))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.status or "-"))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.current_stage or "-"))
+            # HOD Remark — shows the HOD's remark/guidance for this assignment
+            hod_rem = doc.hod_remark or getattr(doc, "hod_instructions", None) or getattr(doc, "assignment_instructions", None) or "—"
+            self.table.setItem(row, 5, QTableWidgetItem(str(hod_rem)))
+
+
 
     def open_task(self):
         row = self.table.currentRow()

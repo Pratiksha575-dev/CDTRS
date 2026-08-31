@@ -42,6 +42,20 @@ class DocumentStatus(str, enum.Enum):
     CLOSED                    = "CLOSED"
 
 
+class ProgressValidationStatus(str, enum.Enum):
+    DIRECT_TO_DS         = "DIRECT_TO_DS"
+    PENDING_HOD_REVIEW   = "PENDING_HOD_REVIEW"
+    HOD_APPROVED         = "HOD_APPROVED"
+    RETURNED_TO_EMPLOYEE = "RETURNED_TO_EMPLOYEE"
+
+
+class AssignmentStatus(str, enum.Enum):
+    PENDING_EMPLOYEE = "PENDING_EMPLOYEE"
+    IN_PROGRESS      = "IN_PROGRESS"
+    PROGRESS_UPDATED = "PROGRESS_UPDATED"
+    COMPLETED        = "COMPLETED"
+
+
 class WorkflowStage(str, enum.Enum):
     DS       = "DS"
     DIRECTOR = "DIRECTOR"
@@ -258,6 +272,7 @@ class Document(Base):
     source_message     = relationship("IncomingMessage", back_populates="documents")
     routes             = relationship("DocumentRoute", back_populates="document", cascade="all, delete-orphan")
     assignments        = relationship("WorkAssignment", back_populates="document", cascade="all, delete-orphan")
+    doc_assignments    = relationship("DocumentAssignment", back_populates="document", cascade="all, delete-orphan")
     progress_updates   = relationship("ProgressUpdate", back_populates="document", cascade="all, delete-orphan")
     attachments        = relationship("Attachment", back_populates="document", cascade="all, delete-orphan")
     workflow_history   = relationship("WorkflowHistory", back_populates="document", cascade="all, delete-orphan")
@@ -279,6 +294,9 @@ class Document(Base):
         for a in self.assignments:
             if a.is_active and a.assigned_to:
                 return a.assigned_to.full_name
+        for da in self.doc_assignments:
+            if da.assigned_employee:
+                return da.assigned_employee.full_name
         if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner:
             return self.current_owner.full_name
         return None
@@ -288,6 +306,9 @@ class Document(Base):
         for a in self.assignments:
             if a.is_active and a.assigned_to_user_id:
                 return a.assigned_to_user_id
+        for da in self.doc_assignments:
+            if da.assigned_employee_id:
+                return da.assigned_employee_id
         if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner_id:
             return self.current_owner_id
         return None
@@ -371,6 +392,7 @@ class WorkAssignment(Base):
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
     assigned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     assigned_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    requires_hod_validation = Column(Boolean, default=False)
     instructions = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
     assigned_at = Column(DateTime, default=datetime.now)
@@ -380,6 +402,39 @@ class WorkAssignment(Base):
     document    = relationship("Document", back_populates="assignments")
     assigned_by = relationship("User", foreign_keys=[assigned_by_user_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_user_id])
+
+
+# =========================================================
+# DOCUMENT ASSIGNMENTS (Multi-Department / Multi-Employee)
+# =========================================================
+
+class DocumentAssignment(Base):
+    __tablename__ = "document_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
+    assigned_employee_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    assigned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    requires_hod_validation = Column(Boolean, default=False)
+    assignment_status = Column(SAEnum(AssignmentStatus, name="assign_status_enum"), default=AssignmentStatus.PENDING_EMPLOYEE, nullable=False)
+    instructions = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    document          = relationship("Document", back_populates="doc_assignments")
+    department        = relationship("Department", foreign_keys=[department_id])
+    assigned_employee = relationship("User", foreign_keys=[assigned_employee_id])
+    assigned_by       = relationship("User", foreign_keys=[assigned_by_user_id])
+
+    @property
+    def department_name(self) -> Optional[str]:
+        return self.department.name if self.department else None
+
+    @property
+    def employee_name(self) -> Optional[str]:
+        return self.assigned_employee.full_name if self.assigned_employee else None
 
 
 # =========================================================
@@ -393,16 +448,26 @@ class ProgressUpdate(Base):
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
     submitted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     description = Column(Text, nullable=False)
+    hod_validation_required = Column(Boolean, default=False)
+    hod_validation_status = Column(SAEnum(ProgressValidationStatus, name="prog_val_status_enum"), default=ProgressValidationStatus.DIRECT_TO_DS, nullable=False)
+    hod_review_note = Column(Text, nullable=True)
+    hod_reviewed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    hod_reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
     document     = relationship("Document", back_populates="progress_updates")
     submitted_by = relationship("User", foreign_keys=[submitted_by_user_id])
+    hod_reviewer = relationship("User", foreign_keys=[hod_reviewed_by_user_id])
     attachments  = relationship("Attachment", back_populates="progress_update")
 
     @property
     def user_name(self) -> Optional[str]:
         return self.submitted_by.full_name if self.submitted_by else None
+
+    @property
+    def hod_reviewer_name(self) -> Optional[str]:
+        return self.hod_reviewer.full_name if self.hod_reviewer else None
 
 
 # =========================================================

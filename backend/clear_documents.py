@@ -16,7 +16,6 @@ def clear_all_documents():
 
     db = SessionLocal()
     try:
-        # Delete all child records referencing documents
         db.query(models.Notification).delete()
         db.query(models.WorkflowHistory).delete()
         db.query(models.Reminder).delete()
@@ -26,6 +25,7 @@ def clear_all_documents():
         db.query(models.ProgressUpdate).delete()
         db.query(models.DocumentRemark).delete()
         db.query(models.WorkAssignment).delete()
+        db.query(models.DocumentAssignment).delete()
         db.query(models.DocumentRoute).delete()
         db.query(models.Attachment).delete()
         deleted_docs = db.query(models.Document).delete()

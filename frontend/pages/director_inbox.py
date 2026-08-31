@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -17,14 +18,13 @@ from PySide6.QtWidgets import (
 from models.document import DocumentModel
 from models.enums import DocumentStatusEnum, WorkflowStageEnum
 from services.document_service import document_service
-from services.progress_service import progress_service
 
 
 class DirectorInboxPage(QWidget):
     """
     Director Executive Review Inbox.
-    Contains strictly documents routed to the Director by the Director Secretary (DS).
-    Distinguishes Initial Review submissions from Employee Progress Follow-ups.
+    Contains documents routed to the Director by the Director Secretary (DS),
+    with full search and filter choices including Initial Reviews, Follow-ups, and Reviewed Archive.
     """
 
     view_requested = Signal(object, str)
@@ -32,6 +32,7 @@ class DirectorInboxPage(QWidget):
     def __init__(self):
         super().__init__()
         self.documents: List[DocumentModel] = []
+        self._displayed_docs: List[DocumentModel] = []
         self.setup_ui()
         self.load_inbox()
         from services.event_bus import event_bus
@@ -44,7 +45,7 @@ class DirectorInboxPage(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(14)
 
         # --------------------------------
         # HEADER
@@ -59,21 +60,34 @@ class DirectorInboxPage(QWidget):
         main_layout.addWidget(subtitle)
 
         # --------------------------------
-        # FILTER BAR
+        # SEARCH & FILTER BAR
         # --------------------------------
         filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search by title, reference, origin, department, priority...")
+        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.textChanged.connect(self.apply_filter)
 
         self.category_filter = QComboBox()
         self.category_filter.addItems([
-            "All Review Submissions",
+            "All Active Reviews",
             "Initial Reviews",
-            "Progress Follow-ups"
+            "Progress Follow-ups",
+            "Reviewed & Returned to DS",
+            "All Documents (Active & History)"
         ])
+        self.category_filter.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
         self.category_filter.currentIndexChanged.connect(self.apply_filter)
 
-        filter_layout.addWidget(QLabel("Category:"))
-        filter_layout.addWidget(self.category_filter)
-        filter_layout.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
+        clear_btn.clicked.connect(self._clear_filters)
+
+        filter_layout.addWidget(self.search_input, 2)
+        filter_layout.addWidget(self.category_filter, 1)
+        filter_layout.addWidget(clear_btn)
 
         main_layout.addLayout(filter_layout)
 
@@ -87,13 +101,14 @@ class DirectorInboxPage(QWidget):
             "Title / Subject",
             "Review Type",
             "Priority",
-            "Source",
+            "Source / Origin",
             "Deadline",
             "Status"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self.review_document)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -112,7 +127,7 @@ class DirectorInboxPage(QWidget):
         action_layout = QHBoxLayout()
         action_layout.addStretch()
 
-        self.review_btn = QPushButton("Review Document")
+        self.review_btn = QPushButton("Open / Review Document")
         self.review_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 22px; border-radius: 5px;")
         self.review_btn.clicked.connect(self.review_document)
         action_layout.addWidget(self.review_btn)
@@ -121,41 +136,85 @@ class DirectorInboxPage(QWidget):
         self.setLayout(main_layout)
 
     # ====================================
-    # LOAD INBOX
+    # LOAD INBOX & FAST FILTERING
     # ====================================
 
     def load_inbox(self):
-        """Loads documents currently routed to Director (Stage = DIRECTOR)."""
-        all_docs = document_service.get_documents()
-        self.documents = [
-            d for d in all_docs
-            if d.current_stage == WorkflowStageEnum.DIRECTOR.value or d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value
-        ]
+        """Loads all accessible documents for Director."""
+        self.documents = document_service.get_documents() or []
         self.apply_filter()
+
+    def set_filters(self, category: Optional[str] = None, priority: Optional[str] = None, search: Optional[str] = None):
+        """Programmatic filter setter used by dashboard navigation."""
+        if category:
+            for i in range(self.category_filter.count()):
+                if category.lower() in self.category_filter.itemText(i).lower():
+                    self.category_filter.setCurrentIndex(i)
+                    break
+        if search:
+            self.search_input.setText(search)
+        elif priority:
+            self.search_input.setText(priority)
+        self.apply_filter()
+
+    def _clear_filters(self):
+        self.search_input.clear()
+        self.category_filter.setCurrentIndex(0)
+
 
     def apply_filter(self):
         cat = self.category_filter.currentText()
+        query = self.search_input.text().strip().lower()
         filtered = []
 
         for doc in self.documents:
-            # Check if this document has progress updates attached
-            has_progress = (
-                doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value
+            is_active_dir = bool(
+                doc.current_stage in (WorkflowStageEnum.DIRECTOR.value, "DIRECTOR", "Director")
+                or doc.status in (DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value, "Under Director Review", "UNDER_DIRECTOR_REVIEW")
+            )
+            has_remark = bool(doc.director_remark)
+            is_returned = bool(
+                (has_remark or doc.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed"))
+                and not is_active_dir
+            )
+            is_progress = bool(
+                doc.status in (DocumentStatusEnum.PROGRESS_UPDATED.value, DocumentStatusEnum.IN_PROGRESS.value)
                 or getattr(doc, "has_progress_updates", False)
             )
-            if not has_progress and doc.id and cat in ("All Review Submissions", "Progress Follow-ups"):
-                try:
-                    updates = progress_service.get_progress_updates(doc.id)
-                    has_progress = len(updates) > 0
-                except Exception:
-                    has_progress = False
 
-            review_type = "Progress Follow-up" if has_progress else "Initial Review"
+            # Determine Review Type badge
+            if is_progress:
+                review_type = "Progress Follow-up"
+            elif is_returned:
+                review_type = "Reviewed & Returned"
+            else:
+                review_type = "Initial Review"
 
-            if cat == "Initial Reviews" and review_type != "Initial Review":
+            # Category filter logic
+            if cat == "All Active Reviews" and not is_active_dir:
                 continue
-            if cat == "Progress Follow-ups" and review_type != "Progress Follow-up":
+            if cat == "Initial Reviews" and not (is_active_dir and not is_progress):
                 continue
+            if cat == "Progress Follow-ups" and not (is_active_dir and is_progress):
+                continue
+            if cat == "Reviewed & Returned to DS" and not is_returned:
+                continue
+            if cat == "All Documents (Active & History)":
+                # Include both active review and documents director has reviewed
+                if not (is_active_dir or is_returned or has_remark):
+                    continue
+
+            # Search text filter
+            if query:
+                ref = str(doc.reference or "").lower()
+                title = str(doc.title or "").lower()
+                source = str(doc.source or "").lower()
+                dept = str(doc.target_department_name or doc.suggested_department_name or "").lower()
+                prio = str(doc.priority or "").lower()
+                remark = str(doc.director_remark or "").lower()
+
+                if not (query in ref or query in title or query in source or query in dept or query in prio or query in remark):
+                    continue
 
             filtered.append((doc, review_type))
 
@@ -165,10 +224,14 @@ class DirectorInboxPage(QWidget):
         for row, (doc, r_type) in enumerate(filtered):
             self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
             self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
-            
+
             type_item = QTableWidgetItem(r_type)
             if r_type == "Progress Follow-up":
                 type_item.setForeground(Qt.blue)
+            elif r_type == "Reviewed & Returned":
+                type_item.setForeground(Qt.darkGreen)
+            else:
+                type_item.setForeground(Qt.darkMagenta)
             self.table.setItem(row, 2, type_item)
 
             self.table.setItem(row, 3, QTableWidgetItem(doc.priority or "-"))

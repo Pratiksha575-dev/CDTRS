@@ -67,6 +67,11 @@ QPushButton:hover {
     border: none;
 }
 
+#sidebar QLabel {
+    background-color: transparent;
+    background: transparent;
+}
+
 #sidebarTitle {
     background-color: transparent;
     color: white;
@@ -77,9 +82,10 @@ QPushButton:hover {
 #sidebarUser {
     background-color: transparent;
     color: #E0E7FF;
-    font-size: 14px;
-    font-weight:normal;
+    font-size: 13px;
+    font-weight: normal;
 }
+
 
 #sidebarButton {
     background-color: transparent;

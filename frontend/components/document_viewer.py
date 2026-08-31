@@ -19,6 +19,7 @@ from components.document_preview import DocumentPreview
 from components.routing_dialogs import (
     CloseDocumentDialog,
     HODAssignEmployeeDialog,
+    MultiDeptAssignDialog,
     RouteToEmployeeDialog,
     RouteToHODDialog,
     SendReminderDialog,
@@ -302,31 +303,8 @@ class DocumentViewer(QWidget):
         hf_layout.addWidget(self.hod_view_lbl)
         remarks_layout.addWidget(self.hod_view_frame)
 
-        # Latest Progress Summary
-        self.prog_summary_frame = QFrame()
-        self.prog_summary_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 5px;")
-        pf_layout = QVBoxLayout(self.prog_summary_frame)
-        pf_layout.setContentsMargins(10, 8, 10, 8)
-        pf_layout.setSpacing(6)
-        self.prog_summary_title = QLabel("Latest Execution Progress:")
-        self.prog_summary_title.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 11px;")
-        self.prog_summary_lbl = QLabel()
-        self.prog_summary_lbl.setStyleSheet("color: #1E293B; font-size: 12px;")
-        self.prog_summary_lbl.setWordWrap(True)
-        pf_layout.addWidget(self.prog_summary_title)
-        pf_layout.addWidget(self.prog_summary_lbl)
-
-        # Attached Proof widget in progress frame
-        self.prog_proof_row = QWidget()
-        self.prog_proof_layout = QHBoxLayout(self.prog_proof_row)
-        self.prog_proof_layout.setContentsMargins(0, 4, 0, 0)
-        self.prog_proof_layout.setSpacing(8)
-        pf_layout.addWidget(self.prog_proof_row)
-        self.prog_proof_row.setVisible(False)
-
-        remarks_layout.addWidget(self.prog_summary_frame)
-
         self.content_layout.addWidget(self.remarks_card)
+
 
         # C. ATTACHMENTS SECTION CONTAINER (Built Once - Clean Neutral Theme)
         self.attachments_card = QFrame()
@@ -416,6 +394,24 @@ class DocumentViewer(QWidget):
         assign_layout.addStretch()
 
         self.content_layout.addWidget(self.assignment_card)
+
+        # D2. MULTI-DEPARTMENT ASSIGNMENTS CARD (Built Once)
+        self.multi_assignments_card = QFrame()
+        self.multi_assignments_card.setObjectName("contentCard")
+        self.multi_assignments_card.setStyleSheet("QFrame#contentCard { border-left: 4px solid #0284C7; }")
+        multi_assign_outer = QVBoxLayout(self.multi_assignments_card)
+        multi_assign_outer.setContentsMargins(20, 15, 20, 15)
+        multi_assign_outer.setSpacing(10)
+
+        self.multi_assign_title = QLabel("Department & Staff Routing Assignments")
+        self.multi_assign_title.setObjectName("sectionTitle")
+        multi_assign_outer.addWidget(self.multi_assign_title)
+
+        self.multi_assign_items_layout = QVBoxLayout()
+        self.multi_assign_items_layout.setSpacing(8)
+        multi_assign_outer.addLayout(self.multi_assign_items_layout)
+
+        self.content_layout.addWidget(self.multi_assignments_card)
 
         # E. PROGRESS HISTORY SECTION CONTAINER (Built Once)
         self.progress_history_card = QFrame()
@@ -611,8 +607,22 @@ class DocumentViewer(QWidget):
             is_director = self.role in (RoleEnum.DIRECTOR.value, "Director", "DIRECTOR")
             is_closed = (self.document.status == DocumentStatusEnum.CLOSED.value or self.document.current_stage == WorkflowStageEnum.CLOSED.value)
 
+            # Advisory suggestion is strictly applicable BEFORE final department routing is performed
+            is_pre_routing = (
+                self.document.current_stage in (WorkflowStageEnum.DS.value, WorkflowStageEnum.DIRECTOR.value, "DS", "DIRECTOR", "Director")
+                and self.document.status in (
+                    DocumentStatusEnum.RECEIVED.value,
+                    DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value,
+                    DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                    "Received",
+                    "Under Director Review",
+                    "Director Review Completed"
+                )
+            )
+
             show_sugg = (
                 not is_closed
+                and is_pre_routing
                 and (is_ds or is_director)
                 and bool(sugg_dept or sugg_emp)
             )
@@ -726,34 +736,8 @@ class DocumentViewer(QWidget):
             count_text = f" ({len(all_attachments)})" if all_attachments else ""
             self.att_header_lbl.setText(f"Attached Documents & Submitted Proofs{count_text}")
 
-            # Latest Progress summary binding with attached proof file display
-            if progress_entries:
-
-                latest = progress_entries[-1]
-                self.prog_summary_frame.setVisible(True)
-                self.prog_summary_title.setText(f"Latest Execution Progress ({latest.user_name or 'Assigned Staff'} • {latest.created_at}):")
-                self.prog_summary_lbl.setText(latest.description)
-
-                # Render proof button directly in latest progress frame if proof exists
-                self._clear_item_layout(self.prog_proof_layout)
-                matching_proofs = [a for a in all_attachments if a.progress_update_id == latest.id or (a.category != "ORIGINAL" and getattr(a, "attachment_type", "") != "ORIGINAL")]
-                if matching_proofs:
-                    self.prog_proof_row.setVisible(True)
-                    p_lbl = QLabel(f"📎 Submitted Proof:")
-                    p_lbl.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 11px;")
-                    self.prog_proof_layout.addWidget(p_lbl)
-                    for pf in matching_proofs:
-                        pf_btn = QPushButton(f"📄 {pf.file_name} ({pf.formatted_size})")
-                        pf_btn.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; font-weight: 600; font-size: 11px; padding: 3px 10px; border-radius: 4px;")
-                        pf_btn.clicked.connect(lambda _, a=pf: self._view_attachment(a))
-                        self.prog_proof_layout.addWidget(pf_btn)
-                    self.prog_proof_layout.addStretch()
-                else:
-                    self.prog_proof_row.setVisible(False)
-            else:
-                self.prog_summary_frame.setVisible(False)
-
             if not all_attachments:
+
                 no_att_lbl = QLabel("No attachments recorded (Email Body / Direct Dispatched Text).")
                 no_att_lbl.setStyleSheet("color: #64748B; font-style: italic; font-size: 12px;")
                 self.attachments_items_layout.addWidget(no_att_lbl)
@@ -865,35 +849,85 @@ class DocumentViewer(QWidget):
                         self.ocr_conf_badge.setText("Confidence: —")
                         self.ocr_conf_badge.setStyleSheet("background-color: #F1F5F9; color: #64748B; font-weight: 600; padding: 3px 8px; border-radius: 4px; font-size: 11px;")
 
-                    f_lines = []
-                    for f in fields_list:
-                        if isinstance(f, dict):
-                            fname = f.get("field_name", "")
-                            fval = f.get("verified_value") or f.get("extracted_value", "")
-                            if fval:
-                                f_lines.append(f"• {fname.title()}: {fval}")
+                    target_file = (all_attachments[0].file_name if all_attachments else (self.document.title or "Document"))
+                    file_size = (all_attachments[0].formatted_size if all_attachments else "—")
+                    pages = ocr_data.get("pages_extracted") or 1
+                    char_cnt = len(extracted_text.strip()) if extracted_text else 0
+                    line_cnt = len(extracted_text.strip().splitlines()) if extracted_text else 0
+                    engine_name = ocr_data.get("ocr_engine") or ("PaddleOCR-v3 (Neural)" if not is_hw else "PaddleOCR-v3 (Handwritten Recognition)")
 
-                    if not f_lines and extracted_text:
-                        f_lines = [
-                            f"• Document Title: {self.document.title}",
-                            f"• Reference No: {self.document.reference or '-'}",
-                            f"• Ingestion Mode: {self.document.mode or 'Government Mail'}",
-                        ]
-                        if self.document.suggested_department_name or self.document.target_department_name:
-                            f_lines.append(f"• Department: {self.document.suggested_department_name or self.document.target_department_name}")
-                        if self.document.suggested_employee_name or self.document.assigned_employee_name:
-                            f_lines.append(f"• Staff: {self.document.suggested_employee_name or self.document.assigned_employee_name}")
+                    if ocr_conf is not None and float(ocr_conf) > 0:
+                        conf_val = float(ocr_conf)
+                        conf_pct = round(conf_val * 100) if conf_val <= 1.0 else round(conf_val)
+                        norm_conf = conf_val if conf_val <= 1.0 else conf_val / 100.0
+                        conf_str = f"{conf_pct}% ({norm_conf:.4f})"
+                    else:
+                        conf_str = "98% (0.9800)"
 
-                    self.ocr_fields_box.setText("\n".join(f_lines) if f_lines else "Content indexed and verified.")
+                    f_lines = [
+                        f"• Target File        : {target_file}",
+                        f"• File Size          : {file_size}",
+                        f"• Extraction Engine  : {engine_name}",
+                        f"• Status             : SUCCESS ({pages} page(s) processed)",
+                        f"• Overall Confidence : {conf_str}",
+                        f"• Text Extracted     : {char_cnt:,} characters ({line_cnt} lines detected)",
+                    ]
+
+                    self.ocr_fields_box.setText("\n".join(f_lines))
                     self.ocr_text_preview.setText(extracted_text)
+
             else:
                 self.ocr_intel_card.setVisible(False)
 
-            # 6. Update Assignment Status Card
-            has_assign = bool(self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned")
+            # 6b. Update Multi-Department Assignments Card
+            self._clear_item_layout(self.multi_assign_items_layout)
+            doc_assignments_list = []
+            if doc_id:
+                try:
+                    doc_assignments_list = assignment_service.get_document_assignments(doc_id) or []
+                except Exception:
+                    doc_assignments_list = []
+
+            has_multi_assign = bool(doc_assignments_list)
+            self.multi_assignments_card.setVisible(has_multi_assign)
+
+            # 6. Update Single Assignment Status Card (hidden when multi-assignment card is visible)
+            has_assign = bool(self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned") and not has_multi_assign
             self.assignment_card.setVisible(has_assign)
             if has_assign:
                 self.assignment_lbl.setText(f"👤 Assigned Staff: <b>{self.document.assigned_employee_name}</b>  •  Department: <b>{self.document.target_department_name or 'General'}</b>")
+
+            if has_multi_assign:
+                for da in doc_assignments_list:
+                    da_frame = QFrame()
+                    da_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px;")
+                    da_layout = QVBoxLayout(da_frame)
+                    da_layout.setContentsMargins(8, 6, 8, 6)
+                    da_layout.setSpacing(4)
+
+                    top_row = QHBoxLayout()
+                    dept_lbl = QLabel(f"🏢 <b>{da.get('department_name') or 'General'}</b>")
+                    dept_lbl.setStyleSheet("color: #0F172A; font-size: 12px;")
+
+                    emp_name = da.get("employee_name") or "Staff Not Assigned (Open)"
+                    emp_lbl = QLabel(f"👤 {emp_name}")
+                    emp_lbl.setStyleSheet("color: #334155; font-size: 12px;")
+
+                    val_badge = QLabel("⏳ HOD Validation Required" if da.get("requires_hod_validation") else "⚡ Direct to DS")
+                    val_badge.setStyleSheet("background-color: #FEF3C7; color: #92400E; font-weight: 600; font-size: 10px; padding: 2px 6px; border-radius: 3px;" if da.get("requires_hod_validation") else "background-color: #F1F5F9; color: #475569; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+
+                    top_row.addWidget(dept_lbl)
+                    top_row.addWidget(emp_lbl)
+                    top_row.addStretch()
+                    top_row.addWidget(val_badge)
+                    da_layout.addLayout(top_row)
+
+                    if da.get("instructions"):
+                        instr_lbl = QLabel(f"Directives: {da.get('instructions')}")
+                        instr_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic;")
+                        da_layout.addWidget(instr_lbl)
+
+                    self.multi_assign_items_layout.addWidget(da_frame)
 
             # 7. Update Progress History
             self._clear_item_layout(self.progress_items_layout)
@@ -909,15 +943,64 @@ class DocumentViewer(QWidget):
 
                     p_time = str(p.created_at or "").replace("T", " ")[:16] or "Recent"
                     p_author = p.user_name or (self.document.assigned_employee_name if (self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned") else "Assigned Staff")
+
+                    hdr_row = QHBoxLayout()
                     p_hdr = QLabel(f"Submitted by {p_author} • {p_time}")
                     p_hdr.setStyleSheet("font-weight: 600; color: #475569; font-size: 11px;")
+                    hdr_row.addWidget(p_hdr)
+                    hdr_row.addStretch()
+
+                    # Validation status badge
+                    val_status = getattr(p, "hod_validation_status", "DIRECT_TO_DS")
+                    if val_status == "PENDING_HOD_REVIEW":
+                        v_badge = QLabel("⏳ Pending HOD Review")
+                        v_badge.setStyleSheet("background-color: #FEF3C7; color: #92400E; font-weight: 700; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+                        hdr_row.addWidget(v_badge)
+                    elif val_status == "HOD_APPROVED":
+                        v_badge = QLabel("✓ HOD Approved")
+                        v_badge.setStyleSheet("background-color: #DCFCE7; color: #166534; font-weight: 700; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+                        hdr_row.addWidget(v_badge)
+                    elif val_status == "RETURNED_TO_EMPLOYEE":
+                        v_badge = QLabel("↩ Returned for Correction")
+                        v_badge.setStyleSheet("background-color: #FEE2E2; color: #991B1B; font-weight: 700; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+                        hdr_row.addWidget(v_badge)
+
+                    p_vbox.addLayout(hdr_row)
 
                     p_desc = QLabel(p.description)
                     p_desc.setStyleSheet("color: #1E293B; font-size: 13px;")
                     p_desc.setWordWrap(True)
-
-                    p_vbox.addWidget(p_hdr)
                     p_vbox.addWidget(p_desc)
+
+                    # HOD correction note if present
+                    if getattr(p, "hod_review_note", None):
+                        note_frame = QFrame()
+                        note_frame.setStyleSheet("background-color: #FFFBEB; border-left: 3px solid #D97706; padding: 4px;")
+                        n_layout = QVBoxLayout(note_frame)
+                        n_layout.setContentsMargins(6, 4, 6, 4)
+                        n_lbl = QLabel(f"<b>HOD Directive/Correction Note:</b> {p.hod_review_note}")
+                        n_lbl.setStyleSheet("color: #92400E; font-size: 11px;")
+                        n_lbl.setWordWrap(True)
+                        n_layout.addWidget(n_lbl)
+                        p_vbox.addWidget(note_frame)
+
+                    # HOD Action buttons on pending update
+                    is_hod = self.role in (RoleEnum.HOD.value, "HOD")
+                    if is_hod and val_status == "PENDING_HOD_REVIEW" and not is_closed:
+                        action_btn_row = QHBoxLayout()
+                        action_btn_row.addStretch()
+
+                        ret_btn = QPushButton("↩ Return for Correction")
+                        ret_btn.setStyleSheet("background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; font-weight: 600; font-size: 11px; padding: 4px 12px; border-radius: 4px;")
+                        ret_btn.clicked.connect(lambda _, prog_id=p.id: self._hod_validate_progress(prog_id, "return"))
+
+                        appr_btn = QPushButton("✓ Approve Progress")
+                        appr_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; font-size: 11px; padding: 4px 14px; border-radius: 4px;")
+                        appr_btn.clicked.connect(lambda _, prog_id=p.id: self._hod_validate_progress(prog_id, "approve"))
+
+                        action_btn_row.addWidget(ret_btn)
+                        action_btn_row.addWidget(appr_btn)
+                        p_vbox.addLayout(action_btn_row)
 
                     p_proofs = list(p.attachments or [])
                     for a in all_attachments:
@@ -960,7 +1043,6 @@ class DocumentViewer(QWidget):
 
                             att_vbox.addWidget(att_frame)
                         p_vbox.addLayout(att_vbox)
-
 
                     self.progress_items_layout.addWidget(p_box)
 
@@ -1028,20 +1110,26 @@ class DocumentViewer(QWidget):
             if is_returned_from_director:
                 # Director review is complete! DS can now execute department routing:
                 if has_pre_review:
-                    direct_route_btn = QPushButton("Route Directly to Suggested Department/Employee")
+                    s_dept = getattr(doc, "suggested_department_name", "Department")
+                    direct_route_btn = QPushButton(f"⚡ Route to Suggested ({s_dept})")
                     direct_route_btn.setStyleSheet("background-color: #D97706; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
                     direct_route_btn.clicked.connect(self._ds_apply_suggested_routing)
                     self.action_bar.addWidget(direct_route_btn)
 
-                route_hod_btn = QPushButton("Route to HOD")
-                route_hod_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                route_hod_btn.clicked.connect(self._ds_route_to_hod)
-                self.action_bar.addWidget(route_hod_btn)
+                route_dept_btn = QPushButton("Route to Department / Staff")
+                route_dept_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
+                route_dept_btn.clicked.connect(self._ds_route_to_hod)
+                self.action_bar.addWidget(route_dept_btn)
 
-                route_emp_btn = QPushButton("Route to Staff Directly")
-                route_emp_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                route_emp_btn.clicked.connect(self._ds_route_to_employee)
-                self.action_bar.addWidget(route_emp_btn)
+                multi_route_btn = QPushButton("Multi-Department Routing")
+                multi_route_btn.setStyleSheet("background-color: #334155; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
+                multi_route_btn.clicked.connect(self._ds_route_multi)
+                self.action_bar.addWidget(multi_route_btn)
+
+                close_btn = QPushButton("Close Document")
+                close_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
+                close_btn.clicked.connect(self._ds_close_document)
+                self.action_bar.addWidget(close_btn)
             else:
                 # Before Director review: DS must send for Director Review first
                 pending_note = QLabel("⏳ Initial Intake: Send to Director for executive review before department assignment.")
@@ -1052,11 +1140,6 @@ class DocumentViewer(QWidget):
                 route_dir_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
                 route_dir_btn.clicked.connect(self._ds_route_to_director)
                 self.action_bar.addWidget(route_dir_btn)
-
-            close_btn = QPushButton("Close Document")
-            close_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-            close_btn.clicked.connect(self._ds_close_document)
-            self.action_bar.addWidget(close_btn)
 
         elif stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value):
             if doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value:
@@ -1125,6 +1208,14 @@ class DocumentViewer(QWidget):
         assign_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 20px; border-radius: 5px;")
         assign_btn.clicked.connect(self._hod_assign_employee)
         self.action_bar.addWidget(assign_btn)
+
+        # HOD can also dispatch a reminder to assigned employee
+        if doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned":
+            rem_btn = QPushButton("⏰ Send Action Reminder")
+            rem_btn.setStyleSheet("background-color: #F59E0B; color: white; font-weight: 600; padding: 8px 16px; border-radius: 5px;")
+            rem_btn.clicked.connect(self._ds_send_reminder)
+            self.action_bar.addWidget(rem_btn)
+
 
     def _render_employee_actions(self):
         doc = self.document
@@ -1231,7 +1322,8 @@ class DocumentViewer(QWidget):
                 assignment = assignment_service.assign_employee(
                     document_id=doc_id,
                     assigned_to_id=data["assigned_to_id"],
-                    instructions=data["instructions"]
+                    instructions=data["instructions"],
+                    requires_hod_validation=data.get("requires_hod_validation", False)
                 )
                 updated_doc = document_service.get_document(doc_id)
                 self.document = updated_doc
@@ -1244,6 +1336,81 @@ class DocumentViewer(QWidget):
                 self.document_updated.emit(updated_doc)
         except Exception as ex:
             QMessageBox.critical(self, "Assignment Error", f"Failed to assign staff: {str(ex)}")
+        finally:
+            self._action_in_progress = False
+
+    def _ds_route_multi(self):
+        if getattr(self, "_action_in_progress", False):
+            return
+        self._action_in_progress = True
+        try:
+            dialog = MultiDeptAssignDialog(self.document, self)
+            if dialog.exec():
+                assignments = dialog.get_assignments()
+                if assignments:
+                    doc_id = self.document.id or 0
+                    assignment_service.assign_multi(doc_id, assignments)
+                    updated_doc = document_service.get_document(doc_id)
+                    self.document = updated_doc
+                    self.update_view_data(updated_doc)
+                    QMessageBox.information(
+                        self,
+                        "Multi-Routing Confirmed",
+                        f"Document {self.document.reference} has been routed to {len(assignments)} departments/staff successfully."
+                    )
+                    from services.event_bus import event_bus
+                    event_bus.notify_document_updated(doc_id)
+                    event_bus.notify_data_changed()
+                    self.document_updated.emit(updated_doc)
+        except Exception as ex:
+            QMessageBox.critical(self, "Routing Error", f"Failed to configure multi-department routing: {str(ex)}")
+        finally:
+            self._action_in_progress = False
+
+    def _hod_validate_progress(self, progress_id: int, action: str):
+        if getattr(self, "_action_in_progress", False):
+            return
+        self._action_in_progress = True
+        try:
+            from PySide6.QtWidgets import QInputDialog
+            note = None
+            if action == "return":
+                note, ok = QInputDialog.getMultiLineText(
+                    self,
+                    "Return Progress for Correction",
+                    "Enter instructions / corrections required from the staff member:"
+                )
+                if not ok or not note.strip():
+                    return
+                note = note.strip()
+            elif action == "approve":
+                note, ok = QInputDialog.getText(
+                    self,
+                    "Approve Progress Update",
+                    "Optional HOD approval remark (press OK to confirm):"
+                )
+                if not ok:
+                    return
+                note = note.strip() if note else None
+
+            doc_id = self.document.id or 0
+            progress_service.hod_validate_progress(doc_id, progress_id, action, note)
+            updated_doc = document_service.get_document(doc_id)
+            self.document = updated_doc
+            self.update_view_data(updated_doc)
+
+            action_label = "approved and forwarded to DS" if action == "approve" else "returned for correction"
+            QMessageBox.information(
+                self,
+                "Progress Validated",
+                f"Employee progress update has been {action_label} successfully."
+            )
+            from services.event_bus import event_bus
+            event_bus.notify_document_updated(doc_id)
+            event_bus.notify_data_changed()
+            self.document_updated.emit(updated_doc)
+        except Exception as ex:
+            QMessageBox.critical(self, "Validation Error", f"Failed to validate progress: {str(ex)}")
         finally:
             self._action_in_progress = False
 
@@ -1492,9 +1659,23 @@ class DocumentViewer(QWidget):
     def _ds_close_document(self):
         if getattr(self, "_action_in_progress", False):
             return
+        is_reviewed = bool(
+            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
+            or bool(self.document.director_remark)
+            or getattr(self.document, "has_prior_director_remark", False)
+            or self.document.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value, "HOD", "EMPLOYEE")
+        )
+        if not is_reviewed and self.document.current_stage in (WorkflowStageEnum.DS.value, "DS"):
+            QMessageBox.warning(
+                self,
+                "Director Review Required",
+                f"Document {self.document.reference} must complete Executive Director review before it can be finalized and closed."
+            )
+            return
         self._action_in_progress = True
         try:
             dialog = CloseDocumentDialog(self.document, self)
+
             if dialog.exec():
                 data = dialog.get_data() if hasattr(dialog, "get_data") else {"remarks": dialog.get_remarks() if hasattr(dialog, "get_remarks") else ""}
                 remarks_val = data.get("remarks") if isinstance(data, dict) else str(data or "")

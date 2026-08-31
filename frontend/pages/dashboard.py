@@ -22,7 +22,7 @@ from models.enums import DocumentStatusEnum, RoleEnum, WorkflowStageEnum
 from services.auth_service import auth_service
 from services.dashboard_service import dashboard_service
 from services.document_service import document_service
-from services.progress_service import progress_service
+from repositories.provider import get_repository
 
 
 class DashboardPage(QWidget):
@@ -99,20 +99,21 @@ class DashboardPage(QWidget):
         if self.role == RoleEnum.DIRECTOR.value:
             self.card_dir_new = self._create_kpi_card(
                 "Awaiting Initial Review", "0", "#0F172A",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
+                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Initial Reviews"})
             )
             self.card_dir_followup = self._create_kpi_card(
                 "Progress Follow-ups", "0", "#0284C7",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
+                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Progress Follow-ups"})
             )
             self.card_dir_reviewed = self._create_kpi_card(
                 "Total Reviewed / Returned", "0", "#059669",
-                callback=lambda: self.navigate_requested.emit("Reviewed Documents", {})
+                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Reviewed & Returned to DS"})
             )
             self.card_dir_critical = self._create_kpi_card(
                 "Critical / High Priority", "0", "#E11D48",
-                callback=lambda: self.navigate_requested.emit("Documents", {"priority": "High Priority"})
+                callback=lambda: self.navigate_requested.emit("Inbox", {"priority": "High"})
             )
+
 
             self.kpi_grid.addWidget(self.card_dir_new["frame"], 0, 0)
             self.kpi_grid.addWidget(self.card_dir_followup["frame"], 0, 1)
@@ -360,12 +361,16 @@ class DashboardPage(QWidget):
 
         if self.role == RoleEnum.DIRECTOR.value:
             dir_docs = [d for d in self.documents if d.current_stage == WorkflowStageEnum.DIRECTOR.value or d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value]
-            
+
+            # Use in-memory attribute checks — no per-document network calls (avoids UI freeze)
             initial_count = 0
             followup_count = 0
             for d in dir_docs:
-                p_updates = progress_service.get_progress_updates(d.id) if d.id else []
-                if len(p_updates) > 0:
+                has_progress = (
+                    d.status == DocumentStatusEnum.PROGRESS_UPDATED.value
+                    or getattr(d, "has_progress_updates", False)
+                )
+                if has_progress:
                     followup_count += 1
                 else:
                     initial_count += 1
@@ -447,9 +452,14 @@ class DashboardPage(QWidget):
                 self._populate_table(display_list)
 
         else:
-            # Director Secretary KPI calculations
-            inbox_docs = document_service.get_inbox()
-            intake_cnt = len(inbox_docs)
+            # Director Secretary KPI calculations - strictly count unregistered intake items
+            repo = get_repository()
+            try:
+                unregistered_items = repo.get_incoming_messages(status="PENDING") or []
+                intake_cnt = len(unregistered_items)
+            except Exception:
+                intake_cnt = 0
+
             dir_rev_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value or d.current_stage == "DIRECTOR")
             dir_done_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value or (d.director_remark and d.current_stage == "DS"))
             hod_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_HOD_PROCESSING.value or d.current_stage == "HOD")
