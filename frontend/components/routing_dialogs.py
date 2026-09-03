@@ -266,17 +266,31 @@ class HODAssignEmployeeDialog(QDialog):
 
         self.emp_combo = QComboBox()
         repo = get_repository()
+        dept_name = self.document.target_department_name or auth_service.get_active_department()
         dept_id = self.document.target_department_id
+
+        if not dept_id and dept_name:
+            all_depts = repo.get_departments()
+            for d in all_depts:
+                if d.name.upper() == dept_name.upper():
+                    dept_id = d.id
+                    break
+
         employees = repo.get_users(role="Employee", department_id=dept_id)
+        if not employees and dept_name:
+            all_emps = repo.get_users(role="Employee")
+            employees = [u for u in all_emps if u.department_name and u.department_name.upper() == dept_name.upper()]
         if not employees:
             employees = repo.get_users(role="Employee")
 
         if employees:
             for emp in employees:
-                label = f"{emp.full_name} ({emp.department_name or 'General'})"
+                code_str = f" [{emp.employee_code}]" if getattr(emp, "employee_code", None) else ""
+                label = f"{emp.full_name}{code_str} ({emp.department_name or 'General'})"
                 self.emp_combo.addItem(label, emp.id)
         else:
-            self.emp_combo.addItem("⚠ Could not load employees — check connection", None)
+            self.emp_combo.addItem("⚠ No employees found for this department", None)
+
 
         form.addRow("Assign To:", self.emp_combo)
 

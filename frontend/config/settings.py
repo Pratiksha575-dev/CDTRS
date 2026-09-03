@@ -59,6 +59,14 @@ class Settings:
         """Returns True if the application is operating with local mock repository."""
         return self.data_source == "mock"
 
+    @property
+    def api_base_url(self) -> str:
+        """Returns the root host URL without /api/v1 suffix."""
+        if self.api_url.endswith("/api/v1"):
+            return self.api_url[:-7]
+        return self.api_url
+
+
     def set_api_url(self, url: str) -> None:
         """Dynamically update the API Base URL at runtime."""
         self.api_url = url.strip().rstrip("/")

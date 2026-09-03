@@ -330,15 +330,16 @@ class DocumentIntakePage(QWidget):
         self.emp_combo.addItem("Not Assigned", None)
         try:
             repo = get_repository()
-            employees = repo.get_users(role="Employee", department_id=department_id)
-            if not employees and department_id:
-                employees = repo.get_users(role="Employee")
-            for emp in employees:
-                dept_label = emp.department_name or "General"
-                self.emp_combo.addItem(f"{emp.full_name} ({dept_label})", emp.id)
+            # Fetch all staff: HODs, TSO, and Employees
+            all_staff = repo.get_users(department_id=department_id)
+            for staff in all_staff:
+                role_str = staff.role or "Staff"
+                dept_label = staff.department_name or "General"
+                self.emp_combo.addItem(f"{staff.full_name} ({role_str} - {dept_label})", staff.id)
         except Exception as e:
-            self.emp_combo.addItem("⚠ Could not load employees", None)
+            self.emp_combo.addItem("⚠ Could not load staff", None)
         self.emp_combo.blockSignals(False)
+
 
     def _on_dept_changed(self):
         dept_id = self.dept_combo.currentData()
@@ -580,6 +581,32 @@ class DocumentIntakePage(QWidget):
         target_dept_id = self.dept_combo.currentData() if dept_text else None
         emp_id = self.emp_combo.currentData()
         actual_upload_path = self.selected_file if (self.selected_file and os.path.exists(self.selected_file)) else None
+        ref_no = self.ref_input.text().strip() or "Auto-Generated"
+
+        # Explicit Confirmation Dialog before routing
+        target_stage_name = "Direct to HOD / Staff" if self.bypass_director_check.isChecked() else "Director Review Queue"
+        target_info = f"Department: {dept_text or 'Central/DS'}"
+        if emp_text:
+            target_info += f"\nOfficer: {emp_text}"
+
+        confirm_msg = (
+            f"Are you sure you want to dispatch this document?\n\n"
+            f"📄 Reference: {ref_no}\n"
+            f"📑 Title: {title}\n"
+            f"🎯 Route Target: {target_stage_name}\n"
+            f"🏢 {target_info}\n\n"
+            f"Proceed with dispatch?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Confirm Document Routing",
+            confirm_msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
 
         # DEBUG PRINT FOR SUBMISSION PAYLOAD
         print(f"\n=== [DEBUG SUBMIT PAYLOAD] ===")

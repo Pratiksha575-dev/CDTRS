@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 from models.document import DocumentModel
 from models.enums import DocumentStatusEnum, WorkflowStageEnum
 from services.document_service import document_service
+from services.auth_service import auth_service
+
 
 
 class HODInboxPage(QWidget):
@@ -132,13 +134,20 @@ class HODInboxPage(QWidget):
         self.setLayout(main_layout)
 
     def load_inbox(self):
-        """Loads documents routed to HOD's department — excludes CLOSED by default (use filter to view closed)."""
+        """Loads documents routed to HOD's active department."""
         all_docs = document_service.get_documents()
-        self.documents = [
-            d for d in all_docs
-            if d.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value, WorkflowStageEnum.CLOSED.value)
-        ]
+        active_dept = auth_service.get_active_department()
+
+        filtered_docs = []
+        for d in all_docs:
+            if d.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value, WorkflowStageEnum.CLOSED.value):
+                if active_dept and d.target_department_name and d.target_department_name.upper() != active_dept.upper():
+                    continue
+                filtered_docs.append(d)
+
+        self.documents = filtered_docs
         self.apply_filter()
+
 
 
     def _clear_filters(self):

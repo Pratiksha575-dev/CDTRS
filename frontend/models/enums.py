@@ -7,6 +7,7 @@ class RoleEnum(str, Enum):
     DIRECTOR = "Director"
     HOD = "HOD"
     EMPLOYEE = "Employee"
+    TSO = "TSO"
     ADMINISTRATOR = "Administrator"
     READ_ONLY = "Read-only User"
 
@@ -24,9 +25,12 @@ class RoleEnum(str, Enum):
             return cls.HOD.value
         if s in ("employee",):
             return cls.EMPLOYEE.value
+        if s in ("tso", "technical staff officer"):
+            return cls.TSO.value
         if s in ("admin", "administrator"):
             return cls.ADMINISTRATOR.value
         return role_str
+
 
 
 class DocumentStatusEnum(str, Enum):

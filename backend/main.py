@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from pydantic import BaseModel
+
 
 # Ensure OCR package directory is accessible
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -328,14 +330,16 @@ def login(
         data={"sub": str(user.id), "role": user.role.value}
     )
 
-    crud.create_audit_log(
-        db=db,
-        user_id=user.id,
-        action="USER_LOGIN",
-        entity_type="User",
-        entity_id=user.id,
-        description=f"User '{user.username}' logged in."
-    )
+    # Only record login audit events for admin users to keep the audit trail focused
+    if user.role == UserRole.ADMIN:
+        crud.create_audit_log(
+            db=db,
+            user_id=user.id,
+            action="USER_LOGIN",
+            entity_type="User",
+            entity_id=user.id,
+            description=f"Admin user '{user.username}' logged in."
+        )
 
     return {
         "access_token": token,
@@ -1560,4 +1564,255 @@ def get_dashboard(
     current_user: models.User = Depends(get_current_user),
 ):
     return crud.get_dashboard_stats(db, current_user)
+
+
+# =========================================================
+# MULTI-DEPARTMENT DOCUMENT ROUTING
+# =========================================================
+
+class MultiRouteRequest(BaseModel):
+    target_department_ids: List[int]
+    instructions: Optional[str] = None
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/multi-route",
+    tags=["Routing"],
+    summary="Route document to multiple departments concurrently",
+)
+def route_document_multi_dept(
+    document_id: int,
+    body: MultiRouteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.DS, UserRole.DIRECTOR, UserRole.ADMIN)),
+):
+    routings = crud.multi_route_document(
+        db=db,
+        document_id=document_id,
+        target_department_ids=body.target_department_ids,
+        instructions=body.instructions,
+        current_user=current_user
+    )
+    return {"message": f"Document routed to {len(routings)} departments successfully."}
+
+
+# =========================================================
+# ADMINISTRATOR SUITE ENDPOINTS
+# =========================================================
+
+@app.get(
+    f"{API_V1}/admin/users",
+    tags=["Admin"],
+    summary="Admin: List all system users",
+)
+def admin_list_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    users = crud.get_admin_users(db)
+    res = []
+    for u in users:
+        m = u.managed_depts
+        try:
+            import json
+            m_list = json.loads(m) if (m and m.startswith("[")) else ([m] if m else [])
+        except Exception:
+            m_list = [m] if m else []
+        res.append({
+            "id": u.id,
+            "username": u.username,
+            "full_name": u.full_name,
+            "role": u.role.value if hasattr(u.role, "value") else str(u.role),
+            "employee_code": u.employee_code,
+            "designation": u.designation,
+            "department": u.department_name,
+            "department_id": u.department_id,
+            "managed_depts": m_list,
+            "email": u.email,
+            "outlook_email": u.outlook_email,
+            "gov_email": u.gov_email,
+            "is_active": u.is_active,
+            "created_at": str(u.created_at) if u.created_at else None
+        })
+    return res
+
+
+@app.post(
+    f"{API_V1}/admin/users",
+    tags=["Admin"],
+    summary="Admin: Create a new user",
+)
+def admin_create_user(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    try:
+        user = crud.create_admin_user(db, body, performed_by_user_id=current_user.id)
+        return {"message": f"User {user.username} created successfully.", "id": user.id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put(
+    f"{API_V1}/admin/users/{{user_id}}",
+    tags=["Admin"],
+    summary="Admin: Update an existing user",
+)
+def admin_update_user(
+    user_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    user = crud.update_admin_user(db, user_id, body, performed_by_user_id=current_user.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"message": f"User {user.username} updated successfully."}
+
+
+@app.post(
+    f"{API_V1}/admin/users/{{user_id}}/reset-password",
+    tags=["Admin"],
+    summary="Admin: Reset password for a user",
+)
+def admin_reset_password(
+    user_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    new_pwd = body.get("new_password") or "cdtrs@123"
+    ok = crud.reset_user_password(db, user_id, new_pwd, performed_by_user_id=current_user.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"message": "Password reset successfully."}
+
+
+@app.post(
+    f"{API_V1}/admin/users/{{user_id}}/toggle-active",
+    tags=["Admin"],
+    summary="Admin: Toggle user active status",
+)
+def admin_toggle_user_active(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    res = crud.toggle_user_active(db, user_id, performed_by_user_id=current_user.id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"is_active": res, "message": f"User active status toggled to {res}."}
+
+
+@app.get(
+    f"{API_V1}/admin/departments",
+    tags=["Admin"],
+    summary="Admin: List all departments",
+)
+def admin_list_departments(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN, UserRole.DS, UserRole.DIRECTOR, UserRole.HOD, UserRole.TSO, UserRole.EMPLOYEE)),
+):
+    depts = crud.get_all_departments(db, include_inactive=True)
+    return [
+        {
+            "id": d.id,
+            "name": d.name,
+            "code": d.code,
+            "is_active": d.is_active,
+            "created_at": str(d.created_at) if d.created_at else None
+        }
+        for d in depts
+    ]
+
+
+@app.post(
+    f"{API_V1}/admin/departments",
+    tags=["Admin"],
+    summary="Admin: Create a new department",
+)
+def admin_create_department(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    try:
+        dept = crud.create_admin_department(db, body, performed_by_user_id=current_user.id)
+        return {"message": f"Department {dept.name} created successfully.", "id": dept.id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put(
+    f"{API_V1}/admin/departments/{{dept_id}}",
+    tags=["Admin"],
+    summary="Admin: Update department details",
+)
+def admin_update_department(
+    dept_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    dept = crud.update_admin_department(db, dept_id, body, performed_by_user_id=current_user.id)
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    return {"message": f"Department {dept.name} updated successfully."}
+
+
+@app.get(
+    f"{API_V1}/admin/settings",
+    tags=["Admin"],
+    summary="Admin: Get system configuration settings",
+)
+def admin_get_settings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    return crud.get_system_settings(db)
+
+
+@app.post(
+    f"{API_V1}/admin/settings",
+    tags=["Admin"],
+    summary="Admin: Update system configuration settings",
+)
+def admin_update_settings(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    for k, v in body.items():
+        crud.update_system_setting(db, key=k, value=str(v), performed_by_user_id=current_user.id)
+    return {"message": "Settings updated successfully."}
+
+
+@app.get(
+    f"{API_V1}/admin/audit-logs",
+    tags=["Admin"],
+    summary="Admin: Inspect admin-only audit logs",
+)
+def admin_get_audit_logs(
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    # Only returns entries where the acting user has the ADMIN role
+    logs = crud.get_admin_audit_logs(db, limit=limit, offset=offset)
+    return [
+        {
+            "id": l.id,
+            "user_id": l.user_id,
+            "username": l.user.username if l.user else "unknown",
+            "action": l.action,
+            "entity_type": l.entity_type,
+            "entity_id": l.entity_id,
+            "description": l.description,
+            "created_at": str(l.created_at) if l.created_at else None
+        }
+        for l in logs
+    ]
+
 

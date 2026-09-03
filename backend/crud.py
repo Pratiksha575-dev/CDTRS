@@ -2597,12 +2597,19 @@ def seed_data(db: Session) -> None:
     for su in raw_system_users:
         dept_name = su.get("department")
         dept_id = dept_map.get(dept_name) if dept_name else su.get("department_id")
-        role_val = UserRole(su.get("role")) if isinstance(su.get("role"), str) else su.get("role")
+        role_raw = su.get("role")
+        role_val = UserRole(role_raw) if isinstance(role_raw, str) else role_raw
+        managed_depts_val = json.dumps(su.get("managed_depts", [])) if isinstance(su.get("managed_depts"), list) else su.get("managed_depts")
+        
         users_data.append({
             "username": su["username"],
             "password": su.get("default_password") or su.get("password") or "cdtrs@123",
             "full_name": su["full_name"],
             "role": role_val,
+            "employee_code": su.get("employee_code"),
+            "designation": su.get("designation"),
+            "department": dept_name,
+            "managed_depts": managed_depts_val,
             "email": su.get("email"),
             "outlook_email": su.get("outlook_email"),
             "gov_email": su.get("gov_email"),
@@ -2619,19 +2626,23 @@ def seed_data(db: Session) -> None:
         if not username:
             parts = emp_d.get("full_name", "emp").lower().split()
             username = f"emp_{parts[0]}" if len(parts) == 1 else f"emp_{parts[0]}_{parts[-1]}"
+        managed_depts_val = json.dumps(emp_d.get("managed_depts", [])) if isinstance(emp_d.get("managed_depts"), list) else emp_d.get("managed_depts")
 
         users_data.append({
             "username": username,
             "password": emp_d.get("default_password") or "cdtrs@emp",
             "full_name": emp_d.get("full_name") or emp_d.get("name"),
             "role": UserRole.EMPLOYEE,
+            "employee_code": code_val,
+            "designation": emp_d.get("designation") or "Staff",
+            "department": dept_name,
+            "managed_depts": managed_depts_val,
             "email": emp_d.get("email"),
             "outlook_email": emp_d.get("outlook_email"),
             "gov_email": emp_d.get("gov_email"),
             "department_id": dept_id,
             "employee_id": emp_map.get(code_val)
         })
-
 
     user_objs = {}
     for u in users_data:
@@ -2642,6 +2653,10 @@ def seed_data(db: Session) -> None:
                 password_hash=hash_password(u["password"]),
                 full_name=u["full_name"],
                 role=u["role"],
+                employee_code=u.get("employee_code"),
+                designation=u.get("designation"),
+                department_name=u.get("department"),
+                managed_depts=u.get("managed_depts"),
                 email=u["email"],
                 outlook_email=u["outlook_email"],
                 gov_email=u["gov_email"],
@@ -2654,11 +2669,16 @@ def seed_data(db: Session) -> None:
             db.refresh(user)
             user_objs[u["username"]] = user
         else:
+            existing.employee_code = u.get("employee_code") or existing.employee_code
+            existing.designation = u.get("designation") or existing.designation
+            existing.department_name = u.get("department") or existing.department_name
+            existing.managed_depts = u.get("managed_depts") or existing.managed_depts
+
             if not existing.email:
                 existing.email = u["email"]
                 existing.outlook_email = u["outlook_email"]
                 existing.gov_email = u["gov_email"]
-                db.commit()
+            db.commit()
             user_objs[u["username"]] = existing
 
         # Link employee record to user record bidirectionally
@@ -2668,4 +2688,283 @@ def seed_data(db: Session) -> None:
                 db_emp.user_id = user_objs[u["username"]].id
                 db.commit()
 
-    print("[CDTRS SEED] Exact 3 departments, 6 staff, and system accounts verified successfully.", flush=True)
+    print(f"[CDTRS SEED] Successfully verified {len(dept_map)} departments and {len(users_data)} system accounts.", flush=True)
+
+
+# =========================================================
+# ADMINISTRATOR CRUD & SYSTEM OPERATIONS
+# =========================================================
+
+def log_audit_event(
+    db: Session,
+    user_id: int,
+    action: str,
+    entity_type: Optional[str] = None,
+    entity_id: Optional[int] = None,
+    description: Optional[str] = None
+) -> models.AuditLog:
+    log_entry = models.AuditLog(
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        description=description,
+        created_at=datetime.now()
+    )
+    db.add(log_entry)
+    db.commit()
+    db.refresh(log_entry)
+    return log_entry
+
+
+def get_admin_users(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.User).offset(skip).limit(limit).all()
+
+
+
+def create_admin_user(db: Session, user_data: dict, performed_by_user_id: int = 1) -> models.User:
+    raw_pwd = user_data.get("password") or "cdtrs@123"
+    managed_depts = user_data.get("managed_depts")
+    if isinstance(managed_depts, list):
+        import json
+        managed_depts = json.dumps(managed_depts)
+
+    role_val = user_data.get("role")
+    if isinstance(role_val, str):
+        role_val = UserRole(role_val)
+
+    db_user = models.User(
+        username=user_data["username"],
+        password_hash=hash_password(raw_pwd),
+        full_name=user_data["full_name"],
+        role=role_val,
+        employee_code=user_data.get("employee_code"),
+        designation=user_data.get("designation"),
+        department_name=user_data.get("department_name") or user_data.get("department"),
+        managed_depts=managed_depts,
+        email=user_data.get("email"),
+        outlook_email=user_data.get("outlook_email"),
+        gov_email=user_data.get("gov_email"),
+        preferred_mail_channel=user_data.get("preferred_mail_channel", "outlook"),
+        department_id=user_data.get("department_id"),
+        is_active=user_data.get("is_active", True)
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+
+    # If employee role, also create/sync Employee record
+    if role_val == UserRole.EMPLOYEE and user_data.get("department_id"):
+        db_emp = models.Employee(
+            employee_code=user_data.get("employee_code") or f"EMP-{db_user.id:03d}",
+            full_name=user_data["full_name"],
+            department_id=user_data["department_id"],
+            designation=user_data.get("designation") or "Staff",
+            email=user_data.get("email"),
+            outlook_email=user_data.get("outlook_email"),
+            gov_email=user_data.get("gov_email"),
+            user_id=db_user.id
+        )
+        db.add(db_emp)
+        db.commit()
+        db.refresh(db_emp)
+        db_user.employee_id = db_emp.id
+        db.commit()
+
+    log_audit_event(db, user_id=performed_by_user_id, action="USER_CREATED", entity_type="User", entity_id=db_user.id, description=f"Admin created user {db_user.username} ({db_user.role})")
+    return db_user
+
+
+def update_admin_user(db: Session, user_id: int, user_data: dict, performed_by_user_id: int = 1) -> Optional[models.User]:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        return None
+
+    if "full_name" in user_data and user_data["full_name"]:
+        user.full_name = user_data["full_name"]
+    if "role" in user_data and user_data["role"]:
+        user.role = UserRole(user_data["role"]) if isinstance(user_data["role"], str) else user_data["role"]
+    if "employee_code" in user_data:
+        user.employee_code = user_data["employee_code"]
+    if "designation" in user_data:
+        user.designation = user_data["designation"]
+    if "department_name" in user_data:
+        user.department_name = user_data["department_name"]
+    if "department_id" in user_data:
+        user.department_id = user_data["department_id"]
+    if "managed_depts" in user_data:
+        m = user_data["managed_depts"]
+        import json
+        user.managed_depts = json.dumps(m) if isinstance(m, list) else m
+    if "email" in user_data:
+        user.email = user_data["email"]
+    if "outlook_email" in user_data:
+        user.outlook_email = user_data["outlook_email"]
+    if "gov_email" in user_data:
+        user.gov_email = user_data["gov_email"]
+    if "is_active" in user_data:
+        user.is_active = user_data["is_active"]
+
+    db.commit()
+    db.refresh(user)
+    log_audit_event(db, user_id=performed_by_user_id, action="USER_UPDATED", entity_type="User", entity_id=user.id, description=f"Admin updated user {user.username}")
+    return user
+
+
+def reset_user_password(db: Session, user_id: int, new_password: str, performed_by_user_id: int = 1) -> bool:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        return False
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    log_audit_event(db, user_id=performed_by_user_id, action="PASSWORD_RESET", entity_type="User", entity_id=user.id, description=f"Password reset for user {user.username}")
+    return True
+
+
+def toggle_user_active(db: Session, user_id: int, performed_by_user_id: int = 1) -> Optional[bool]:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        return None
+    user.is_active = not user.is_active
+    db.commit()
+    log_audit_event(db, user_id=performed_by_user_id, action="USER_STATUS_TOGGLED", entity_type="User", entity_id=user.id, description=f"User {user.username} active status set to {user.is_active}")
+    return user.is_active
+
+
+def get_all_departments(db: Session, include_inactive: bool = False):
+    query = db.query(models.Department)
+    if not include_inactive:
+        query = query.filter(models.Department.is_active == True)
+    return query.order_by(models.Department.name).all()
+
+
+def create_admin_department(db: Session, dept_data: dict, performed_by_user_id: int = 1) -> models.Department:
+    dept = models.Department(
+        name=dept_data["name"],
+        code=dept_data.get("code") or dept_data["name"][:10].upper(),
+        is_active=dept_data.get("is_active", True)
+    )
+    db.add(dept)
+    db.commit()
+    db.refresh(dept)
+    log_audit_event(db, user_id=performed_by_user_id, action="DEPARTMENT_CREATED", entity_type="Department", entity_id=dept.id, description=f"Admin created department {dept.name} ({dept.code})")
+    return dept
+
+
+def update_admin_department(db: Session, dept_id: int, dept_data: dict, performed_by_user_id: int = 1) -> Optional[models.Department]:
+    dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
+    if not dept:
+        return None
+    if "name" in dept_data and dept_data["name"]:
+        dept.name = dept_data["name"]
+    if "code" in dept_data and dept_data["code"]:
+        dept.code = dept_data["code"]
+    if "is_active" in dept_data:
+        dept.is_active = dept_data["is_active"]
+    db.commit()
+    db.refresh(dept)
+    log_audit_event(db, user_id=performed_by_user_id, action="DEPARTMENT_UPDATED", entity_type="Department", entity_id=dept.id, description=f"Admin updated department {dept.name}")
+    return dept
+
+
+def get_system_settings(db: Session) -> dict:
+    settings = db.query(models.SystemSetting).all()
+    defaults = {
+        "priority_red_days": "0",
+        "priority_orange_days": "3",
+        "priority_yellow_days": "7",
+        "reminder_email_subject": "ACTION REQUIRED: CDTRS Document Reminder - {reference}",
+        "reminder_email_template": "Dear {assignee_name},\n\nThis is an automated reminder regarding document '{title}' (Ref: {reference}).\nDeadline: {deadline} ({days_left} remaining).\n\nPlease review and take necessary action.\n\nCDTRS Automated Dispatch System"
+    }
+    res = dict(defaults)
+    for s in settings:
+        res[s.key] = s.value
+    return res
+
+
+def update_system_setting(db: Session, key: str, value: str, description: Optional[str] = None, performed_by_user_id: int = 1) -> models.SystemSetting:
+    setting = db.query(models.SystemSetting).filter(models.SystemSetting.key == key).first()
+    if not setting:
+        setting = models.SystemSetting(key=key, value=value, description=description)
+        db.add(setting)
+    else:
+        setting.value = value
+        if description:
+            setting.description = description
+    db.commit()
+    db.refresh(setting)
+    log_audit_event(db, user_id=performed_by_user_id, action="SETTING_UPDATED", entity_type="SystemSetting", entity_id=setting.id, description=f"Admin updated setting {key}")
+    return setting
+
+
+def get_admin_audit_logs(db: Session, limit: int = 100, offset: int = 0):
+    """Return audit log entries for admin-role users only, to avoid log overflow from regular employee activity."""
+    return (
+        db.query(models.AuditLog)
+        .join(models.User, models.User.id == models.AuditLog.user_id, isouter=True)
+        .filter(
+            (models.User.role == UserRole.ADMIN) | (models.AuditLog.user_id == None)
+        )
+        .order_by(models.AuditLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def multi_route_document(
+    db: Session,
+    document_id: int,
+    target_department_ids: List[int],
+    instructions: Optional[str],
+    current_user: models.User
+) -> List[models.DocumentDepartmentRouting]:
+    """Routes a single document to multiple departments concurrently."""
+    doc = db.query(models.Document).filter(models.Document.doc_id == document_id).first()
+    if not doc:
+        return []
+
+    created_routings = []
+    for d_id in target_department_ids:
+        dept = db.query(models.Department).filter(models.Department.id == d_id).first()
+        if not dept:
+            continue
+
+        existing = db.query(models.DocumentDepartmentRouting).filter(
+            models.DocumentDepartmentRouting.document_id == document_id,
+            models.DocumentDepartmentRouting.department_id == d_id
+        ).first()
+
+        if not existing:
+            routing = models.DocumentDepartmentRouting(
+                document_id=document_id,
+                department_id=d_id,
+                department_name=dept.name,
+                status=DocumentStatus.UNDER_HOD_PROCESSING,
+                hod_instructions=instructions,
+                routed_at=datetime.now()
+            )
+            db.add(routing)
+            created_routings.append(routing)
+
+    # Update primary document status and stage
+    doc.status = DocumentStatus.UNDER_HOD_PROCESSING
+    doc.current_stage = WorkflowStage.HOD
+    if target_department_ids:
+        doc.target_department_id = target_department_ids[0]
+    if instructions:
+        doc.hod_remark = instructions
+
+    db.commit()
+    log_audit_event(
+        db,
+        user_id=current_user.id,
+        action="MULTI_DEPT_ROUTED",
+        entity_type="Document",
+        entity_id=document_id,
+        description=f"Document {doc.reference_no} routed to {len(created_routings)} department(s)"
+    )
+    return created_routings
+
+
+    print(f"[CDTRS SEED] Successfully verified {len(dept_map)} departments and {len(users_data)} system accounts.", flush=True)

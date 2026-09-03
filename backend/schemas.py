@@ -68,6 +68,10 @@ class UserCreate(BaseModel):
     password:               str
     full_name:              str
     role:                   UserRole
+    employee_code:          Optional[str] = None
+    designation:            Optional[str] = None
+    department:             Optional[str] = None
+    managed_depts:          Optional[List[str]] = None
     email:                  Optional[str] = None
     outlook_email:          Optional[str] = None
     gov_email:              Optional[str] = None
@@ -81,6 +85,10 @@ class UserResponse(BaseModel):
     username:               str
     full_name:              str
     role:                   UserRole
+    employee_code:          Optional[str] = None
+    designation:            Optional[str] = None
+    department:             Optional[str] = None
+    managed_depts:          Optional[Any] = None
     email:                  Optional[str] = None
     outlook_email:          Optional[str] = None
     gov_email:              Optional[str] = None
@@ -92,6 +100,7 @@ class UserResponse(BaseModel):
     updated_at:             datetime
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 # =========================================================

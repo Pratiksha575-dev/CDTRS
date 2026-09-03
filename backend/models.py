@@ -24,10 +24,13 @@ from database import Base
 # =========================================================
 
 class UserRole(str, enum.Enum):
+    ADMIN    = "ADMIN"
     DS       = "DS"
     DIRECTOR = "DIRECTOR"
+    TSO      = "TSO"
     HOD      = "HOD"
     EMPLOYEE = "EMPLOYEE"
+
 
 
 class DocumentStatus(str, enum.Enum):
@@ -142,8 +145,9 @@ class Department(Base):
     created_at = Column(DateTime, default=datetime.now)
 
     # Relationships
-    users      = relationship("User", back_populates="department")
+    users      = relationship("User", back_populates="department_rel")
     employees  = relationship("Employee", back_populates="department")
+
 
 
 # =========================================================
@@ -182,6 +186,11 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(100), nullable=False)
     role = Column(SAEnum(UserRole, name="user_role"), nullable=False)
+    employee_code = Column(String(50), nullable=True)
+    designation = Column(String(100), nullable=True)
+    department_name = Column(String(100), nullable=True)
+    managed_depts = Column(Text, nullable=True)  # JSON-encoded array or comma-separated department codes for multi-dept HOD / TSO
+
     # PZ_26/08 - Added email, outlook_email, gov_email, and preferred_mail_channel
     email = Column(String(255), unique=True, nullable=True, index=True)
     outlook_email = Column(String(255), nullable=True)
@@ -190,11 +199,12 @@ class User(Base):
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     employee_id = Column(Integer, nullable=True)
     is_active = Column(Boolean, default=True)
+
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Relationships
-    department      = relationship("Department", back_populates="users")
+    department_rel  = relationship("Department", back_populates="users", foreign_keys=[department_id])
     employee_record = relationship(
         "Employee",
         foreign_keys="Employee.user_id",
@@ -202,6 +212,15 @@ class User(Base):
         uselist=False
     )
     notifications   = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def department(self) -> Optional[str]:
+        if self.department_name:
+            return self.department_name
+        if self.department_rel:
+            return self.department_rel.name
+        return None
+
 
 
 # =========================================================
@@ -282,6 +301,8 @@ class Document(Base):
     routing_suggestion = relationship("RoutingSuggestion", back_populates="document", uselist=False, cascade="all, delete-orphan")
     remarks_history    = relationship("DocumentRemark", back_populates="document", cascade="all, delete-orphan")
     reminders          = relationship("Reminder", back_populates="document", cascade="all, delete-orphan")
+    department_routings = relationship("DocumentDepartmentRouting", back_populates="document", cascade="all, delete-orphan")
+
 
     @property
     def target_department_name(self) -> Optional[str]:
@@ -652,12 +673,15 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     action = Column(String(100), nullable=False)
     entity_type = Column(String(50), nullable=True)
     entity_id = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+
+    # Relationship for easy access to the acting user's details
+    user = relationship("User", foreign_keys=[user_id], lazy="joined")
 
 
 # =========================================================
@@ -679,3 +703,39 @@ class Notification(Base):
     # Relationships
     user     = relationship("User", back_populates="notifications")
     document = relationship("Document", back_populates="notifications")
+
+
+# =========================================================
+# SYSTEM SETTINGS (Priority Thresholds, Email Templates, etc.)
+# =========================================================
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    value = Column(Text, nullable=False)
+    description = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+# =========================================================
+# MULTI-DEPARTMENT DOCUMENT ROUTING
+# =========================================================
+
+class DocumentDepartmentRouting(Base):
+    __tablename__ = "document_department_routings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
+    department_name = Column(String(100), nullable=False)
+    status = Column(SAEnum(DocumentStatus, name="doc_dept_status"), default=DocumentStatus.UNDER_HOD_PROCESSING, nullable=False)
+    assigned_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    assigned_employee_name = Column(String(150), nullable=True)
+    hod_instructions = Column(Text, nullable=True)
+    routed_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+
+    document = relationship("Document", back_populates="department_routings")
+    department = relationship("Department")

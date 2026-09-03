@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 
 from components.document_viewer import DocumentViewer
 from models.enums import RoleEnum
+from pages.admin_suite import AdminSuitePage
 from pages.dashboard import DashboardPage
 from pages.director_inbox import DirectorInboxPage
 from pages.director_reviewed import DirectorReviewedPage
@@ -47,11 +48,12 @@ class MainWindow(QMainWindow):
         # Sidebar — pass username so it shows name + role
         self.sidebar = Sidebar(self.role, username=self.username)
         self.sidebar.logout_button.clicked.connect(self.logout)
+        self.sidebar.department_context_changed.connect(self._handle_department_context_changed)
 
         # Page Container Stack
         self.stack = QStackedWidget()
 
-        # 1. Dashboard (Specialized for DS, Director, HOD, or Employee)
+        # 1. Dashboard (Specialized for DS, Director, HOD, Employee, TSO, Admin)
         self.dashboard_page = DashboardPage(self.role)
         self.dashboard_page.view_requested.connect(self.open_document_viewer)
         self.dashboard_page.navigate_requested.connect(self._handle_dashboard_navigate)
@@ -91,10 +93,18 @@ class MainWindow(QMainWindow):
         self.hod_inbox_page.view_requested.connect(self.open_document_viewer)
         self.stack.addWidget(self.hod_inbox_page)
 
-        # 9. Employee My Tasks
+        # 9. Employee / TSO My Tasks
         self.employee_tasks_page = EmployeeTasksPage()
         self.employee_tasks_page.view_requested.connect(self.open_document_viewer)
         self.stack.addWidget(self.employee_tasks_page)
+
+        # 10. Administrator Suite (Only instantiated for Administrator)
+        if self.role in (RoleEnum.ADMINISTRATOR.value, "Administrator"):
+            self.admin_suite_page = AdminSuitePage()
+            self.stack.addWidget(self.admin_suite_page)
+        else:
+            self.admin_suite_page = None
+
 
         # Wire Navigation
         self.setup_navigation()
@@ -102,6 +112,14 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.sidebar)
         main_layout.addWidget(self.stack, 1)
         central_widget.setLayout(main_layout)
+
+    def _handle_department_context_changed(self, new_dept: str):
+        """Reloads HOD and Dashboard views with active department data."""
+        if hasattr(self.hod_inbox_page, "load_inbox"):
+            self.hod_inbox_page.load_inbox()
+        if hasattr(self.dashboard_page, "load_data"):
+            self.dashboard_page.load_data()
+
 
     # ====================================
     # NAVIGATION WIRING
@@ -171,6 +189,14 @@ class MainWindow(QMainWindow):
                 self.sidebar.buttons[hist_key].clicked.connect(
                     lambda k=hist_key: self._navigate_to(self.history_page, k)
                 )
+
+        # Admin Suite
+        if self.admin_suite_page and "Admin Suite" in self.sidebar.buttons:
+            self.sidebar.buttons["Admin Suite"].clicked.connect(
+                lambda: self._navigate_to(self.admin_suite_page, "Admin Suite")
+            )
+
+
 
     def _handle_dashboard_navigate(self, target_page_name: str, filters: Optional[dict] = None):
         if target_page_name == "Inbox":

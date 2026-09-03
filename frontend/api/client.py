@@ -172,9 +172,14 @@ class APIClient:
         if not HAS_REQUESTS:
             raise NetworkError("The 'requests' package is required for live API communication. Please run: pip install requests")
 
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        if endpoint.startswith(("http://", "https://")):
+            url = endpoint
+        else:
+            url = f"{self.base_url}/{endpoint.lstrip('/')}"
         req_headers = self.get_headers(headers)
         req_timeout = timeout or self.timeout
+
+
 
         try:
             response = self._session.request(
