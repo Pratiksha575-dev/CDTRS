@@ -1,5 +1,4 @@
 from typing import Any, Dict, List, Optional, Union
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -19,9 +18,9 @@ from components.document_preview import DocumentPreview
 from components.routing_dialogs import (
     CloseDocumentDialog,
     HODAssignEmployeeDialog,
-    MultiDeptAssignDialog,
-    RouteToEmployeeDialog,
-    RouteToHODDialog,
+    HODAssignTeamDialog,
+    DSTeamAssignmentDialog,
+    UniversalRoutingDialog,
     SendReminderDialog,
 )
 from models.attachment import AttachmentModel
@@ -192,7 +191,7 @@ class DocumentViewer(QWidget):
 
         edit_btn = QPushButton("Edit Routing")
         edit_btn.setStyleSheet("background-color: #F8FAFC; color: #0F172A; border: 1px solid #CBD5E1; font-weight: 600; padding: 6px 14px; border-radius: 4px; font-size: 12px;")
-        edit_btn.clicked.connect(self._ds_edit_routing)
+        edit_btn.clicked.connect(self._ds_route)
         s_btn_row.addWidget(edit_btn)
 
         dismiss_btn = QPushButton("Ignore / Dismiss")
@@ -635,10 +634,12 @@ class DocumentViewer(QWidget):
                 else:
                     self.sugg_conf_lbl.setText("Confidence: —")
 
-                is_returned_from_director = bool(
-                    self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-                    or bool(self.document.director_remark)
-                    or getattr(self.document, "has_prior_director_remark", False)
+                is_returned_from_director = (
+                    self.document.status in (
+                        DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                        "Director Review Completed",
+                        "DIRECTOR_REVIEW_COMPLETED",
+                    )
                 )
                 is_under_director_review = bool(
                     self.document.current_stage == WorkflowStageEnum.DIRECTOR.value
@@ -888,7 +889,15 @@ class DocumentViewer(QWidget):
                 except Exception:
                     doc_assignments_list = []
 
-            has_multi_assign = bool(doc_assignments_list)
+            # Canonical WorkAssignment records (including team/member assignments)
+            team_assignments = []
+            for assignment in (getattr(self.document, "work_assignments", None) or []):
+                if getattr(assignment, "is_active", True):
+                    members = list(getattr(assignment, "members", None) or [])
+                    if members:
+                        team_assignments.append(assignment)
+
+            has_multi_assign = bool(doc_assignments_list or team_assignments)
             self.multi_assignments_card.setVisible(has_multi_assign)
 
             # 6. Update Single Assignment Status Card (hidden when multi-assignment card is visible)
@@ -928,6 +937,45 @@ class DocumentViewer(QWidget):
                         da_layout.addWidget(instr_lbl)
 
                     self.multi_assign_items_layout.addWidget(da_frame)
+
+                for assignment in team_assignments:
+                    team_frame = QFrame()
+                    team_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px;")
+                    team_layout = QVBoxLayout(team_frame)
+                    team_layout.setContentsMargins(8, 6, 8, 6)
+                    team_layout.setSpacing(4)
+
+                    team_name = getattr(assignment, "team_name", None) or "Team Assignment"
+                    title_lbl = QLabel(f"👥 <b>{team_name}</b>")
+                    title_lbl.setStyleSheet("color: #0F172A; font-size: 12px;")
+                    team_layout.addWidget(title_lbl)
+
+                    member_names = []
+                    for member in (getattr(assignment, "members", None) or []):
+                        name = getattr(member, "user_name", None) or getattr(member, "full_name", None) or getattr(member, "name", None)
+                        if name:
+                            member_names.append(str(name))
+                    if not member_names:
+                        primary = getattr(assignment, "assigned_to_name", None)
+                        if primary:
+                            member_names.append(str(primary))
+
+                    members_lbl = QLabel("Members: " + (", ".join(member_names) if member_names else "No members listed"))
+                    members_lbl.setWordWrap(True)
+                    members_lbl.setStyleSheet("color: #334155; font-size: 11px;")
+                    team_layout.addWidget(members_lbl)
+
+                    if getattr(assignment, "instructions", None):
+                        instr_lbl = QLabel(f"Directives: {assignment.instructions}")
+                        instr_lbl.setWordWrap(True)
+                        instr_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic;")
+                        team_layout.addWidget(instr_lbl)
+
+                    validation = getattr(assignment, "requires_hod_validation", False)
+                    val_lbl = QLabel("⏳ HOD Validation Required" if validation else "⚡ Direct to DS")
+                    val_lbl.setStyleSheet("color: #92400E; font-weight: 600; font-size: 10px;" if validation else "color: #475569; font-size: 10px;")
+                    team_layout.addWidget(val_lbl)
+                    self.multi_assign_items_layout.addWidget(team_frame)
 
             # 7. Update Progress History
             self._clear_item_layout(self.progress_items_layout)
@@ -1097,34 +1145,27 @@ class DocumentViewer(QWidget):
             return
 
         if stage in (WorkflowStageEnum.DS.value, "DS", "ds_user"):
-            is_returned_from_director = bool(
-                doc.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-                or bool(doc.director_remark)
-                or getattr(doc, "has_prior_director_remark", False)
-            )
-            has_pre_review = bool(
-                is_returned_from_director
-                and (getattr(doc, "suggested_department_name", None) or getattr(doc, "suggested_employee_name", None))
+            is_returned_from_director = (
+                doc.status in (
+                    DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                    "Director Review Completed",
+                    "DIRECTOR_REVIEW_COMPLETED",
+                )
             )
 
             if is_returned_from_director:
                 # Director review is complete! DS can now execute department routing:
-                if has_pre_review:
-                    s_dept = getattr(doc, "suggested_department_name", "Department")
-                    direct_route_btn = QPushButton(f"⚡ Route to Suggested ({s_dept})")
-                    direct_route_btn.setStyleSheet("background-color: #D97706; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
-                    direct_route_btn.clicked.connect(self._ds_apply_suggested_routing)
-                    self.action_bar.addWidget(direct_route_btn)
+                route_btn = QPushButton("Route")
+                route_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 700; padding: 7px 22px; border-radius: 5px;")
+                route_btn.setToolTip("Choose one or more departments, employees, or TSO routes")
+                route_btn.clicked.connect(self._ds_route)
+                self.action_bar.addWidget(route_btn)
 
-                route_dept_btn = QPushButton("Route to Department / Staff")
-                route_dept_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
-                route_dept_btn.clicked.connect(self._ds_route_to_hod)
-                self.action_bar.addWidget(route_dept_btn)
-
-                multi_route_btn = QPushButton("Multi-Department Routing")
-                multi_route_btn.setStyleSheet("background-color: #334155; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                multi_route_btn.clicked.connect(self._ds_route_multi)
-                self.action_bar.addWidget(multi_route_btn)
+                team_btn = QPushButton("Create Team Assignment")
+                team_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 700; padding: 7px 18px; border-radius: 5px;")
+                team_btn.setToolTip("Assign one work item to multiple employees")
+                team_btn.clicked.connect(self._ds_assign_team)
+                self.action_bar.addWidget(team_btn)
 
                 close_btn = QPushButton("Close Document")
                 close_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
@@ -1155,7 +1196,7 @@ class DocumentViewer(QWidget):
 
                 re_route_btn = QPushButton("Re-Route Department")
                 re_route_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                re_route_btn.clicked.connect(self._ds_route_to_hod)
+                re_route_btn.clicked.connect(self._ds_route)
                 self.action_bar.addWidget(re_route_btn)
 
             reminder_btn = QPushButton("⏰ Send Action Reminder")
@@ -1208,6 +1249,12 @@ class DocumentViewer(QWidget):
         assign_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 20px; border-radius: 5px;")
         assign_btn.clicked.connect(self._hod_assign_employee)
         self.action_bar.addWidget(assign_btn)
+
+        team_btn = QPushButton("Assign Team")
+        team_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 600; padding: 8px 18px; border-radius: 5px;")
+        team_btn.setToolTip("Assign one work item to multiple employees in this department")
+        team_btn.clicked.connect(self._hod_assign_team)
+        self.action_bar.addWidget(team_btn)
 
         # HOD can also dispatch a reminder to assigned employee
         if doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned":
@@ -1340,30 +1387,115 @@ class DocumentViewer(QWidget):
             self._action_in_progress = False
 
     def _ds_route_multi(self):
+        """
+        Backward-compatible entry point for older callers.
+
+        All DS operational routing now goes through the canonical
+        UniversalRoutingDialog -> create_branches() path.
+        """
+        self._ds_route()
+
+    def _resolve_hod_routing_id(self) -> Optional[int]:
+        """Resolve the active canonical department branch for HOD team assignment."""
+        doc_id = self.document.id or 0
+        if not doc_id:
+            return None
+        try:
+            branches = get_repository().get_document_branches(doc_id) or []
+            target_department_id = getattr(self.document, "target_department_id", None)
+            for branch in branches:
+                if not branch or branch.get("is_active") is False:
+                    continue
+                if branch.get("branch_type") != "DEPARTMENT_HOD":
+                    continue
+                if target_department_id is None or branch.get("department_id") == target_department_id:
+                    return branch.get("id") or branch.get("routing_id")
+        except Exception:
+            pass
+        return None
+
+    def _hod_assign_team(self):
         if getattr(self, "_action_in_progress", False):
             return
         self._action_in_progress = True
         try:
-            dialog = MultiDeptAssignDialog(self.document, self)
-            if dialog.exec():
-                assignments = dialog.get_assignments()
-                if assignments:
-                    doc_id = self.document.id or 0
-                    assignment_service.assign_multi(doc_id, assignments)
-                    updated_doc = document_service.get_document(doc_id)
-                    self.document = updated_doc
-                    self.update_view_data(updated_doc)
-                    QMessageBox.information(
-                        self,
-                        "Multi-Routing Confirmed",
-                        f"Document {self.document.reference} has been routed to {len(assignments)} departments/staff successfully."
-                    )
-                    from services.event_bus import event_bus
-                    event_bus.notify_document_updated(doc_id)
-                    event_bus.notify_data_changed()
-                    self.document_updated.emit(updated_doc)
+            routing_id = self._resolve_hod_routing_id()
+            dialog = HODAssignTeamDialog(self.document, routing_id=routing_id, parent=self)
+            if not dialog.exec():
+                return
+
+            data = dialog.get_data()
+            if not data.get("member_user_ids"):
+                return
+
+            doc_id = self.document.id or 0
+            result = get_repository().hod_assign_team(
+                document_id=doc_id,
+                member_user_ids=data["member_user_ids"],
+                routing_id=data.get("routing_id") or routing_id,
+                team_name=data.get("team_name"),
+                instructions=data.get("instructions"),
+                requires_hod_validation=data.get("requires_hod_validation", False),
+                expected_version=getattr(self.document, "version", None),
+            )
+            updated_doc = document_service.get_document(doc_id)
+            if not updated_doc:
+                raise RuntimeError("Team assignment succeeded, but the updated document could not be loaded.")
+            self.document = updated_doc
+            self.update_view_data(updated_doc)
+            QMessageBox.information(self, "Team Assigned", "The work assignment was assigned to the selected employees successfully.")
+            self.document_updated.emit(updated_doc)
         except Exception as ex:
-            QMessageBox.critical(self, "Routing Error", f"Failed to configure multi-department routing: {str(ex)}")
+            QMessageBox.critical(self, "Team Assignment Error", f"Failed to assign team: {str(ex)}")
+        finally:
+            self._action_in_progress = False
+
+    def _ds_assign_team(self):
+        if getattr(self, "_action_in_progress", False):
+            return
+
+        is_returned = self.document.status in (
+            DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+            "Director Review Completed",
+            "DIRECTOR_REVIEW_COMPLETED",
+        )
+        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
+            QMessageBox.warning(
+                self,
+                "Director Review Required",
+                "This document must be reviewed by the Executive Director before a team assignment can be created.",
+            )
+            return
+
+        self._action_in_progress = True
+        try:
+            dialog = DSTeamAssignmentDialog(self.document, parent=self)
+            if not dialog.exec():
+                return
+
+            data = dialog.get_data()
+            if not data.get("member_user_ids"):
+                return
+
+            doc_id = self.document.id or 0
+            result = get_repository().ds_assign_team(
+                document_id=doc_id,
+                member_user_ids=data["member_user_ids"],
+                routing_id=data.get("routing_id"),
+                team_name=data.get("team_name"),
+                instructions=data.get("instructions"),
+                requires_hod_validation=data.get("requires_hod_validation", False),
+                expected_version=getattr(self.document, "version", None),
+            )
+            updated_doc = document_service.get_document(doc_id)
+            if not updated_doc:
+                raise RuntimeError("Team assignment succeeded, but the updated document could not be loaded.")
+            self.document = updated_doc
+            self.update_view_data(updated_doc)
+            QMessageBox.information(self, "Team Created", "The work assignment was created for the selected employees successfully.")
+            self.document_updated.emit(updated_doc)
+        except Exception as ex:
+            QMessageBox.critical(self, "Team Assignment Error", f"Failed to create team assignment: {str(ex)}")
         finally:
             self._action_in_progress = False
 
@@ -1434,163 +1566,118 @@ class DocumentViewer(QWidget):
         finally:
             self._action_in_progress = False
 
-    def _ds_route_to_hod(self):
+    def _ds_route(self):
+        """Open the single DS routing workspace for all operational route types."""
         if getattr(self, "_action_in_progress", False):
             return
-        is_returned = bool(
-            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-            or bool(self.document.director_remark)
-            or getattr(self.document, "has_prior_director_remark", False)
-        )
-        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
-            QMessageBox.warning(
-                self,
-                "Director Review Required",
-                "This document must be reviewed by the Executive Director before department routing can be executed."
-            )
-            return
-        self._action_in_progress = True
-        try:
-            dialog = RouteToHODDialog(self.document, self)
-            if dialog.exec():
-                data = dialog.get_data()
-                doc_id = self.document.id or 0
-                updated_doc = routing_service.route_to_hod(
-                    doc_id,
-                    department_id=data["department_id"],
-                    remarks=data["remarks"]
-                )
-                QMessageBox.information(
-                    self,
-                    "Routing Confirmed",
-                    f"Document {self.document.reference} routed to {updated_doc.target_department_name} HOD."
-                )
-                self.document = updated_doc
-                self.document_updated.emit(updated_doc)
-                self.close_requested.emit()
-        except Exception as ex:
-            QMessageBox.critical(self, "Routing Error", f"Failed to route document: {str(ex)}")
-        finally:
-            self._action_in_progress = False
 
-    def _ds_route_to_employee(self):
-        if getattr(self, "_action_in_progress", False):
-            return
-        is_returned = bool(
-            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-            or bool(self.document.director_remark)
-            or getattr(self.document, "has_prior_director_remark", False)
+        is_returned = (
+            self.document.status in (
+                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                "Director Review Completed",
+                "DIRECTOR_REVIEW_COMPLETED",
+            )
         )
+
         if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
-                "This document must be reviewed by the Executive Director before staff routing can be executed."
+                "This document must be reviewed by the Executive Director before operational routing can be executed."
             )
             return
+
         self._action_in_progress = True
         try:
-            dialog = RouteToEmployeeDialog(self.document, self)
-            if dialog.exec():
-                data = dialog.get_data()
-                doc_id = self.document.id or 0
-                updated_doc = routing_service.route_to_employee(
-                    doc_id,
-                    employee_id=data["employee_id"],
-                    remarks=data["remarks"]
-                )
-                QMessageBox.information(
-                    self,
-                    "Routing Confirmed",
-                    f"Document {self.document.reference} directly routed to {updated_doc.assigned_employee_name}."
-                )
-                self.document = updated_doc
-                self.document_updated.emit(updated_doc)
-                self.close_requested.emit()
+            dialog = UniversalRoutingDialog(self.document, self)
+            if not dialog.exec():
+                return
+
+            routes = dialog.get_routes()
+            if not routes:
+                return
+
+            doc_id = self.document.id or 0
+            repo = get_repository()
+            repo.create_branches(
+                document_id=doc_id,
+                branches=routes,
+                expected_version=getattr(self.document, "version", None),
+            )
+
+            updated_doc = document_service.get_document(doc_id)
+            if not updated_doc:
+                raise RuntimeError("Routing succeeded, but the updated document could not be loaded.")
+
+            self.document = updated_doc
+            self.update_view_data(updated_doc)
+
+            route_labels = []
+            for route in routes:
+                branch_type = route.get("branch_type")
+                if branch_type == "DEPARTMENT_HOD":
+                    route_labels.append("Department / HOD")
+                elif branch_type == "DIRECT_EMPLOYEE":
+                    route_labels.append("Direct Employee")
+                elif branch_type == "TSO":
+                    route_labels.append("TSO")
+
+            QMessageBox.information(
+                self,
+                "Routing Confirmed",
+                f"Document {self.document.reference} routed successfully using {len(routes)} route(s).\n\n"
+                + "\n".join(f"• {label}" for label in route_labels)
+            )
+
+            from services.event_bus import event_bus
+            event_bus.notify_document_updated(doc_id)
+            event_bus.notify_data_changed()
+            self.document_updated.emit(updated_doc)
         except Exception as ex:
-            QMessageBox.critical(self, "Routing Error", f"Failed to route document: {str(ex)}")
+            QMessageBox.critical(
+                self,
+                "Routing Error",
+                f"Failed to route document: {str(ex)}"
+            )
         finally:
             self._action_in_progress = False
 
     def _ds_apply_suggested_routing(self):
+        """
+        Use the current OCR/content/Director-derived suggestion as a prefill
+        for the authoritative DS routing dialog.
+
+        The suggestion is advisory only. No route is executed directly from
+        the suggestion; DS must review and explicitly confirm the canonical
+        branch configuration in UniversalRoutingDialog.
+        """
         if getattr(self, "_action_in_progress", False):
             return
-        is_returned = bool(
-            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-            or bool(self.document.director_remark)
-            or getattr(self.document, "has_prior_director_remark", False)
+
+        is_returned = (
+            self.document.status in (
+                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                "Director Review Completed",
+                "DIRECTOR_REVIEW_COMPLETED",
+            )
         )
+
         if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
-                "This document must be reviewed by the Executive Director before department routing can be applied."
+                "This document must be reviewed by the Executive Director before operational routing can be executed.",
             )
             return
-        self._action_in_progress = True
-        try:
-            doc_id = self.document.id or 0
-            repo = get_repository()
-            if getattr(self.document, "suggested_employee_id", None) or getattr(self.document, "suggested_employee_name", None):
-                emp_name = getattr(self.document, "suggested_employee_name", "") or ""
-                employees = repo.get_users(role="Employee")
-                matched_emp = next((e for e in employees if e.full_name and emp_name.lower() in e.full_name.lower()), None)
-                emp_id = matched_emp.id if matched_emp else getattr(self.document, "suggested_employee_id", None)
-                if not emp_id:
-                    self._action_in_progress = False
-                    self._ds_route_to_employee()
-                    return
-                updated_doc = routing_service.route_to_employee(doc_id, employee_id=emp_id)
-                QMessageBox.information(
-                    self,
-                    "Routing Confirmed",
-                    f"Document {self.document.reference} routed directly to {updated_doc.assigned_employee_name or emp_name}."
-                )
-            elif getattr(self.document, "suggested_department_id", None) or getattr(self.document, "suggested_department_name", None):
-                dept_name = getattr(self.document, "suggested_department_name", "") or ""
-                departments = repo.get_departments()
-                matched_dept = next((d for d in departments if d.name and (dept_name.lower() in d.name.lower() or d.name.lower() in dept_name.lower())), None)
-                dept_id = matched_dept.id if matched_dept else getattr(self.document, "suggested_department_id", None)
-                if not dept_id:
-                    self._action_in_progress = False
-                    self._ds_route_to_hod()
-                    return
-                updated_doc = routing_service.route_to_hod(doc_id, department_id=dept_id)
-                QMessageBox.information(
-                    self,
-                    "Routing Confirmed",
-                    f"Document {self.document.reference} routed to {updated_doc.target_department_name or dept_name} HOD."
-                )
-            else:
-                self._action_in_progress = False
-                self._ds_route_to_hod()
-                return
 
-            self.document = updated_doc
-            self.document_updated.emit(updated_doc)
-            self.close_requested.emit()
-        except Exception as ex:
-            QMessageBox.critical(self, "Routing Error", f"Failed to apply suggested routing: {str(ex)}")
-        finally:
-            self._action_in_progress = False
+        # The suggestion card already stores the detected department/employee
+        # on the document. UniversalRoutingDialog reads those values and
+        # pre-fills the first routing row. DS remains the decision-maker.
+        self._ds_route()
 
     def _ds_edit_routing(self):
-        is_returned = bool(
-            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-            or bool(self.document.director_remark)
-            or getattr(self.document, "has_prior_director_remark", False)
-        )
-        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
-            QMessageBox.warning(
-                self,
-                "Director Review Required",
-                "This document must be reviewed by the Executive Director before department routing can be edited."
-            )
-            return
-        if getattr(self.document, "suggested_employee_name", None) and self.document.suggested_employee_name != "Not specified":
-            self._ds_route_to_employee()
-        else:
-            self._ds_route_to_hod()
+        """Compatibility wrapper: all DS operational routing uses the unified Route dialog."""
+        self._ds_route()
 
     def _ds_forward_followup(self):
         if getattr(self, "_action_in_progress", False):
@@ -1659,11 +1746,18 @@ class DocumentViewer(QWidget):
     def _ds_close_document(self):
         if getattr(self, "_action_in_progress", False):
             return
-        is_reviewed = bool(
-            self.document.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed", "DIRECTOR_REVIEW_COMPLETED")
-            or bool(self.document.director_remark)
-            or getattr(self.document, "has_prior_director_remark", False)
-            or self.document.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value, "HOD", "EMPLOYEE")
+        is_reviewed = (
+            self.document.status in (
+                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                "Director Review Completed",
+                "DIRECTOR_REVIEW_COMPLETED",
+            )
+            or self.document.current_stage in (
+                WorkflowStageEnum.HOD.value,
+                WorkflowStageEnum.EMPLOYEE.value,
+                "HOD",
+                "EMPLOYEE",
+            )
         )
         if not is_reviewed and self.document.current_stage in (WorkflowStageEnum.DS.value, "DS"):
             QMessageBox.warning(

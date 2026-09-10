@@ -39,8 +39,10 @@ class Settings:
     # 1. API Base URL (defaults to local backend http://127.0.0.1:8000/api/v1 or LAN / Cloud URL)
     api_url: str = os.getenv("CDTRS_API_URL", os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")).rstrip("/")
     
-    # 2. Data source mode ('api' for live FastAPI backend, 'mock' for standalone in-memory demo)
-    data_source: str = os.getenv("CDTRS_DATA_SOURCE", "api").lower()
+    # The frontend uses the live FastAPI backend.
+    # Kept as a property rather than a mutable mode switch so there is only
+    # one supported runtime data source.
+    data_source: str = "api"
 
     # Network Request Timeout in seconds
     api_timeout: float = float(os.getenv("CDTRS_API_TIMEOUT", "15.0"))
@@ -55,11 +57,6 @@ class Settings:
         return self.data_source == "api"
 
     @property
-    def is_mock_mode(self) -> bool:
-        """Returns True if the application is operating with local mock repository."""
-        return self.data_source == "mock"
-
-    @property
     def api_base_url(self) -> str:
         """Returns the root host URL without /api/v1 suffix."""
         if self.api_url.endswith("/api/v1"):
@@ -72,10 +69,11 @@ class Settings:
         self.api_url = url.strip().rstrip("/")
 
     def set_data_source(self, mode: str) -> None:
-        """Dynamically update data source mode ('api' or 'mock')."""
-        self.data_source = mode.strip().lower()
+        """Retained for compatibility; CDTRS only supports API mode."""
+        if mode.strip().lower() != "api":
+            raise ValueError("CDTRS frontend supports only API data source mode.")
+        self.data_source = "api"
 
 
 # Global singleton settings instance
 settings = Settings()
-

@@ -23,7 +23,9 @@ from fastapi import (
     File,
     Form,
     WebSocket,
-    WebSocketDisconnect
+    WebSocketDisconnect,
+    Header,
+    Request
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -35,7 +37,7 @@ import schemas
 import crud
 
 from database import engine, get_db
-from models import UserRole, AttachmentType, SourceType, Priority
+from models import UserRole, AttachmentType, SourceType, Priority, WorkContextType, DirectorDecision, BranchType
 from datetime import date as _date
 
 
@@ -183,7 +185,7 @@ app.add_middleware(
 
 
 # =========================================================
-# AUTHENTICATION & ROLE GUARDS
+# AUTHENTICATION & ROLE / CONTEXT GUARDS
 # =========================================================
 
 bearer_scheme = HTTPBearer()
@@ -220,6 +222,35 @@ def get_current_user(
     return user
 
 
+def get_current_work_context(
+    request: Request,
+    x_work_context_id: Optional[str] = Header(None, alias="X-Work-Context-Id"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Optional[models.WorkContextMembership]:
+    """Resolves and validates the active work context for the current request."""
+    if x_work_context_id:
+        try:
+            cid = int(x_work_context_id)
+            membership = crud.validate_user_context(db, current_user.id, cid)
+            if not membership:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Specified work context does not belong to user or is inactive."
+                )
+            return membership
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid X-Work-Context-Id header format.")
+
+    memberships = crud.get_user_context_memberships(db, current_user.id)
+    if memberships:
+        for m in memberships:
+            if m.context_type.value == current_user.role.value:
+                return m
+        return memberships[0]
+    return None
+
+
 def require_roles(*roles: UserRole):
     """Enforces server-side role-based access control."""
     def _check(current_user: models.User = Depends(get_current_user)):
@@ -229,6 +260,23 @@ def require_roles(*roles: UserRole):
                 detail=f"Access denied. Required role(s): {[r.value for r in roles]}",
             )
         return current_user
+    return _check
+
+
+def require_context_types(*context_types: WorkContextType):
+    """Enforces that the user's active work context matches the required type(s)."""
+    def _check(
+        current_user: models.User = Depends(get_current_user),
+        active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context)
+    ):
+        if active_context and active_context.context_type in context_types:
+            return current_user
+        if current_user.role.value in [ct.value for ct in context_types]:
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied. Active work context must be one of: {[ct.value for ct in context_types]}"
+        )
     return _check
 
 
@@ -326,6 +374,20 @@ def login(
             detail="Invalid username or password.",
         )
 
+    # TSO is a single operational role in CDTRS. When the designated TSO
+    # logs in, automatically create/activate the TSO work-context membership.
+    # This keeps login self-contained while preserving the backend's
+    # single-active-TSO rule implemented by crud.set_active_tso().
+    if user.role == UserRole.TSO:
+        try:
+            crud.set_active_tso(db, user.id)
+            db.refresh(user)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to initialize TSO work context: {e}",
+            )
+
     token = crud.create_access_token(
         data={"sub": str(user.id), "role": user.role.value}
     )
@@ -365,6 +427,39 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 )
 def logout(current_user: models.User = Depends(get_current_user)):
     return {"message": "Logged out successfully. Please discard your token."}
+
+
+@app.get(
+    f"{API_V1}/auth/contexts",
+    response_model=List[schemas.WorkContextMembershipResponse],
+    tags=["Authentication"],
+    summary="Get all active work contexts for the authenticated user",
+)
+def get_user_contexts(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return crud.get_user_context_memberships(db, current_user.id)
+
+
+@app.post(
+    f"{API_V1}/auth/switch-context",
+    response_model=schemas.WorkContextMembershipResponse,
+    tags=["Authentication"],
+    summary="Switch active work context for the current user session",
+)
+def switch_context(
+    body: schemas.WorkContextSwitchRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    membership = crud.validate_user_context(db, current_user.id, body.context_membership_id)
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Context membership does not exist, is inactive, or does not belong to you."
+        )
+    return membership
 
 
 @app.post(
@@ -782,6 +877,123 @@ async def route_document(
     return result
 
 
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/branches",
+    response_model=List[schemas.BranchResponse],
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="DS: Create one or multiple canonical routing branches for a document",
+)
+async def create_document_branches(
+    document_id: int,
+    body: schemas.MultiBranchRouteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    try:
+        context_id = active_context.id if active_context else None
+        branches = crud.create_canonical_branches(
+            db=db,
+            document_id=document_id,
+            branches=body.branches,
+            current_user=current_user,
+            context_id=context_id,
+            expected_version=body.expected_version
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
+
+    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
+    return branches
+
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/branches",
+    response_model=List[schemas.BranchResponse],
+    tags=["Documents — Workflow"],
+    summary="Get all canonical routing branches for a document",
+)
+def get_document_branches(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _get_authorized_doc_or_404(db, document_id, current_user)
+    return crud.get_document_branches(db, document_id)
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/branches/{{routing_id}}/assign",
+    response_model=schemas.AssignmentResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="HOD/DS: Assign operational responsibility for a canonical branch",
+)
+async def assign_branch_employee(
+    document_id: int,
+    routing_id: int,
+    body: schemas.AssignmentRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_context_types(WorkContextType.HOD, WorkContextType.DS, WorkContextType.ADMIN)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    try:
+        context_id = active_context.id if active_context else None
+        assignment = crud.assign_branch_employee(
+            db=db,
+            document_id=document_id,
+            routing_id=routing_id,
+            assign_req=body,
+            current_user=current_user,
+            context_id=context_id
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
+
+    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
+    return assignment
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/director-review",
+    response_model=schemas.DirectorReviewResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="Director: Submit explicit review decision (CONTINUE or CLOSE)",
+)
+async def submit_director_review(
+    document_id: int,
+    body: schemas.DirectorReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    try:
+        context_id = active_context.id if active_context else None
+        review = crud.submit_director_review(
+            db=db,
+            document_id=document_id,
+            review_req=body,
+            current_user=current_user,
+            context_id=context_id
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
+
+    await crud.event_manager.broadcast("DIRECTOR_REVIEW_COMPLETED", document_id=document_id, user_id=current_user.id)
+    return review
+
+
 @app.put(
     f"{API_V1}/documents/{{document_id}}/director-remark",
     response_model=schemas.DocumentResponse,
@@ -853,6 +1065,94 @@ async def save_hod_remark(
 
 
 @app.post(
+    f"{API_V1}/documents/{{document_id}}/hod-assign-team",
+    response_model=schemas.HODTeamAssignmentResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="HOD: Assign a departmental work item to one or more employees",
+)
+async def hod_assign_team(
+    document_id: int,
+    body: schemas.HODTeamAssignmentRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+
+    if current_user.role == UserRole.HOD and active_context and active_context.department_id:
+        if current_user.department_id != active_context.department_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active HOD context does not match the user's department.",
+            )
+
+    try:
+        assignment = crud.create_hod_team_assignment(
+            db=db,
+            doc_id=document_id,
+            request=body,
+            current_user=current_user,
+            context_id=active_context.id if active_context else None,
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
+
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Concurrency conflict, invalid document, or unauthorized departmental assignment.",
+        )
+
+    await crud.event_manager.broadcast(
+        "ASSIGNMENT_CREATED",
+        document_id=document_id,
+        user_id=current_user.id,
+    )
+    return assignment
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/ds-assign-team",
+    response_model=schemas.HODTeamAssignmentResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents — Workflow"],
+    summary="DS: Create a team assignment, including cross-department members",
+)
+async def ds_assign_team(
+    document_id: int,
+    body: schemas.DSTeamAssignmentRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+):
+    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    _assert_not_closed(doc)
+    try:
+        assignment = crud.create_hod_team_assignment(
+            db=db,
+            doc_id=document_id,
+            request=body,
+            current_user=current_user,
+            context_id=active_context.id if active_context else None,
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
+
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Concurrency conflict, invalid document, or unauthorized team assignment.",
+        )
+
+    await crud.event_manager.broadcast(
+        "TEAM_ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id
+    )
+    return assignment
+
+
+@app.post(
     f"{API_V1}/documents/{{document_id}}/assign",
     response_model=schemas.AssignmentResponse,
     status_code=status.HTTP_201_CREATED,
@@ -863,7 +1163,7 @@ async def assign_employee(
     document_id: int,
     assign_req: schemas.AssignmentRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.HOD)),
+    current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
 ):
     doc = _get_authorized_doc_or_404(db, document_id, current_user)
     _assert_not_closed(doc)
@@ -1060,7 +1360,11 @@ async def close_document(
     if doc.current_stage == models.WorkflowStage.CLOSED:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document is already closed.")
 
-    result = crud.close_document(db, document_id, body.remarks, current_user, body.expected_version)
+    try:
+        result = crud.close_document(db, document_id, body.remarks, current_user, body.expected_version)
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+
     if not result:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
 
@@ -1637,6 +1941,37 @@ def admin_list_users(
     return res
 
 
+@app.get(
+    f"{API_V1}/admin/tso",
+    response_model=Optional[schemas.WorkContextMembershipResponse],
+    tags=["Admin"],
+    summary="Admin: Get the current active TSO",
+)
+def admin_get_active_tso(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    return crud.get_single_active_tso(db)
+
+
+@app.post(
+    f"{API_V1}/admin/tso/{{user_id}}/activate",
+    response_model=schemas.WorkContextMembershipResponse,
+    tags=["Admin"],
+    summary="Admin: Assign and activate a user as the single active TSO",
+)
+def admin_activate_tso(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    try:
+        membership = crud.set_active_tso(db, user_id)
+        return membership
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post(
     f"{API_V1}/admin/users",
     tags=["Admin"],
@@ -1814,5 +2149,3 @@ def admin_get_audit_logs(
         }
         for l in logs
     ]
-
-

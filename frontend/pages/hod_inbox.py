@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 from models.document import DocumentModel
 from models.enums import DocumentStatusEnum, WorkflowStageEnum
 from services.document_service import document_service
-from services.auth_service import auth_service
 
 
 
@@ -101,7 +100,7 @@ class HODInboxPage(QWidget):
             "Reference No",
             "Title / Subject",
             "Priority",
-            "Assigned Employee",
+            "Assigned Staff / Team",
             "Deadline",
             "Status"
         ])
@@ -134,21 +133,19 @@ class HODInboxPage(QWidget):
         self.setLayout(main_layout)
 
     def load_inbox(self):
-        """Loads documents routed to HOD's active department."""
-        all_docs = document_service.get_documents()
-        active_dept = auth_service.get_active_department()
+        """Load documents from the backend for the active HOD context.
 
-        filtered_docs = []
-        for d in all_docs:
-            if d.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value, WorkflowStageEnum.CLOSED.value):
-                if active_dept and d.target_department_name and d.target_department_name.upper() != active_dept.upper():
-                    continue
-                filtered_docs.append(d)
+        The backend scopes GET /documents using X-Work-Context-Id, so the
+        page must not derive the active HOD workspace from the legacy
+        auth_service department string.
+        """
+        try:
+            self.documents = list(document_service.get_documents() or [])
+        except Exception as exc:
+            print(f"[HOD INBOX] Failed to load active HOD context: {exc}")
+            self.documents = []
 
-        self.documents = filtered_docs
         self.apply_filter()
-
-
 
     def _clear_filters(self):
         self.search_input.clear()
@@ -161,8 +158,10 @@ class HODInboxPage(QWidget):
 
         for doc in self.documents:
             is_closed = doc.current_stage == WorkflowStageEnum.CLOSED.value or (doc.status or "").lower() == "closed"
-            is_unassigned = doc.current_stage == WorkflowStageEnum.HOD.value and not doc.assigned_employee_name
-            is_assigned = doc.current_stage == WorkflowStageEnum.EMPLOYEE.value or bool(doc.assigned_employee_name)
+            team_names = getattr(doc, "assigned_team_names", None) or getattr(doc, "team_members_display", None) or ""
+            assigned_display = team_names or getattr(doc, "assigned_employee_name", None)
+            is_unassigned = doc.current_stage == WorkflowStageEnum.HOD.value and not assigned_display
+            is_assigned = doc.current_stage == WorkflowStageEnum.EMPLOYEE.value or bool(assigned_display)
             is_progress = doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value
 
             # Default "All Active Documents" excludes closed — must explicitly choose "Closed Documents"
@@ -180,7 +179,7 @@ class HODInboxPage(QWidget):
             if query:
                 ref = str(doc.reference or "").lower()
                 title = str(doc.title or "").lower()
-                emp = str(doc.assigned_employee_name or "").lower()
+                emp = str(assigned_display or "").lower()
                 prio = str(doc.priority or "").lower()
                 status = str(doc.status or "").lower()
 
@@ -197,8 +196,13 @@ class HODInboxPage(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
             self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
 
-            emp_item = QTableWidgetItem(doc.assigned_employee_name or "— Unassigned —")
-            if not doc.assigned_employee_name:
+            assigned_display = (
+                getattr(doc, "assigned_team_names", None)
+                or getattr(doc, "team_members_display", None)
+                or doc.assigned_employee_name
+            )
+            emp_item = QTableWidgetItem(assigned_display or "— Unassigned —")
+            if not assigned_display:
                 emp_item.setForeground(Qt.red)
             self.table.setItem(row, 3, emp_item)
 

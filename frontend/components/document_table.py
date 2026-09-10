@@ -23,7 +23,7 @@ class DocumentTable(QTableWidget):
             "Subject / Title",
             "Priority",
             "Department",
-            "Assigned Staff",
+            "Assigned Staff / Team",
             "Deadline",
             "Status",
             "Stage"
@@ -55,7 +55,7 @@ class DocumentTable(QTableWidget):
                 title = doc.title or "Untitled"
                 prio = doc.priority or "Medium"
                 dept = doc.department or doc.target_department_name or "-"
-                emp = doc.assigned_employee_name or "-"
+                emp = self._assignment_display(doc)
                 deadline = doc.deadline or "-"
                 status = doc.status or "-"
                 stage = doc.current_stage or "-"
@@ -64,7 +64,7 @@ class DocumentTable(QTableWidget):
                 title = doc.get("title") or doc.get("subject") or "Untitled"
                 prio = doc.get("priority") or "Medium"
                 dept = doc.get("department") or "-"
-                emp = doc.get("assigned_employee_name") or "-"
+                emp = self._assignment_display(doc)
                 deadline = doc.get("deadline") or "-"
                 status = doc.get("status") or "-"
                 stage = doc.get("current_stage") or "-"
@@ -87,6 +87,58 @@ class DocumentTable(QTableWidget):
             self.setItem(row, 5, QTableWidgetItem(str(deadline)))
             self.setItem(row, 6, QTableWidgetItem(str(status)))
             self.setItem(row, 7, QTableWidgetItem(str(stage)))
+
+
+    @staticmethod
+    def _assignment_display(doc) -> str:
+        """Return a compact single/team assignment label for table display."""
+        assignments = getattr(doc, "work_assignments", None)
+        if assignments is None and isinstance(doc, dict):
+            assignments = doc.get("work_assignments") or doc.get("assignments")
+
+        labels = []
+        for assignment in assignments or []:
+            if isinstance(assignment, dict):
+                if not assignment.get("is_active", True):
+                    continue
+                team_name = assignment.get("team_name")
+                members = assignment.get("members") or []
+                member_names = []
+                for member in members:
+                    if isinstance(member, dict):
+                        name = member.get("user_name") or member.get("full_name") or member.get("name")
+                    else:
+                        name = getattr(member, "user_name", None) or getattr(member, "full_name", None) or getattr(member, "name", None)
+                    if name:
+                        member_names.append(str(name))
+                if team_name:
+                    labels.append(f"{team_name} ({len(member_names)} members)" if member_names else str(team_name))
+                elif member_names:
+                    labels.append(", ".join(member_names))
+                elif assignment.get("assigned_to_user_name") or assignment.get("assigned_to_name"):
+                    labels.append(str(assignment.get("assigned_to_user_name") or assignment.get("assigned_to_name")))
+            else:
+                if not getattr(assignment, "is_active", True):
+                    continue
+                display = getattr(assignment, "display_name", None)
+                if display:
+                    labels.append(str(display))
+                    continue
+                team_name = getattr(assignment, "team_name", None)
+                member_names = getattr(assignment, "active_member_names", None) or getattr(assignment, "member_names", None) or []
+                if team_name:
+                    labels.append(f"{team_name} ({len(member_names)} members)" if member_names else str(team_name))
+                elif member_names:
+                    labels.append(", ".join(map(str, member_names)))
+                else:
+                    name = getattr(assignment, "assigned_to_user_name", None) or getattr(assignment, "assigned_to_name", None)
+                    if name:
+                        labels.append(str(name))
+
+        if labels:
+            return " | ".join(labels)
+
+        return getattr(doc, "assigned_employee_name", None) or (doc.get("assigned_employee_name") if isinstance(doc, dict) else None) or "-"
 
     def on_selection_changed(self):
         row = self.currentRow()

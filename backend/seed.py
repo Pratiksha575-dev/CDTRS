@@ -70,7 +70,9 @@ def main(reset: bool = False):
             print(f"{u.username:<18} | {role_val:<18} | {pwd}")
         print("=" * 65)
     except Exception as e:
+        db.rollback()
         print(f"[ERROR] Error seeding database: {e}")
+        raise
     finally:
         db.close()
 

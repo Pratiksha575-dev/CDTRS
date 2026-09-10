@@ -47,7 +47,14 @@ class APIRepository(BaseRepository):
     # =========================================================
 
     def authenticate(self, username: str, password: str) -> Optional[UserModel]:
-        """Validates credentials, acquires JWT Bearer token, and retrieves profile."""
+        """
+        Validates credentials, stores the JWT, loads the authenticated profile,
+        and establishes the user's active WorkContextMembership.
+
+        The backend currently exposes contexts through /auth/contexts, so the
+        repository does not assume that login must contain a top-level
+        ``contexts`` field.
+        """
         payload = {"username": username.strip(), "password": password}
         try:
             response = api_client.post(Endpoints.AUTH_LOGIN, json=payload)
@@ -55,6 +62,8 @@ class APIRepository(BaseRepository):
             return None
         except Exception:
             raise
+
+        response = response or {}
 
         token = response.get("access_token")
         if token:
@@ -64,10 +73,53 @@ class APIRepository(BaseRepository):
         if not user_data:
             user_data = api_client.get(Endpoints.AUTH_ME)
 
-        if user_data:
-            self._current_user = UserModel.from_dict(user_data)
-            return self._current_user
-        return None
+        if not user_data:
+            return None
+
+        # LoginResponse in the current backend may expose the active context
+        # separately, while /auth/me may expose context_memberships.
+        active_context_id = (
+            response.get("active_context_id")
+            or response.get("active_context_membership_id")
+            or user_data.get("active_context_id")
+            or user_data.get("active_context_membership_id")
+        )
+
+        contexts = (
+            response.get("contexts")
+            or user_data.get("context_memberships")
+            or []
+        )
+
+        # If login did not include memberships, use the authoritative endpoint.
+        if not contexts and token:
+            try:
+                contexts = self.get_user_contexts()
+            except Exception:
+                contexts = []
+
+        if contexts:
+            user_data["context_memberships"] = contexts
+
+        if active_context_id is None and contexts:
+            active = next(
+                (
+                    c for c in contexts
+                    if c.get("is_active") is True
+                    or c.get("active") is True
+                ),
+                None,
+            )
+            if active:
+                active_context_id = active.get("id")
+
+        if active_context_id is not None:
+            user_data["active_context_id"] = active_context_id
+            user_data["active_context_membership_id"] = active_context_id
+            api_client.set_active_context_id(int(active_context_id))
+
+        self._current_user = UserModel.from_dict(user_data)
+        return self._current_user
 
     def get_current_user(self) -> Optional[UserModel]:
         """Returns currently authenticated user profile."""
@@ -89,6 +141,37 @@ class APIRepository(BaseRepository):
         finally:
             api_client.clear_auth_token()
             self._current_user = None
+
+    def get_user_contexts(self) -> List[Dict[str, Any]]:
+        """Retrieves all active work context memberships for the current user."""
+        try:
+            contexts = api_client.get(Endpoints.AUTH_CONTEXTS) or []
+            if self._current_user is not None:
+                self._current_user.set_contexts(contexts)
+            return contexts
+        except Exception:
+            return []
+
+    def switch_context(self, context_membership_id: int) -> Dict[str, Any]:
+        """
+        Switches the active operational context.
+
+        The backend validates the membership. The client then places the
+        selected membership ID in X-Work-Context-Id for subsequent requests.
+        """
+        payload = {"context_membership_id": int(context_membership_id)}
+        result = api_client.post(Endpoints.AUTH_SWITCH_CONTEXT, json=payload) or {}
+
+        selected_id = result.get("id") or context_membership_id
+        api_client.set_active_context_id(int(selected_id))
+
+        if self._current_user is not None:
+            self._current_user.set_active_context(int(selected_id))
+            contexts = self._current_user.get_contexts()
+            for context in contexts:
+                context.is_active = (context.id == int(selected_id))
+
+        return result
 
     def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
         """Resets user password via backend reset endpoint requiring current password."""
@@ -309,15 +392,11 @@ class APIRepository(BaseRepository):
         Creates a new canonical document. When file_path is provided, uses the
         multipart manual-upload pipeline. Otherwise sends JSON creation payload.
         """
-        print(f"\n======== [DEBUG APIRepository.create_document] ========")
-        print(f"Document Title: {document.title}")
-        print(f"Provided file_path argument: {file_path}")
-        print(f"Document model file_path attribute: {document.file_path}")
-        print(f"Document OCR text length: {len(document.ocr_text or '')} chars")
-        print(f"Suggested Dept ID: {document.suggested_department_id}, Name: {document.suggested_department_name}")
-        print(f"Suggested Emp ID: {document.suggested_employee_id}, Name: {document.suggested_employee_name}")
-
-        raw_date = str(document.date).split()[0] if document.date else datetime.now().strftime("%Y-%m-%d")
+        raw_date = (
+            str(document.date).split()[0]
+            if document.date
+            else datetime.now().strftime("%Y-%m-%d")
+        )
         priority_val = PriorityEnum.normalize(document.priority).upper()
         conf_val = getattr(document, "confidence", None)
         if conf_val is None:
@@ -342,16 +421,13 @@ class APIRepository(BaseRepository):
                 "suggested_department_id": str(document.suggested_department_id) if document.suggested_department_id else "",
                 "suggested_department_name": document.suggested_department_name or "",
                 "suggested_employee_id": str(document.suggested_employee_id) if document.suggested_employee_id else "",
-                "suggested_employee_name": document.suggested_employee_name or ""
+                "suggested_employee_name": document.suggested_employee_name or "",
             }
-            print(f"Dispatching multipart upload to endpoint: {Endpoints.INTAKE_MANUAL_UPLOAD}")
-            print(f"Form data payload keys: {list(form_data.keys())} (Confidence: {form_data['confidence']})")
-            
             data = api_client.upload(
                 Endpoints.INTAKE_MANUAL_UPLOAD,
                 file_path_or_tuple=file_path,
                 field_name="file",
-                extra_data=form_data
+                extra_data=form_data,
             )
         else:
             payload = {
@@ -371,15 +447,10 @@ class APIRepository(BaseRepository):
                 "suggested_employee_id": document.suggested_employee_id,
                 "suggested_employee_name": document.suggested_employee_name,
             }
-            print(f"Dispatching JSON POST to endpoint: {Endpoints.DOCUMENT_CREATE}")
-            print(f"JSON payload keys: {list(payload.keys())}")
-            
             data = api_client.post(Endpoints.DOCUMENT_CREATE, json=payload)
 
-        print(f"Backend response received successfully. Response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-        print(f"======================================================\n")
-
         return DocumentModel.from_dict(data)
+
     def close_document(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
         """Permanently closes a completed document."""
         payload = {"remarks": remarks}
@@ -396,7 +467,8 @@ class APIRepository(BaseRepository):
         route_type: str,
         to_user_id: Optional[int] = None,
         to_department_id: Optional[int] = None,
-        remarks: Optional[str] = None
+        remarks: Optional[str] = None,
+        requires_hod_validation=False
     ) -> DocumentModel:
         """
         Routes a document. Translates frontend RouteTypeEnum values to backend
@@ -407,7 +479,8 @@ class APIRepository(BaseRepository):
             "route_type": backend_route_type,
             "to_user_id": to_user_id,
             "to_department_id": to_department_id,
-            "remarks": remarks
+            "remarks": remarks,
+            "requires_hod_validation":requires_hod_validation,
         }
         data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
         return DocumentModel.from_dict(data)
@@ -488,6 +561,126 @@ class APIRepository(BaseRepository):
             return [WorkAssignmentModel.from_dict(a) for a in data]
         except Exception:
             return []
+
+    def hod_assign_team(
+        self,
+        document_id: int,
+        member_user_ids: List[int],
+        routing_id: Optional[int] = None,
+        team_name: Optional[str] = None,
+        instructions: Optional[str] = None,
+        requires_hod_validation: bool = False,
+        expected_version: Optional[int] = None,
+    ) -> WorkAssignmentModel:
+        """
+        HOD creates one work assignment containing multiple employee members.
+        Backend remains authoritative for scope, validation, and assignment state.
+        """
+        payload = {
+            "member_user_ids": [int(user_id) for user_id in member_user_ids],
+            "routing_id": routing_id,
+            "team_name": team_name,
+            "instructions": instructions,
+            "requires_hod_validation": requires_hod_validation,
+            "expected_version": expected_version,
+        }
+        data = api_client.post(
+            f"/documents/{document_id}/hod-assign-team",
+            json=payload,
+        )
+        return WorkAssignmentModel.from_dict(data)
+
+    def ds_assign_team(
+        self,
+        document_id: int,
+        member_user_ids: List[int],
+        routing_id: Optional[int] = None,
+        team_name: Optional[str] = None,
+        instructions: Optional[str] = None,
+        requires_hod_validation: bool = False,
+        expected_version: Optional[int] = None,
+    ) -> WorkAssignmentModel:
+        """
+        DS creates one work assignment containing multiple employees.
+        Supports cross-department teams where allowed by the backend.
+        """
+        payload = {
+            "member_user_ids": [int(user_id) for user_id in member_user_ids],
+            "routing_id": routing_id,
+            "team_name": team_name,
+            "instructions": instructions,
+            "requires_hod_validation": requires_hod_validation,
+            "expected_version": expected_version,
+        }
+        data = api_client.post(
+            f"/documents/{document_id}/ds-assign-team",
+            json=payload,
+        )
+        return WorkAssignmentModel.from_dict(data)
+
+    def create_branches(
+        self,
+        document_id: int,
+        branches: List[Dict[str, Any]],
+        expected_version: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """DS creates one or more canonical routing branches."""
+        payload = {
+            "branches": branches,
+            "expected_version": expected_version
+        }
+        return api_client.post(Endpoints.DOCUMENT_BRANCHES(document_id), json=payload) or []
+
+    def get_document_branches(self, document_id: int) -> List[Dict[str, Any]]:
+        """Retrieves canonical routing branches for a document."""
+        try:
+            return api_client.get(Endpoints.DOCUMENT_BRANCHES(document_id)) or []
+        except Exception:
+            return []
+
+    def assign_branch_employee(
+        self,
+        document_id: int,
+        routing_id: int,
+        assigned_to_user_id: int,
+        instructions: Optional[str] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Assigns staff responsibility on a canonical branch."""
+        payload = {
+            "assigned_to_user_id": assigned_to_user_id,
+            "instructions": instructions,
+            "change_reason": change_reason,
+            "expected_version": expected_version
+        }
+        return api_client.post(Endpoints.DOCUMENT_BRANCH_ASSIGN(document_id, routing_id), json=payload) or {}
+
+    def submit_director_review(
+        self,
+        document_id: int,
+        decision: str,
+        remark_text: Optional[str] = None,
+        expected_version: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Legacy compatibility wrapper; current workflow uses free-text Director remark + return-to-DS."""
+        payload = {
+            "decision": decision,
+            "remark_text": remark_text,
+            "expected_version": expected_version
+        }
+        return api_client.post(Endpoints.DOCUMENT_DIRECTOR_REVIEW(document_id), json=payload) or {}
+
+    def get_active_tso(self) -> Optional[Dict[str, Any]]:
+        """Admin retrieves current active TSO membership."""
+        try:
+            return api_client.get(Endpoints.ADMIN_TSO)
+        except Exception:
+            return None
+
+    def activate_tso(self, user_id: int) -> Dict[str, Any]:
+        """Admin assigns a user as the single active TSO."""
+        return api_client.post(Endpoints.ADMIN_ACTIVATE_TSO(user_id)) or {}
 
     # =========================================================
     # PROGRESS & ATTACHMENTS (Employee Reporting)

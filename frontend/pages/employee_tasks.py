@@ -24,8 +24,8 @@ from services.document_service import document_service
 class EmployeeTasksPage(QWidget):
     """
     Employee Tasks & Execution Queue.
-    Displays documents assigned or routed specifically to the authenticated employee.
-    Enforces strict employee isolation: an employee cannot see documents assigned to other employees.
+    Displays documents assigned to the authenticated employee, including
+    membership in multi-employee/team work assignments.
     """
 
     view_requested = Signal(object, str)
@@ -45,7 +45,6 @@ class EmployeeTasksPage(QWidget):
         self.load_tasks()
 
     def get_authenticated_employee_id(self) -> Optional[int]:
-        """Obtains the authenticated employee ID from the active user session."""
         if self._custom_employee_id is not None:
             return self._custom_employee_id
         current_user = auth_service.get_current_user()
@@ -58,27 +57,27 @@ class EmployeeTasksPage(QWidget):
         main_layout.setContentsMargins(30, 25, 30, 30)
         main_layout.setSpacing(14)
 
-        # --------------------------------
-        # HEADER
-        # --------------------------------
         title = QLabel("My Tasks & Assigned Work")
         title.setObjectName("pageTitle")
-
-        subtitle = QLabel("Review assigned tasks from Department Head (HOD) or Director Secretary (DS) and submit progress updates.")
+        subtitle = QLabel(
+            "Review assigned tasks from Department Head (HOD) or Director Secretary "
+            "(DS), including team assignments, and submit progress updates."
+        )
         subtitle.setObjectName("pageSubtitle")
-
         main_layout.addWidget(title)
         main_layout.addWidget(subtitle)
 
-        # --------------------------------
-        # SEARCH & FILTER BAR
-        # --------------------------------
         filter_layout = QHBoxLayout()
         filter_layout.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 Search by task title, reference, sender/origin, priority, status...")
-        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.setPlaceholderText(
+            "🔍 Search by task title, reference, sender/origin, priority, status..."
+        )
+        self.search_input.setStyleSheet(
+            "padding: 7px 12px; border: 1px solid #CBD5E1; "
+            "border-radius: 5px; font-size: 12px;"
+        )
         self.search_input.textChanged.connect(self.apply_filter)
 
         self.filter_combo = QComboBox()
@@ -86,24 +85,26 @@ class EmployeeTasksPage(QWidget):
             "All Assigned Tasks",
             "Not Yet Started",
             "In Progress / Updated",
-            "High Priority / Urgent"
+            "High Priority / Urgent",
         ])
-        self.filter_combo.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.filter_combo.setStyleSheet(
+            "padding: 6px 10px; border: 1px solid #CBD5E1; "
+            "border-radius: 5px; font-size: 12px;"
+        )
         self.filter_combo.currentIndexChanged.connect(self.apply_filter)
 
         clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
+        clear_btn.setStyleSheet(
+            "background-color: #F1F5F9; border: 1px solid #CBD5E1; "
+            "padding: 6px 14px; border-radius: 4px; font-weight: 600;"
+        )
         clear_btn.clicked.connect(self._clear_filters)
 
         filter_layout.addWidget(self.search_input, 2)
         filter_layout.addWidget(self.filter_combo, 1)
         filter_layout.addWidget(clear_btn)
-
         main_layout.addLayout(filter_layout)
 
-        # --------------------------------
-        # TABLE
-        # --------------------------------
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
@@ -112,7 +113,7 @@ class EmployeeTasksPage(QWidget):
             "Priority",
             "Source / Origin",
             "Deadline",
-            "HOD Remark"
+            "HOD Remark",
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -126,30 +127,70 @@ class EmployeeTasksPage(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
-
-
         main_layout.addWidget(self.table)
 
-        # --------------------------------
-        # ACTION BAR
-        # --------------------------------
         action_layout = QHBoxLayout()
         action_layout.addStretch()
-
         self.open_btn = QPushButton("Open Task / Submit Progress")
-        self.open_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 22px; border-radius: 5px;")
+        self.open_btn.setStyleSheet(
+            "background-color: #0F172A; color: white; font-weight: 600; "
+            "padding: 8px 22px; border-radius: 5px;"
+        )
         self.open_btn.clicked.connect(self.open_task)
         action_layout.addWidget(self.open_btn)
-
         main_layout.addLayout(action_layout)
+
         self.setLayout(main_layout)
 
+    @staticmethod
+    def _employee_in_assignment(assignment, employee_id):
+        if isinstance(assignment, dict):
+            if assignment.get("is_active", True) is False:
+                return False
+            if assignment.get("assigned_to_user_id") == employee_id:
+                return True
+            for member in assignment.get("members") or []:
+                if isinstance(member, dict):
+                    if member.get("user_id") == employee_id:
+                        return True
+                elif getattr(member, "user_id", None) == employee_id:
+                    return True
+            return False
+
+        if getattr(assignment, "is_active", True) is False:
+            return False
+        if getattr(assignment, "assigned_to_user_id", None) == employee_id:
+            return True
+
+        return any(
+            getattr(member, "user_id", None) == employee_id
+            for member in (getattr(assignment, "members", None) or [])
+        )
+
+    def _is_assigned_to_employee(self, doc, employee_id):
+        if (
+            doc.assigned_employee_id == employee_id
+            or doc.current_owner_id == employee_id
+            or getattr(doc, "employee_id", None) == employee_id
+        ):
+            return True
+
+        for assignment in getattr(doc, "work_assignments", None) or []:
+            if self._employee_in_assignment(assignment, employee_id):
+                return True
+
+        for assignment in getattr(doc, "assignments", None) or []:
+            if self._employee_in_assignment(assignment, employee_id):
+                return True
+
+        return any(
+            isinstance(da, dict)
+            and da.get("assigned_employee_id") == employee_id
+            for da in getattr(doc, "doc_assignments", [])
+        )
+
     def load_tasks(self):
-        """
-        Loads tasks assigned strictly to the authenticated employee.
-        Enforces strict employee isolation: only includes tasks where assigned_employee_id == auth_id
-        or user is assigned via multi-department assignments.
-        """
+        """Loads only documents assigned to the authenticated employee."""
         emp_id = self.get_authenticated_employee_id()
         all_docs = document_service.get_documents()
 
@@ -158,16 +199,14 @@ class EmployeeTasksPage(QWidget):
         else:
             self.documents = [
                 d for d in all_docs
-                if (
-                    d.assigned_employee_id == emp_id
-                    or d.current_owner_id == emp_id
-                    or getattr(d, "employee_id", None) == emp_id
-                    or any(
-                        isinstance(da, dict) and da.get("assigned_employee_id") == emp_id
-                        for da in getattr(d, "doc_assignments", [])
-                    )
+                if self._is_assigned_to_employee(d, emp_id)
+                and d.current_stage in (
+                    WorkflowStageEnum.EMPLOYEE.value,
+                    WorkflowStageEnum.CLOSED.value,
+                    "EMPLOYEE",
+                    "Employee",
+                    "Closed",
                 )
-                and d.current_stage in (WorkflowStageEnum.EMPLOYEE.value, WorkflowStageEnum.CLOSED.value, "EMPLOYEE", "Employee", "Closed")
             ]
 
         self.apply_filter()
@@ -201,9 +240,21 @@ class EmployeeTasksPage(QWidget):
                 source = str(doc.source or doc.created_by or "").lower()
                 prio = str(doc.priority or "").lower()
                 status = str(doc.status or "").lower()
-                hod_rem_text = str(doc.hod_remark or getattr(doc, "hod_instructions", "") or getattr(doc, "assignment_instructions", "") or "").lower()
+                hod_rem_text = str(
+                    doc.hod_remark
+                    or getattr(doc, "hod_instructions", "")
+                    or getattr(doc, "assignment_instructions", "")
+                    or ""
+                ).lower()
 
-                if not (query in ref or query in title or query in source or query in prio or query in status or query in hod_rem_text):
+                if not (
+                    query in ref
+                    or query in title
+                    or query in source
+                    or query in prio
+                    or query in status
+                    or query in hod_rem_text
+                ):
                     continue
 
             filtered.append(doc)
@@ -217,16 +268,22 @@ class EmployeeTasksPage(QWidget):
             self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
             self.table.setItem(row, 3, QTableWidgetItem(doc.source or "Official Dispatch"))
             self.table.setItem(row, 4, QTableWidgetItem(doc.deadline or "-"))
-            # HOD Remark — shows the HOD's remark/guidance for this assignment
-            hod_rem = doc.hod_remark or getattr(doc, "hod_instructions", None) or getattr(doc, "assignment_instructions", None) or "—"
+            hod_rem = (
+                doc.hod_remark
+                or getattr(doc, "hod_instructions", None)
+                or getattr(doc, "assignment_instructions", None)
+                or "—"
+            )
             self.table.setItem(row, 5, QTableWidgetItem(str(hod_rem)))
-
-
 
     def open_task(self):
         row = self.table.currentRow()
         if row < 0 or row >= len(getattr(self, "_displayed_docs", [])):
-            QMessageBox.information(self, "Selection Required", "Please select a task from the list to open.")
+            QMessageBox.information(
+                self,
+                "Selection Required",
+                "Please select a task from the list to open.",
+            )
             return
 
         selected_doc = self._displayed_docs[row]

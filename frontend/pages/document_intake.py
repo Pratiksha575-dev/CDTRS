@@ -4,7 +4,6 @@ import os
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -270,10 +269,17 @@ class DocumentIntakePage(QWidget):
         self.prior_remark_lbl.setWordWrap(True)
         dr_layout.addWidget(self.prior_remark_lbl)
 
-        self.bypass_director_check = QCheckBox("Document contains verified Director directive (Bypass Director Review queue)")
-        self.bypass_director_check.setStyleSheet("color: #92400E; font-weight: 600;")
-        self.bypass_director_check.toggled.connect(self._update_action_button_text)
-        dr_layout.addWidget(self.bypass_director_check)
+        # Director remarks found in source/OCR are informational only.
+        # DS must never bypass the mandatory Director review stage from intake.
+        self.director_flow_note = QLabel(
+            "Any Director-related text detected in the source is advisory metadata. "
+            "Every newly registered document is sent to the Director for review."
+        )
+        self.director_flow_note.setWordWrap(True)
+        self.director_flow_note.setStyleSheet(
+            "color: #78350F; font-size: 11px; font-weight: 600;"
+        )
+        dr_layout.addWidget(self.director_flow_note)
 
         self.director_remark_card.setVisible(False)
         bottom_cards_layout.addWidget(self.director_remark_card, 1)
@@ -344,14 +350,6 @@ class DocumentIntakePage(QWidget):
     def _on_dept_changed(self):
         dept_id = self.dept_combo.currentData()
         self._load_employees_from_backend(department_id=dept_id)
-
-    def _update_action_button_text(self):
-        if self.bypass_director_check.isChecked():
-            self.submit_btn.setText("Confirm & Route Directly to HOD / Staff")
-            self.submit_btn.setStyleSheet("background-color: #D97706; color: white; font-size: 13px; font-weight: 600; padding: 9px 24px; border-radius: 6px;")
-        else:
-            self.submit_btn.setText("Confirm & Send for Director Review")
-            self.submit_btn.setStyleSheet("background-color: #0F172A; color: white; font-size: 13px; font-weight: 600; padding: 9px 24px; border-radius: 6px;")
 
     def select_document(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -545,13 +543,11 @@ class DocumentIntakePage(QWidget):
             self.has_prior_director_remark = True
             self.prior_remark_lbl.setText(f"Directive: \"{remark_text}\"")
             self.director_remark_card.setVisible(True)
-            self.bypass_director_check.setChecked(True)
         else:
             self.has_prior_director_remark = False
             self.director_remark_card.setVisible(False)
-            self.bypass_director_check.setChecked(False)
 
-        self._update_action_button_text()
+        self._set_submit_button_text()
 
         if file_path and os.path.exists(file_path):
             self.selected_file = file_path
@@ -584,10 +580,11 @@ class DocumentIntakePage(QWidget):
         ref_no = self.ref_input.text().strip() or "Auto-Generated"
 
         # Explicit Confirmation Dialog before routing
-        target_stage_name = "Direct to HOD / Staff" if self.bypass_director_check.isChecked() else "Director Review Queue"
-        target_info = f"Department: {dept_text or 'Central/DS'}"
-        if emp_text:
-            target_info += f"\nOfficer: {emp_text}"
+        target_stage_name = "Director Review Queue"
+        target_info = (
+            "Routing suggestions are advisory and will be handled by DS "
+            "after the Director returns the document."
+        )
 
         confirm_msg = (
             f"Are you sure you want to dispatch this document?\n\n"
@@ -632,34 +629,27 @@ class DocumentIntakePage(QWidget):
             confidence=float(getattr(self, "extracted_ocr_confidence", 0.0)),
             attachment_count=getattr(self, "incoming_attachment_count", 1 if self.selected_file else 0),
             attachments_list=getattr(self, "incoming_attachments_list", [os.path.basename(self.selected_file)] if self.selected_file else []),
-            target_department_name=dept_text if self.bypass_director_check.isChecked() else None,
-            target_department_id=target_dept_id if self.bypass_director_check.isChecked() else None,
-            assigned_employee_name=emp_text if self.bypass_director_check.isChecked() else None,
-            assigned_employee_id=emp_id if self.bypass_director_check.isChecked() else None,
+            target_department_name=None,
+            target_department_id=None,
+            assigned_employee_name=None,
+            assigned_employee_id=None,
             suggested_department_name=dept_text,
             suggested_department_id=target_dept_id,
             suggested_employee_name=emp_text,
             suggested_employee_id=emp_id,
-            has_prior_director_remark=self.bypass_director_check.isChecked(),
-            director_remark=self.prior_remark_lbl.text().replace('Directive: "', '').rstrip('"') if self.bypass_director_check.isChecked() else None
+            has_prior_director_remark=self.has_prior_director_remark,
+            director_remark=self.prior_remark_lbl.text().replace('Directive: "', '').rstrip('"')
+            if self.has_prior_director_remark else None
         )
 
         try:
             created_doc = document_service.create_document(doc_model, file_path=actual_upload_path)
 
-            if self.bypass_director_check.isChecked():
-                if emp_id:
-                    routed_doc = routing_service.route_to_employee(created_doc.id, employee_id=emp_id)
-                    routed_doc.assigned_employee_name = emp_text
-                    routed_doc.target_department_name = dept_text
-                    msg = f"Document {routed_doc.reference} routed directly to Staff {emp_text}."
-                else:
-                    routed_doc = routing_service.route_to_hod(created_doc.id, department_id=target_dept_id or 1)
-                    routed_doc.target_department_name = dept_text
-                    msg = f"Document {routed_doc.reference} routed directly to {dept_text or 'Department'} HOD."
-            else:
-                routed_doc = routing_service.route_to_director(created_doc.id)
-                msg = f"Document {routed_doc.reference} ('{routed_doc.title}') successfully registered and sent for Director Review."
+            routed_doc = routing_service.route_to_director(created_doc.id)
+            msg = (
+                f"Document {routed_doc.reference} ('{routed_doc.title}') "
+                "successfully registered and sent for Director Review."
+            )
 
             if self.current_inbox_item_id:
                 document_service.remove_inbox_item(self.current_inbox_item_id)
@@ -687,10 +677,13 @@ class DocumentIntakePage(QWidget):
         self.ocr_fields_frame.setVisible(False)
         self.director_remark_card.setVisible(False)
 
-        self.bypass_director_check.setChecked(False)
         self.preview_label.setText("No document loaded\n\nSelect an incoming item from Inbox or click 'Manual Intake / Upload File' to process a document.")
         self.dept_combo.setCurrentIndex(0)
         self.emp_combo.setCurrentIndex(0)
         self.confidence_label.setText("Confidence: — • Source: Document / OCR")
-        self.update_action_button_text = self._update_action_button_text
-        self._update_action_button_text()
+        self._set_submit_button_text()
+
+    def _set_submit_button_text(self):
+        """Keep the intake action label consistent with the mandatory
+          flow."""
+        self.submit_btn.setText("Confirm & Send for Director Review")

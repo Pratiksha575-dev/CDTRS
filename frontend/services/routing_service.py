@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from models.document import DocumentModel
 from models.enums import RouteTypeEnum
@@ -7,22 +7,84 @@ from repositories.provider import get_repository
 
 class RoutingService:
     """
-    Client service managing Director Secretary (DS) routing decisions,
-    Director returns, workflow remark persistence, and Director remark routing extraction.
+    Client service for DS-controlled document routing.
+
+    The backend is authoritative for all routing, permissions, workflow state,
+    branch state, and assignments. OCR/routing-intelligence suggestions are
+    advisory only and never perform routing automatically.
     """
 
     def __init__(self):
         pass
 
-    def route_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
-        """DS routes document to Director for review.
-        Backend resolves routing to the Director role — no hardcoded user ID required.
+    # =========================================================
+    # CANONICAL BRANCH ROUTING
+    # =========================================================
+
+    def route_canonical_branches(
+        self,
+        document_id: int,
+        branches: List[Dict[str, Any]],
+        expected_version: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
+        DS explicitly creates one or more canonical routing branches.
+
+        Supported backend branch types include:
+        - DEPARTMENT_HOD
+        - DIRECT_EMPLOYEE
+        - TSO
+
+        No Director remark is interpreted here.
+        """
+        if not branches:
+            raise ValueError("At least one routing branch is required.")
+
+        repo = get_repository()
+        return repo.create_branches(
+            document_id=document_id,
+            branches=branches,
+            expected_version=expected_version,
+        )
+
+    def assign_branch_employee(
+        self,
+        document_id: int,
+        routing_id: int,
+        assigned_to_user_id: int,
+        instructions: Optional[str] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Assigns an employee to an existing canonical routing branch."""
+        if not assigned_to_user_id:
+            raise ValueError("An employee must be selected.")
+
+        repo = get_repository()
+        return repo.assign_branch_employee(
+            document_id=document_id,
+            routing_id=routing_id,
+            assigned_to_user_id=assigned_to_user_id,
+            instructions=instructions,
+            change_reason=change_reason,
+            expected_version=expected_version,
+        )
+
+    # =========================================================
+    # LEGACY / SINGLE ROUTING COMPATIBILITY
+    # =========================================================
+
+    def route_to_director(
+        self,
+        document_id: int,
+        remarks: Optional[str] = None,
+    ) -> DocumentModel:
+        """DS routes a newly registered document to the Director for review."""
         repo = get_repository()
         return repo.route_document(
             document_id=document_id,
             route_type=RouteTypeEnum.DS_TO_DIRECTOR.value,
-            remarks=remarks or "Forwarded for Director Review"
+            remarks=remarks or "Forwarded for Director Review",
         )
 
     def route_to_hod(
@@ -30,33 +92,30 @@ class RoutingService:
         document_id: int,
         department_id: Optional[int] = None,
         remarks: Optional[str] = None,
-        department_name: Optional[str] = None
+        department_name: Optional[str] = None,
     ) -> DocumentModel:
-        """DS routes document to HOD for departmental processing."""
+        """Legacy single-route wrapper for DS -> Department/HOD."""
         repo = get_repository()
+
         if department_id is None and department_name:
-            # Look up real department ID from the backend
-            try:
-                departments = repo.get_departments()
-                for dept in departments:
-                    if dept.name.lower() == department_name.lower() or (
-                        dept.name.lower() in department_name.lower()
-                        or department_name.lower() in dept.name.lower()
-                    ):
-                        department_id = dept.id
-                        break
-            except Exception:
-                pass
+            departments = repo.get_departments()
+            for dept in departments:
+                name = (dept.name or "").lower()
+                target = department_name.lower().strip()
+                if name == target or name in target or target in name:
+                    department_id = dept.id
+                    break
+
         if department_id is None:
             raise ValueError(
-                f"Cannot route to HOD: department ID is unknown for '{department_name}'. "
-                "Ensure the backend is connected and departments are registered."
+                f"Cannot route to HOD: department ID is unknown for '{department_name}'."
             )
+
         return repo.route_document(
             document_id=document_id,
             route_type=RouteTypeEnum.DS_TO_HOD.value,
             to_department_id=department_id,
-            remarks=remarks
+            remarks=remarks,
         )
 
     def route_to_employee(
@@ -64,84 +123,153 @@ class RoutingService:
         document_id: int,
         employee_id: int,
         remarks: Optional[str] = None,
-        employee_name: Optional[str] = None
+        employee_name: Optional[str] = None,
+        requires_hod_validation: bool = False,
     ) -> DocumentModel:
-        """DS directly routes document to identified Employee."""
+        """Legacy single-route wrapper for DS -> direct Employee."""
+        if not employee_id:
+            raise ValueError("An employee must be selected.")
+
         repo = get_repository()
         return repo.route_document(
             document_id=document_id,
             route_type=RouteTypeEnum.DS_TO_EMPLOYEE.value,
             to_user_id=employee_id,
-            remarks=remarks
+            remarks=remarks,
+            requires_hod_validation=requires_hod_validation,
         )
 
-    def return_to_ds(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
-        """Director returns reviewed document back to DS."""
+    def return_to_ds(
+        self,
+        document_id: int,
+        remarks: Optional[str] = None,
+    ) -> DocumentModel:
+        """Director returns the reviewed document to DS."""
         repo = get_repository()
         return repo.return_to_ds(document_id=document_id, remarks=remarks)
 
-    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
-        """DS forwards employee progress update to Director as follow-up."""
+    def forward_followup_to_director(
+        self,
+        document_id: int,
+        remarks: Optional[str] = None,
+    ) -> DocumentModel:
+        """DS forwards an execution/progress follow-up to Director."""
         repo = get_repository()
-        return repo.forward_followup_to_director(document_id=document_id, remarks=remarks)
+        return repo.forward_followup_to_director(
+            document_id=document_id,
+            remarks=remarks,
+        )
 
-    def save_director_remark(self, document_id: int, remark: str) -> DocumentModel:
-        """Director saves remark on document without returning it."""
+    def save_director_remark(
+        self,
+        document_id: int,
+        remark: str,
+    ) -> DocumentModel:
+        """Director saves a natural-language remark independently of return."""
         repo = get_repository()
-        return repo.save_director_remark(document_id=document_id, remark=remark)
+        return repo.save_director_remark(
+            document_id=document_id,
+            remark=remark,
+        )
 
-    def save_hod_remark(self, document_id: int, remark: str) -> DocumentModel:
-        """HOD saves remark on document without delegating assignment."""
+    def save_hod_remark(
+        self,
+        document_id: int,
+        remark: str,
+    ) -> DocumentModel:
+        """HOD saves a remark independently of work assignment."""
         repo = get_repository()
-        return repo.save_hod_remark(document_id=document_id, remark=remark)
+        return repo.save_hod_remark(
+            document_id=document_id,
+            remark=remark,
+        )
+
+    # =========================================================
+    # DIRECTOR REVIEW COMPATIBILITY
+    # =========================================================
+
+    def submit_director_review(
+        self,
+        document_id: int,
+        decision: str,
+        remark_text: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compatibility wrapper for older UI code.
+
+        The current workflow does NOT require a machine-readable CONTINUE/CLOSE
+        decision from the Director. New UI should use save_director_remark()
+        and return_to_ds() separately.
+        """
+        repo = get_repository()
+        return repo.submit_director_review(
+            document_id=document_id,
+            decision=decision,
+            remark_text=remark_text,
+            expected_version=expected_version,
+        )
+
+    # =========================================================
+    # ADVISORY ROUTING ANALYSIS
+    # =========================================================
 
     def analyze_director_remark(self, remark: str) -> Dict[str, Any]:
         """
-        Analyzes Director remark text for explicit routing/assignment instructions.
-        Strictly differentiates between a general review comment (e.g. 'Reviewed', 'Please check')
-        and an explicit delegation/assignment directive (e.g. 'Route to Finance', 'Assign to Rahul Sharma').
-        Employee names are matched against the live backend user list — not a hardcoded table.
-        """
-        t = f" {(remark or '').lower().strip()} "
-        dept = None
-        dept_id = None
-        emp = None
-        emp_id = None
+        Returns an advisory preview only.
 
-        # 1. Check for specific individual employee name against live backend users
+        This method NEVER calls a routing endpoint and NEVER mutates workflow
+        state. A DS user must explicitly choose and confirm routing through
+        the canonical routing UI.
+        """
+        text = (remark or "").strip()
+
+        if not text:
+            return {
+                "has_routing_instruction": False,
+                "suggested_department": None,
+                "suggested_department_id": None,
+                "suggested_employee": None,
+                "suggested_employee_id": None,
+                "confidence": 0,
+                "source": None,
+                "is_advisory": True,
+                "authoritative": False,
+            }
+
+        repo = get_repository()
+        department = None
+        department_id = None
+        employee = None
+        employee_id = None
+
+        # Employee matching is deliberately suggestion-only.
         try:
-            repo = get_repository()
             live_users = repo.get_users(role="Employee")
+            lowered = text.lower()
             for user in live_users:
-                name_lower = user.full_name.lower()
-                first_name = name_lower.split()[0] if name_lower.split() else ""
-                if (
-                    f" {name_lower} " in t
-                    or f" {first_name} " in t
-                    or f" {first_name}," in t
-                    or f" {first_name}." in t
-                    or f" {first_name}:" in t
-                ):
-                    emp = user.full_name
-                    emp_id = user.id
-                    dept = user.department_name
-                    dept_id = user.department_id
+                name = (user.full_name or "").strip()
+                if not name:
+                    continue
+                first_name = name.split()[0]
+                if name.lower() in lowered:
+                    employee = name
+                    employee_id = user.id
+                    department = user.department_name
+                    department_id = user.department_id
+                    break
+                if first_name and f" {first_name.lower()} " in f" {lowered} ":
+                    employee = name
+                    employee_id = user.id
+                    department = user.department_name
+                    department_id = user.department_id
                     break
         except Exception:
-            # If backend unreachable during remark analysis, proceed without employee match
             pass
 
-        # 2. Check for explicit routing/assignment action intent
-        routing_action_markers = (
-            "assign", "route", "send", "forward", "refer", "hand over",
-            "action by", "directed to", "to be handled by", "delegate",
-            "task", "expedite", "for action", "for implementation", "for audit"
-        )
-        has_routing_intent = any(marker in t for marker in routing_action_markers) or (emp is not None)
-
-        # 3. Department detection via keyword matching (resolved dynamically from backend departments)
-        if has_routing_intent and not dept:
-            dept_keywords = [
+        # Department matching is also suggestion-only.
+        if not department:
+            department_keywords = (
                 ("finance", "Finance"),
                 ("accounts", "Finance"),
                 ("budget", "Finance"),
@@ -160,33 +288,36 @@ class RoutingService:
                 ("hardware", "Technical"),
                 ("network", "Technical"),
                 ("cyber", "Technical"),
-                ("it", "Technical"),
-            ]
-            for keyword, dept_name in dept_keywords:
-                if keyword in t:
-                    dept = dept_name
-                    # Resolve dept_id from backend
+                ("information technology", "Technical"),
+            )
+
+            lowered_padded = f" {text.lower()} "
+            for keyword, department_name in department_keywords:
+                if keyword in lowered_padded:
+                    department = department_name
                     try:
-                        repo = get_repository()
-                        for bd in repo.get_departments():
-                            if bd.name.lower() == dept_name.lower():
-                                dept_id = bd.id
+                        for dept in repo.get_departments():
+                            if (dept.name or "").lower() == department_name.lower():
+                                department_id = dept.id
                                 break
                     except Exception:
                         pass
                     break
 
-        # Must have both routing intent AND an identified department or employee
-        has_instruction = bool(has_routing_intent and (dept or emp))
-        conf = 96 if (dept and emp) else (92 if (dept or emp) else 0)
+        # This flag describes only whether the advisory parser found something.
+        has_suggestion = bool(department or employee)
+        confidence = 96 if department and employee else 92 if has_suggestion else 0
+
         return {
-            "has_routing_instruction": has_instruction,
-            "suggested_department": dept if has_instruction else None,
-            "suggested_department_id": dept_id if has_instruction else None,
-            "suggested_employee": emp if has_instruction else None,
-            "suggested_employee_id": emp_id if has_instruction else None,
-            "confidence": conf,
-            "source": "Director Remark" if has_instruction else None
+            "has_routing_instruction": has_suggestion,
+            "suggested_department": department if has_suggestion else None,
+            "suggested_department_id": department_id if has_suggestion else None,
+            "suggested_employee": employee if has_suggestion else None,
+            "suggested_employee_id": employee_id if has_suggestion else None,
+            "confidence": confidence,
+            "source": "Director Remark" if has_suggestion else None,
+            "is_advisory": True,
+            "authoritative": False,
         }
 
 

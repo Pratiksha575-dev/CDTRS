@@ -91,6 +91,7 @@ class APIClient:
         self._custom_base_url = base_url
         self._custom_timeout = timeout
         self._auth_token: Optional[str] = None
+        self._active_context_id: Optional[int] = None
         self._session = requests.Session() if HAS_REQUESTS else None
         if self._session:
             self._session.trust_env = False
@@ -114,19 +115,30 @@ class APIClient:
         """Sets the active authentication token (e.g. JWT Bearer token)."""
         self._auth_token = token
 
+    def set_active_context_id(self, context_id: Optional[int]) -> None:
+        """Sets the active operational work context ID for multi-context users."""
+        self._active_context_id = context_id
+
+    def get_active_context_id(self) -> Optional[int]:
+        """Returns the currently active work context ID."""
+        return self._active_context_id
+
     def clear_auth_token(self) -> None:
-        """Clears stored authentication token upon logout."""
+        """Clears stored authentication token and active context upon logout."""
         self._auth_token = None
+        self._active_context_id = None
 
     def get_headers(self, custom_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """Constructs headers including Authorization Bearer token if present."""
+        """Constructs headers including Authorization Bearer token and active context if present."""
         headers = {
             "Accept": "application/json",
             "User-Agent": f"{settings.app_name}/{settings.app_version}"
         }
-        #print(f"DEBUG: Current auth token is -> {self._auth_token}") # <-- Add this line
         if self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
+
+        if self._active_context_id is not None:
+            headers["X-Work-Context-Id"] = str(self._active_context_id)
 
         if custom_headers:
             headers.update(custom_headers)

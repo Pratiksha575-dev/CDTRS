@@ -10,6 +10,8 @@ class Endpoints:
     AUTH_LOGOUT = "/auth/logout"
     AUTH_CHANGE_PASSWORD = "/auth/change-password"
     AUTH_RESET_PASSWORD = "/auth/reset-password"
+    AUTH_CONTEXTS = "/auth/contexts"
+    AUTH_SWITCH_CONTEXT = "/auth/switch-context"
 
     # --- Users & Departments ---
     USERS_LIST = "/users"
@@ -17,6 +19,8 @@ class Endpoints:
     DEPARTMENTS_LIST = "/departments"
     DEPARTMENT_EMPLOYEES = lambda dept_id: f"/departments/{dept_id}/employees"
     EMPLOYEES_LIST = "/employees"
+    ADMIN_TSO = "/admin/tso"
+    ADMIN_ACTIVATE_TSO = lambda user_id: f"/admin/tso/{user_id}/activate"
 
     # --- Mail & Intake Pipeline ---
     INTAKE_LIST = "/intake"
@@ -35,19 +39,26 @@ class Endpoints:
 
     # --- Document Routing (DS Workflow) ---
     DOCUMENT_ROUTE = lambda doc_id: f"/documents/{doc_id}/route"
+    DOCUMENT_BRANCHES = lambda doc_id: f"/documents/{doc_id}/branches"
     DOCUMENT_RETURN_TO_DS = lambda doc_id: f"/documents/{doc_id}/return-to-ds"
     DOCUMENT_FOLLOW_UP = lambda doc_id: f"/documents/{doc_id}/follow-up"
+    DOCUMENT_DIRECTOR_REVIEW = lambda doc_id: f"/documents/{doc_id}/director-review"
 
     # --- Remarks ---
     DIRECTOR_REMARK = lambda doc_id: f"/documents/{doc_id}/director-remark"
     HOD_REMARK = lambda doc_id: f"/documents/{doc_id}/hod-remark"
     DOCUMENT_REMARKS_HISTORY = lambda doc_id: f"/documents/{doc_id}/remarks"
 
-    # --- Work Assignment (HOD -> Employee Delegation & Multi-Assign) ---
+    # --- Work Assignment ---
     DOCUMENT_ASSIGN = lambda doc_id: f"/documents/{doc_id}/assign"
+    DOCUMENT_BRANCH_ASSIGN = lambda doc_id, routing_id: f"/documents/{doc_id}/branches/{routing_id}/assign"
     DOCUMENT_ASSIGN_MULTI = lambda doc_id: f"/documents/{doc_id}/assign-multi"
     DOCUMENT_ASSIGNMENTS = lambda doc_id: f"/documents/{doc_id}/assignments"
     DOCUMENT_ASSIGNMENT_UPDATE = lambda doc_id, assign_id: f"/documents/{doc_id}/assignments/{assign_id}"
+
+    # Team assignment endpoints added by the current backend contract.
+    DOCUMENT_HOD_ASSIGN_TEAM = lambda doc_id: f"/documents/{doc_id}/hod-assign-team"
+    DOCUMENT_DS_ASSIGN_TEAM = lambda doc_id: f"/documents/{doc_id}/ds-assign-team"
 
     # --- Employee Progress Updates & HOD Validation ---
     PROGRESS_CREATE = lambda doc_id: f"/documents/{doc_id}/progress"

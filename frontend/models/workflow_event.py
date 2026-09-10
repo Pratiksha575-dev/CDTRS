@@ -6,7 +6,13 @@ from typing import Any, Dict, Optional
 class WorkflowEventModel:
     """
     Frontend domain model representing a chronological document-centric activity event.
+
+    The action field remains the backend event/action identifier after parsing.
+    Human-readable labels are provided separately through ACTION_LABELS so that
+    new team-assignment events can be displayed without changing existing
+    workflow-history behavior.
     """
+
     id: Optional[int] = None
     document_id: int = 0
     action: str = ""
@@ -19,10 +25,51 @@ class WorkflowEventModel:
     timestamp: Optional[str] = None
     created_at: Optional[str] = None
 
-    # Backward compatibility with existing workflow_history table
+    # Backend workflow action -> UI label.
+    ACTION_LABELS = {
+        "DOCUMENT_RECEIVED": "Document Ingested",
+        "DOCUMENT_INGESTED": "Document Ingested",
+        "ATTACHMENT_UPLOADED": "Attachment Uploaded",
+        "ROUTED_DS_TO_DIRECTOR": "Routed to Director",
+        "ROUTED_INITIAL_DIRECTOR_REVIEW": "Routed to Director",
+        "DIRECTOR_REMARK_SAVED": "Director Review Completed",
+        "RETURNED_TO_DS": "Returned to DS",
+        "RETURN_TO_DS": "Returned to DS",
+        "ROUTED_DS_TO_HOD": "Routed to Department",
+        "ROUTED_POST_REVIEW_TO_HOD": "Routed to Department",
+        "ROUTED_DS_TO_EMPLOYEE": "Routed to Staff",
+        "ROUTED_POST_REVIEW_TO_EMPLOYEE": "Routed to Staff",
+        "HOD_REMARK_SAVED": "HOD Remark Saved",
+        "EMPLOYEE_ASSIGNED": "Assigned to Staff",
+        "ASSIGNED_TO_EMPLOYEE": "Assigned to Staff",
+
+        # Team / multi-member assignment events.
+        "DS_TEAM_ASSIGNED": "DS Assigned Team",
+        "HOD_TEAM_ASSIGNED": "HOD Assigned Team",
+        "HOD_WORK_ASSIGNED": "HOD Assigned Work",
+        "HOD_ASSIGNMENT_UPDATED": "HOD Updated Assignment",
+        "HOD_TEAM_CREATED": "HOD Created Team",
+        "HOD_ASSIGNMENT_COMPLETED": "HOD Assignment Completed",
+
+        "PROGRESS_UPDATED": "Progress Update",
+        "PROGRESS_SUBMITTED": "Progress Update",
+        "FOLLOW_UP_TO_DIRECTOR": "Follow-up to Director",
+        "FOLLOW_UP_FORWARDED_TO_DIRECTOR": "Follow-up to Director",
+        "DOCUMENT_CLOSED": "Document Closed",
+    }
+
     @property
     def user(self) -> str:
+        """Backward-compatible actor label used by existing history views."""
         return self.performed_by_name or self.from_role or "System"
+
+    @property
+    def display_action(self) -> str:
+        """Human-readable action label for workflow-history UI."""
+        return self.ACTION_LABELS.get(
+            str(self.action or "").upper(),
+            str(self.action or "").replace("_", " ").title(),
+        )
 
     def get(self, key: str, default: Any = None) -> Any:
         if hasattr(self, key):
@@ -39,30 +86,6 @@ class WorkflowEventModel:
     def from_dict(cls, data: Dict[str, Any]) -> "WorkflowEventModel":
         raw_time = str(data.get("timestamp") or data.get("created_at") or "")
         raw_action = str(data.get("action", ""))
-
-        action_map = {
-            "DOCUMENT_RECEIVED": "Document Ingested",
-            "DOCUMENT_INGESTED": "Document Ingested",
-            "ATTACHMENT_UPLOADED": "Attachment Uploaded",
-            "ROUTED_DS_TO_DIRECTOR": "Routed to Director",
-            "ROUTED_INITIAL_DIRECTOR_REVIEW": "Routed to Director",
-            "DIRECTOR_REMARK_SAVED": "Director Review Completed",
-            "RETURNED_TO_DS": "Returned to DS",
-            "RETURN_TO_DS": "Returned to DS",
-            "ROUTED_DS_TO_HOD": "Routed to Department",
-            "ROUTED_POST_REVIEW_TO_HOD": "Routed to Department",
-            "ROUTED_DS_TO_EMPLOYEE": "Routed to Staff",
-            "ROUTED_POST_REVIEW_TO_EMPLOYEE": "Routed to Staff",
-            "HOD_REMARK_SAVED": "HOD Remark Saved",
-            "EMPLOYEE_ASSIGNED": "Assigned to Staff",
-            "ASSIGNED_TO_EMPLOYEE": "Assigned to Staff",
-            "PROGRESS_UPDATED": "Progress Update",
-            "PROGRESS_SUBMITTED": "Progress Update",
-            "FOLLOW_UP_TO_DIRECTOR": "Follow-up to Director",
-            "FOLLOW_UP_FORWARDED_TO_DIRECTOR": "Follow-up to Director",
-            "DOCUMENT_CLOSED": "Document Closed",
-        }
-        clean_action = action_map.get(raw_action.upper(), raw_action.replace("_", " ").title())
 
         display_time = raw_time
         if "T" in raw_time:
@@ -96,7 +119,10 @@ class WorkflowEventModel:
         return cls(
             id=data.get("id"),
             document_id=data.get("document_id", 0),
-            action=clean_action,
+            # Keep the canonical backend action here. Existing callers that
+            # compare action values continue to work, while display_action
+            # supplies the readable label.
+            action=raw_action,
             from_role=data.get("from_role"),
             to_role=data.get("to_role"),
             remarks=data.get("remarks") or data.get("details"),
@@ -104,7 +130,7 @@ class WorkflowEventModel:
             performed_by=data.get("performed_by") or data.get("performed_by_user_id", 0),
             performed_by_name=actor_name,
             timestamp=display_time,
-            created_at=raw_time
+            created_at=raw_time,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -112,6 +138,7 @@ class WorkflowEventModel:
             "id": self.id,
             "document_id": self.document_id,
             "action": self.action,
+            "display_action": self.display_action,
             "from_role": self.from_role,
             "to_role": self.to_role,
             "remarks": self.remarks,
@@ -120,5 +147,5 @@ class WorkflowEventModel:
             "performed_by_name": self.performed_by_name,
             "user": self.user,
             "timestamp": self.timestamp,
-            "created_at": self.created_at
+            "created_at": self.created_at,
         }

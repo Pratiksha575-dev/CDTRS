@@ -8,8 +8,11 @@ from repositories.provider import get_repository
 
 class NotificationService:
     """
-    Client service managing in-app user notifications, read receipts,
-    and centralized workflow action reminder resolution.
+    Client service for in-app notifications and workflow reminders.
+
+    The backend remains authoritative for actual notification delivery.
+    Local recipient resolution is only a UI/helper view of the current
+    document state.
     """
 
     def __init__(self):
@@ -18,79 +21,180 @@ class NotificationService:
     def get_notifications(
         self,
         user_id: Optional[int] = None,
-        unread_only: bool = False
+        unread_only: bool = False,
     ) -> List[NotificationModel]:
-        """Retrieves user notifications."""
+        """Retrieve notifications for the active user/context."""
         repo = get_repository()
-        return repo.get_notifications(user_id=user_id, unread_only=unread_only)
+        return repo.get_notifications(
+            user_id=user_id,
+            unread_only=unread_only,
+        )
 
     def mark_as_read(self, notification_id: int) -> bool:
-        """Marks a notification as read."""
+        """Mark a notification as read."""
         repo = get_repository()
         return repo.mark_notification_read(notification_id)
 
     # =========================================================
-    # CENTRALIZED ACTION REMINDER RESOLUTION
+    # REMINDER RECIPIENT RESOLUTION
     # =========================================================
 
-    def resolve_reminder_recipient(
+    def _coerce_document(
         self,
-        document: Union[DocumentModel, int, Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Determines the single authoritative downstream reminder recipient
-        strictly based on the document's CURRENT workflow state.
-
-        RULE 1 (EMPLOYEE ASSIGNED):
-        If assigned_employee_id != None, reminder goes exclusively to that employee.
-        (Never additionally sent to HOD).
-
-        RULE 2 (NO EMPLOYEE, BUT DEPARTMENT EXISTS):
-        If department exists and no employee assigned, resolves the HOD responsible
-        for that department.
-
-        RULE 3 (NO DEPARTMENT & NO EMPLOYEE):
-        Returns None. Unassigned/unrouted document.
-
-        RULE 4 (CLOSED):
-        Returns None. CLOSED is the only terminal completed state.
-        """
+        document: Union[DocumentModel, int, Dict[str, Any]],
+    ) -> Optional[DocumentModel]:
         if isinstance(document, int):
             from services.document_service import document_service
-            doc = document_service.get_document(document)
-        elif isinstance(document, dict):
-            doc = DocumentModel.from_dict(document)
-        else:
-            doc = document
+            return document_service.get_document(document)
 
-        if not doc:
-            return None
+        if isinstance(document, dict):
+            return DocumentModel.from_dict(document)
 
-        # Rule 4: CLOSED -> Never generate reminder
+        return document
+
+    def _is_closed(self, doc: DocumentModel) -> bool:
         status_val = (doc.status or "").lower()
         stage_val = (doc.current_stage or "").lower()
-        if status_val == DocumentStatusEnum.CLOSED.value.lower() or stage_val == WorkflowStageEnum.CLOSED.value.lower():
-            return None
+
+        return (
+            status_val == DocumentStatusEnum.CLOSED.value.lower()
+            or stage_val == WorkflowStageEnum.CLOSED.value.lower()
+        )
+
+    def resolve_reminder_recipients(
+        self,
+        document: Union[DocumentModel, int, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Resolve the currently responsible downstream users.
+
+        For team assignments, every active team member is represented.
+        For a single assignment, the assigned employee is represented.
+        If no employee is assigned but a department branch is active, the
+        responsible HOD is represented.
+
+        This method does not send notifications and does not change workflow.
+        """
+        doc = self._coerce_document(document)
+
+        if not doc or self._is_closed(doc):
+            return []
 
         repo = get_repository()
-        all_users = repo.get_users()
 
-        # Rule 1: Assigned Employee
+        # Team-aware path. DocumentModel exposes active assignment/member
+        # helpers while retaining legacy single-assignee compatibility.
+        recipients: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        for assignment in getattr(doc, "active_work_assignments", []) or []:
+            members = getattr(assignment, "active_members", []) or []
+
+            # A team assignment is represented by its member rows.
+            for member in members:
+                user_id = getattr(member, "user_id", None)
+                if not user_id or user_id in seen_ids:
+                    continue
+
+                user = None
+                try:
+                    user = next(
+                        (u for u in repo.get_users() if u.id == user_id),
+                        None,
+                    )
+                except Exception:
+                    pass
+
+                if user:
+                    user_name = user.full_name
+                    role = getattr(user, "role", None) or "Employee"
+                    department_name = (
+                        getattr(user, "department_name", None)
+                        or doc.target_department_name
+                    )
+                else:
+                    user_name = getattr(member, "user_name", None) or "Employee"
+                    role = "Employee"
+                    department_name = doc.target_department_name
+
+                recipients.append({
+                    "recipient_type": "EMPLOYEE",
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "role": role,
+                    "department_name": department_name,
+                    "document_id": doc.id,
+                    "document_reference": doc.reference,
+                    "document_title": doc.title,
+                    "assignment_id": getattr(assignment, "id", None),
+                    "team_name": getattr(assignment, "team_name", None),
+                })
+                seen_ids.add(user_id)
+
+            # Compatibility: an assignment may have a primary assignee even
+            # when member rows are absent in an older response.
+            primary_id = getattr(assignment, "assigned_to_user_id", None)
+            if primary_id and primary_id not in seen_ids:
+                try:
+                    user = next(
+                        (u for u in repo.get_users() if u.id == primary_id),
+                        None,
+                    )
+                except Exception:
+                    user = None
+
+                recipients.append({
+                    "recipient_type": "EMPLOYEE",
+                    "user_id": primary_id,
+                    "user_name": (
+                        getattr(user, "full_name", None)
+                        or getattr(assignment, "assigned_to_name", None)
+                        or "Employee"
+                    ),
+                    "role": getattr(user, "role", None) or "Employee",
+                    "department_name": (
+                        getattr(user, "department_name", None)
+                        or doc.target_department_name
+                    ),
+                    "document_id": doc.id,
+                    "document_reference": doc.reference,
+                    "document_title": doc.title,
+                    "assignment_id": getattr(assignment, "id", None),
+                    "team_name": getattr(assignment, "team_name", None),
+                })
+                seen_ids.add(primary_id)
+
+        if recipients:
+            return recipients
+
+        # Legacy/single employee compatibility.
         if doc.assigned_employee_id is not None:
-            emp_user = next((u for u in all_users if u.id == doc.assigned_employee_id), None)
+            try:
+                all_users = repo.get_users()
+                emp_user = next(
+                    (u for u in all_users if u.id == doc.assigned_employee_id),
+                    None,
+                )
+            except Exception:
+                emp_user = None
+
             if emp_user:
-                return {
+                return [{
                     "recipient_type": "EMPLOYEE",
                     "user_id": emp_user.id,
                     "user_name": emp_user.full_name,
-                    "role": "Employee",
-                    "department_name": emp_user.department_name or doc.target_department_name,
+                    "role": getattr(emp_user, "role", None) or "Employee",
+                    "department_name": (
+                        getattr(emp_user, "department_name", None)
+                        or doc.target_department_name
+                    ),
                     "document_id": doc.id,
                     "document_reference": doc.reference,
-                    "document_title": doc.title
-                }
-            elif doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned":
-                return {
+                    "document_title": doc.title,
+                }]
+
+            if doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned":
+                return [{
                     "recipient_type": "EMPLOYEE",
                     "user_id": doc.assigned_employee_id,
                     "user_name": doc.assigned_employee_name,
@@ -98,54 +202,102 @@ class NotificationService:
                     "department_name": doc.target_department_name,
                     "document_id": doc.id,
                     "document_reference": doc.reference,
-                    "document_title": doc.title
-                }
+                    "document_title": doc.title,
+                }]
 
-        # Rule 2: Department exists, No Employee -> Resolve Department HOD
+        # No employee: resolve department HOD.
         dept_id = doc.target_department_id
         dept_name = doc.target_department_name or getattr(doc, "department", None)
+
         if dept_name in ("Not Specified", "-", "General", None):
             dept_name = None
 
         if dept_id or dept_name:
-            hod_users = [u for u in all_users if (u.role or "").lower() in ("hod", "head of department")]
+            try:
+                all_users = repo.get_users()
+            except Exception:
+                all_users = []
+
+            hod_users = [
+                u for u in all_users
+                if (getattr(u, "role", "") or "").lower()
+                in ("hod", "head of department")
+            ]
+
             matching_hod = None
+
             if dept_id:
-                matching_hod = next((u for u in hod_users if u.department_id == dept_id), None)
+                matching_hod = next(
+                    (u for u in hod_users if u.department_id == dept_id),
+                    None,
+                )
+
             if not matching_hod and dept_name:
-                matching_hod = next((u for u in hod_users if (u.department_name or "").lower() == dept_name.lower()), None)
+                matching_hod = next(
+                    (
+                        u for u in hod_users
+                        if (getattr(u, "department_name", "") or "").lower()
+                        == dept_name.lower()
+                    ),
+                    None,
+                )
 
             if matching_hod:
-                return {
+                return [{
                     "recipient_type": "HOD",
                     "user_id": matching_hod.id,
                     "user_name": matching_hod.full_name,
                     "role": "HOD",
-                    "department_name": matching_hod.department_name or dept_name,
+                    "department_name": (
+                        matching_hod.department_name or dept_name
+                    ),
                     "document_id": doc.id,
                     "document_reference": doc.reference,
-                    "document_title": doc.title
-                }
+                    "document_title": doc.title,
+                }]
 
-        # Rule 3: No department and no employee
-        return None
+        return []
+
+    def resolve_reminder_recipient(
+        self,
+        document: Union[DocumentModel, int, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Backward-compatible singular recipient helper.
+
+        For a team, this returns the first active member only. Actual
+        notification delivery should use the backend reminder endpoint,
+        which remains authoritative.
+        """
+        recipients = self.resolve_reminder_recipients(document)
+        return recipients[0] if recipients else None
+
+    # =========================================================
+    # OFFICIAL REMINDER DELIVERY
+    # =========================================================
 
     def send_action_reminder(
         self,
         document_id: int,
-        message: Optional[str] = None
+        message: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Dispatches an official action reminder to the single resolved recipient.
-        In API mode, delegates to backend send_document_reminder API.
-        In Mock mode, resolves recipient locally and logs event.
+        Dispatch an official reminder through the backend.
+
+        The backend decides the authoritative recipient/delivery channel.
         """
         repo = get_repository()
+
         try:
-            res = repo.send_document_reminder(document_id, message=message)
+            res = repo.send_document_reminder(
+                document_id,
+                message=message,
+            )
+
             if res and res.get("status") == "success":
                 from services.event_bus import event_bus
                 event_bus.notify_workflow_updated(document_id)
+
                 return {
                     "recipient_type": "RESPONSIBLE_USER",
                     "user_id": res.get("recipient_user_id"),
@@ -155,31 +307,39 @@ class NotificationService:
                     "channel_used": res.get("channel_used"),
                     "email_dispatched": res.get("email_dispatched", False),
                     "document_id": document_id,
-                    "message": res.get("message")
+                    "message": res.get("message"),
                 }
+
             return None
+
         except Exception:
             return None
 
     def send_all_due_reminders(self) -> List[Dict[str, Any]]:
-        """
-        Scans all active, non-closed documents and dispatches reminders to their
-        currently resolved recipients according to standard routing rules.
-        """
+        """Dispatch reminders for active, non-closed priority documents."""
         repo = get_repository()
         all_docs = repo.get_documents()
+
         due_docs = [
             d for d in all_docs
-            if (d.status or "").lower() != DocumentStatusEnum.CLOSED.value.lower()
-            and (d.current_stage or "").lower() != WorkflowStageEnum.CLOSED.value.lower()
-            and (d.priority or "").lower() in ("red", "orange", "high", "urgent", "medium")
+            if (d.status or "").lower()
+            != DocumentStatusEnum.CLOSED.value.lower()
+            and (d.current_stage or "").lower()
+            != WorkflowStageEnum.CLOSED.value.lower()
+            and (d.priority or "").lower()
+            in ("red", "orange", "high", "urgent", "medium")
         ]
 
         dispatched = []
-        for d in due_docs:
-            rec = self.send_action_reminder(d.id)
-            if rec:
-                dispatched.append({"document": d, "recipient": rec})
+
+        for doc in due_docs:
+            result = self.send_action_reminder(doc.id)
+            if result:
+                dispatched.append({
+                    "document": doc,
+                    "recipient": result,
+                })
+
         return dispatched
 
 

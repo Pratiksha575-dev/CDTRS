@@ -410,8 +410,16 @@ class DashboardPage(QWidget):
                 )
             ]
 
-            unassigned_count = sum(1 for d in hod_docs if d.current_stage == WorkflowStageEnum.HOD.value and not d.assigned_employee_name)
-            assigned_count = sum(1 for d in hod_docs if d.current_stage == WorkflowStageEnum.EMPLOYEE.value or bool(d.assigned_employee_name))
+            unassigned_count = sum(
+                1 for d in hod_docs
+                if d.current_stage == WorkflowStageEnum.HOD.value
+                and not self._has_active_assignment(d)
+            )
+            assigned_count = sum(
+                1 for d in hod_docs
+                if d.current_stage == WorkflowStageEnum.EMPLOYEE.value
+                or self._has_active_assignment(d)
+            )
             progress_count = sum(1 for d in hod_docs if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value)
             critical_count = sum(1 for d in hod_docs if (d.priority or "").lower() in ("high", "red"))
 
@@ -433,8 +441,7 @@ class DashboardPage(QWidget):
             else:
                 emp_docs = [
                     d for d in self.documents
-                    if d.assigned_employee_id == emp_id
-                    or (d.current_owner_id == emp_id and d.current_stage == WorkflowStageEnum.EMPLOYEE.value)
+                    if self._is_employee_assigned(d, emp_id)
                 ]
 
             active_count = len(emp_docs)
@@ -490,6 +497,57 @@ class DashboardPage(QWidget):
                     and (d.status or "").lower() != "closed"
                 )
                 self.act_card_deadlines["sub_label"].setText(f"{upcoming_active_cnt} active documents due within 7 days")
+
+    @staticmethod
+    def _has_active_assignment(doc) -> bool:
+        assignments = getattr(doc, "work_assignments", None)
+        if assignments is None:
+            assignments = getattr(doc, "assignments", None)
+
+        for assignment in assignments or []:
+            if isinstance(assignment, dict):
+                if assignment.get("is_active", True) is not False:
+                    return True
+            elif getattr(assignment, "is_active", True) is not False:
+                return True
+
+        return bool(getattr(doc, "assigned_employee_name", None))
+
+    @staticmethod
+    def _is_employee_assigned(doc, employee_id: int) -> bool:
+        if (
+            doc.assigned_employee_id == employee_id
+            or (
+                doc.current_owner_id == employee_id
+                and doc.current_stage == WorkflowStageEnum.EMPLOYEE.value
+            )
+        ):
+            return True
+
+        for assignment in getattr(doc, "work_assignments", None) or []:
+            if isinstance(assignment, dict):
+                if assignment.get("is_active", True) is False:
+                    continue
+                if assignment.get("assigned_to_user_id") == employee_id:
+                    return True
+                for member in assignment.get("members") or []:
+                    if isinstance(member, dict) and member.get("user_id") == employee_id:
+                        return True
+            else:
+                if getattr(assignment, "is_active", True) is False:
+                    continue
+                if getattr(assignment, "assigned_to_user_id", None) == employee_id:
+                    return True
+                if any(
+                    getattr(member, "user_id", None) == employee_id
+                    for member in (getattr(assignment, "members", None) or [])
+                ):
+                    return True
+
+        return any(
+            isinstance(da, dict) and da.get("assigned_employee_id") == employee_id
+            for da in getattr(doc, "doc_assignments", [])
+        )
 
     def _parse_date(self, date_str: str):
         if not date_str:

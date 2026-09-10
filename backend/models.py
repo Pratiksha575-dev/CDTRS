@@ -32,6 +32,25 @@ class UserRole(str, enum.Enum):
     EMPLOYEE = "EMPLOYEE"
 
 
+class WorkContextType(str, enum.Enum):
+    EMPLOYEE = "EMPLOYEE"
+    HOD      = "HOD"
+    DIRECTOR = "DIRECTOR"
+    DS       = "DS"
+    TSO      = "TSO"
+    ADMIN    = "ADMIN"
+
+
+class DirectorDecision(str, enum.Enum):
+    CONTINUE = "CONTINUE"
+    CLOSE    = "CLOSE"
+
+
+class BranchType(str, enum.Enum):
+    DEPARTMENT_HOD  = "DEPARTMENT_HOD"
+    DIRECT_EMPLOYEE = "DIRECT_EMPLOYEE"
+    TSO             = "TSO"
+
 
 class DocumentStatus(str, enum.Enum):
     RECEIVED                  = "RECEIVED"
@@ -149,7 +168,6 @@ class Department(Base):
     employees  = relationship("Employee", back_populates="department")
 
 
-
 # =========================================================
 # EMPLOYEE
 # =========================================================
@@ -162,7 +180,6 @@ class Employee(Base):
     full_name = Column(String(100), nullable=False)
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
     designation = Column(String(100), nullable=False)
-    # PZ_26/08 - Added email attributes for workflow notifications and mail routing
     email = Column(String(255), nullable=True)
     outlook_email = Column(String(255), nullable=True)
     gov_email = Column(String(255), nullable=True)
@@ -189,9 +206,8 @@ class User(Base):
     employee_code = Column(String(50), nullable=True)
     designation = Column(String(100), nullable=True)
     department_name = Column(String(100), nullable=True)
-    managed_depts = Column(Text, nullable=True)  # JSON-encoded array or comma-separated department codes for multi-dept HOD / TSO
+    managed_depts = Column(Text, nullable=True)
 
-    # PZ_26/08 - Added email, outlook_email, gov_email, and preferred_mail_channel
     email = Column(String(255), unique=True, nullable=True, index=True)
     outlook_email = Column(String(255), nullable=True)
     gov_email = Column(String(255), nullable=True)
@@ -212,6 +228,7 @@ class User(Base):
         uselist=False
     )
     notifications   = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+    context_memberships = relationship("WorkContextMembership", back_populates="user", cascade="all, delete-orphan")
 
     @property
     def department(self) -> Optional[str]:
@@ -221,6 +238,29 @@ class User(Base):
             return self.department_rel.name
         return None
 
+
+# =========================================================
+# WORK CONTEXT MEMBERSHIP (Canonical User Operational Context)
+# =========================================================
+
+class WorkContextMembership(Base):
+    __tablename__ = "work_context_memberships"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    context_type = Column(SAEnum(WorkContextType, name="work_context_type"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # Relationships
+    user       = relationship("User", back_populates="context_memberships", foreign_keys=[user_id])
+    department = relationship("Department", foreign_keys=[department_id])
+
+    @property
+    def department_name(self) -> Optional[str]:
+        return self.department.name if self.department else None
 
 
 # =========================================================
@@ -232,7 +272,7 @@ class IncomingMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     source_type = Column(SAEnum(SourceType, name="source_type_enum"), default=SourceType.MANUAL_UPLOAD, nullable=False)
-    external_message_id = Column(String(255), unique=True, nullable=True, index=True)  # Deduplication key
+    external_message_id = Column(String(255), unique=True, nullable=True, index=True)
     sender_name = Column(String(150), nullable=True)
     sender_email = Column(String(255), nullable=True)
     subject = Column(String(500), nullable=True)
@@ -276,7 +316,7 @@ class Document(Base):
     # Optimistic Concurrency Control
     version = Column(Integer, default=1, nullable=False)
 
-    # Latest remarks for fast UI lookup
+    # Latest remarks for fast UI lookup (legacy compatibility)
     director_remark = Column(Text, nullable=True)
     hod_remark = Column(Text, nullable=True)
 
@@ -285,24 +325,28 @@ class Document(Base):
     closed_at = Column(DateTime, nullable=True)
 
     # Relationships
-    creator            = relationship("User", foreign_keys=[created_by])
-    current_owner      = relationship("User", foreign_keys=[current_owner_id])
-    target_department  = relationship("Department", foreign_keys=[target_department_id])
-    source_message     = relationship("IncomingMessage", back_populates="documents")
-    routes             = relationship("DocumentRoute", back_populates="document", cascade="all, delete-orphan")
-    assignments        = relationship("WorkAssignment", back_populates="document", cascade="all, delete-orphan")
-    doc_assignments    = relationship("DocumentAssignment", back_populates="document", cascade="all, delete-orphan")
-    progress_updates   = relationship("ProgressUpdate", back_populates="document", cascade="all, delete-orphan")
-    attachments        = relationship("Attachment", back_populates="document", cascade="all, delete-orphan")
-    workflow_history   = relationship("WorkflowHistory", back_populates="document", cascade="all, delete-orphan")
-    notifications      = relationship("Notification", back_populates="document", cascade="all, delete-orphan")
-    ocr_record         = relationship("DocumentOCR", back_populates="document", uselist=False, cascade="all, delete-orphan")
-    extracted_fields   = relationship("DocumentExtractedField", back_populates="document", cascade="all, delete-orphan")
-    routing_suggestion = relationship("RoutingSuggestion", back_populates="document", uselist=False, cascade="all, delete-orphan")
-    remarks_history    = relationship("DocumentRemark", back_populates="document", cascade="all, delete-orphan")
-    reminders          = relationship("Reminder", back_populates="document", cascade="all, delete-orphan")
+    creator             = relationship("User", foreign_keys=[created_by])
+    current_owner       = relationship("User", foreign_keys=[current_owner_id])
+    target_department   = relationship("Department", foreign_keys=[target_department_id])
+    source_message      = relationship("IncomingMessage", back_populates="documents")
+    routes              = relationship("DocumentRoute", back_populates="document", cascade="all, delete-orphan")
+    assignments         = relationship("WorkAssignment", back_populates="document", cascade="all, delete-orphan")
+    doc_assignments     = relationship("DocumentAssignment", back_populates="document", cascade="all, delete-orphan")
+    progress_updates    = relationship("ProgressUpdate", back_populates="document", cascade="all, delete-orphan")
+    attachments         = relationship("Attachment", back_populates="document", cascade="all, delete-orphan")
+    workflow_history    = relationship("WorkflowHistory", back_populates="document", cascade="all, delete-orphan")
+    notifications       = relationship("Notification", back_populates="document", cascade="all, delete-orphan")
+    ocr_record          = relationship("DocumentOCR", back_populates="document", uselist=False, cascade="all, delete-orphan")
+    extracted_fields    = relationship("DocumentExtractedField", back_populates="document", cascade="all, delete-orphan")
+    routing_suggestion  = relationship("RoutingSuggestion", back_populates="document", uselist=False, cascade="all, delete-orphan")
+    remarks_history     = relationship("DocumentRemark", back_populates="document", cascade="all, delete-orphan")
+    reminders           = relationship("Reminder", back_populates="document", cascade="all, delete-orphan")
     department_routings = relationship("DocumentDepartmentRouting", back_populates="document", cascade="all, delete-orphan")
+    director_reviews    = relationship("DirectorReview", back_populates="document", cascade="all, delete-orphan")
 
+    @property
+    def branches(self):
+        return self.department_routings
 
     @property
     def target_department_name(self) -> Optional[str]:
@@ -377,10 +421,8 @@ class Document(Base):
         return False
 
 
-
-
 # =========================================================
-# DOCUMENT ROUTES (DS Decisions)
+# DOCUMENT ROUTES (DS Routing Ledger)
 # =========================================================
 
 class DocumentRoute(Base):
@@ -403,7 +445,46 @@ class DocumentRoute(Base):
 
 
 # =========================================================
-# WORK ASSIGNMENTS (HOD -> Employee)
+# CANONICAL BRANCH ENTITY (DocumentDepartmentRouting)
+# =========================================================
+
+class DocumentDepartmentRouting(Base):
+    __tablename__ = "document_department_routings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
+    department_name = Column(String(100), nullable=True)  # Legacy read compatibility
+    status = Column(SAEnum(DocumentStatus, name="doc_dept_status"), default=DocumentStatus.UNDER_HOD_PROCESSING, nullable=False)
+    assigned_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)  # Legacy read
+    assigned_employee_name = Column(String(150), nullable=True)                        # Legacy read
+    hod_instructions = Column(Text, nullable=True)                                     # Legacy read
+    routed_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Canonical Evolved Fields
+    branch_type = Column(SAEnum(BranchType, name="branch_type"), default=BranchType.DEPARTMENT_HOD, nullable=False)
+    routed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    routed_by_context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
+    target_context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
+    target_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    requires_hod_validation = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    version = Column(Integer, default=1, nullable=False)
+
+    # Relationships
+    document           = relationship("Document", back_populates="department_routings")
+    department         = relationship("Department", foreign_keys=[department_id])
+    routed_by_user     = relationship("User", foreign_keys=[routed_by_user_id])
+    target_user        = relationship("User", foreign_keys=[target_user_id])
+    routed_by_context  = relationship("WorkContextMembership", foreign_keys=[routed_by_context_membership_id])
+    target_context     = relationship("WorkContextMembership", foreign_keys=[target_context_membership_id])
+    assignments        = relationship("WorkAssignment", back_populates="routing", cascade="all, delete-orphan")
+    remark_targets     = relationship("DocumentRemarkTarget", back_populates="routing", cascade="all, delete-orphan")
+
+
+# =========================================================
+# WORK ASSIGNMENTS (Canonical Responsibility Model)
 # =========================================================
 
 class WorkAssignment(Base):
@@ -419,14 +500,49 @@ class WorkAssignment(Base):
     assigned_at = Column(DateTime, default=datetime.now)
     completed_at = Column(DateTime, nullable=True)
 
+    # Canonical Evolved Fields
+    routing_id = Column(Integer, ForeignKey("document_department_routings.id"), nullable=True)
+    assigned_to_context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
+    superseded_by_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=True)
+    change_reason = Column(Text, nullable=True)
+
     # Relationships
-    document    = relationship("Document", back_populates="assignments")
-    assigned_by = relationship("User", foreign_keys=[assigned_by_user_id])
-    assigned_to = relationship("User", foreign_keys=[assigned_to_user_id])
+    document             = relationship("Document", back_populates="assignments")
+    assigned_by          = relationship("User", foreign_keys=[assigned_by_user_id])
+    assigned_to          = relationship("User", foreign_keys=[assigned_to_user_id])
+    routing              = relationship("DocumentDepartmentRouting", back_populates="assignments", foreign_keys=[routing_id])
+    assigned_to_context  = relationship("WorkContextMembership", foreign_keys=[assigned_to_context_membership_id])
+    progress_updates     = relationship("ProgressUpdate", back_populates="work_assignment", cascade="all, delete-orphan")
+    members              = relationship("WorkAssignmentMember", back_populates="assignment", cascade="all, delete-orphan")
+    superseded_by        = relationship("WorkAssignment", remote_side=[id], foreign_keys=[superseded_by_id])
 
 
 # =========================================================
-# DOCUMENT ASSIGNMENTS (Multi-Department / Multi-Employee)
+# WORK ASSIGNMENT MEMBERS (HOD Team / Multi-Employee Support)
+# =========================================================
+
+class WorkAssignmentMember(Base):
+    """
+    Employee membership in a canonical WorkAssignment.
+    Multiple active members can share one HOD-created work assignment.
+    """
+    __tablename__ = "work_assignment_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_assignment_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    assigned_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+
+    assignment = relationship("WorkAssignment", back_populates="members")
+    user = relationship("User", foreign_keys=[user_id])
+    context_membership = relationship("WorkContextMembership", foreign_keys=[context_membership_id])
+
+
+# =========================================================
+# DOCUMENT ASSIGNMENTS (Legacy Multi-Dept / Read Compatibility Only)
 # =========================================================
 
 class DocumentAssignment(Base):
@@ -459,7 +575,7 @@ class DocumentAssignment(Base):
 
 
 # =========================================================
-# PROGRESS UPDATES (Employee free-text updates)
+# PROGRESS UPDATES (Append-only Work Update tied to WorkAssignment)
 # =========================================================
 
 class ProgressUpdate(Base):
@@ -476,11 +592,15 @@ class ProgressUpdate(Base):
     hod_reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
+    # Canonical Evolved Link to WorkAssignment
+    work_assignment_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=True)
+
     # Relationships
-    document     = relationship("Document", back_populates="progress_updates")
-    submitted_by = relationship("User", foreign_keys=[submitted_by_user_id])
-    hod_reviewer = relationship("User", foreign_keys=[hod_reviewed_by_user_id])
-    attachments  = relationship("Attachment", back_populates="progress_update")
+    document        = relationship("Document", back_populates="progress_updates")
+    submitted_by    = relationship("User", foreign_keys=[submitted_by_user_id])
+    hod_reviewer    = relationship("User", foreign_keys=[hod_reviewed_by_user_id])
+    attachments     = relationship("Attachment", back_populates="progress_update")
+    work_assignment = relationship("WorkAssignment", back_populates="progress_updates", foreign_keys=[work_assignment_id])
 
     @property
     def user_name(self) -> Optional[str]:
@@ -499,7 +619,6 @@ class Attachment(Base):
     __tablename__ = "attachments"
 
     id = Column(Integer, primary_key=True, index=True)
-    # PZ_26/08 - Made document_id nullable for pre-intake storage; linked to source_message_id
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=True)
     progress_update_id = Column(Integer, ForeignKey("progress_updates.id"), nullable=True)
     uploaded_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -507,7 +626,7 @@ class Attachment(Base):
     storage_key = Column(String(500), nullable=False)
     file_type = Column(String(100), nullable=True)
     file_size = Column(BigInteger, nullable=True)
-    checksum = Column(String(64), nullable=True)  # SHA-256 integrity hash
+    checksum = Column(String(64), nullable=True)
     attachment_type = Column(SAEnum(AttachmentType, name="att_type_enum"), default=AttachmentType.ORIGINAL, nullable=False)
     source_message_id = Column(Integer, ForeignKey("incoming_messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
@@ -520,7 +639,29 @@ class Attachment(Base):
 
 
 # =========================================================
-# DOCUMENT REMARKS (Complete History of Remarks)
+# DIRECTOR REVIEWS (Canonical Immutable Director Decisions)
+# =========================================================
+
+class DirectorReview(Base):
+    __tablename__ = "director_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
+    director_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    director_context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
+    decision = Column(SAEnum(DirectorDecision, name="director_decision"), nullable=False)
+    remark_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+    document_version = Column(Integer, default=1, nullable=False)
+
+    # Relationships
+    document           = relationship("Document", back_populates="director_reviews")
+    director           = relationship("User", foreign_keys=[director_user_id])
+    context_membership = relationship("WorkContextMembership", foreign_keys=[director_context_membership_id])
+
+
+# =========================================================
+# DOCUMENT REMARKS (Canonical History & Targeted Instructions)
 # =========================================================
 
 class DocumentRemark(Base):
@@ -532,12 +673,29 @@ class DocumentRemark(Base):
     role = Column(SAEnum(UserRole, name="user_role_remark"), nullable=False)
     remark_text = Column(Text, nullable=False)
     remark_type = Column(SAEnum(RemarkType, name="remark_type_enum"), nullable=False)
+    provenance = Column(String(50), default="MANUAL", nullable=False)
+    context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Relationships
-    document = relationship("Document", back_populates="remarks_history")
-    author   = relationship("User", foreign_keys=[author_user_id])
+    document           = relationship("Document", back_populates="remarks_history")
+    author             = relationship("User", foreign_keys=[author_user_id])
+    context_membership = relationship("WorkContextMembership", foreign_keys=[context_membership_id])
+    targets            = relationship("DocumentRemarkTarget", back_populates="remark", cascade="all, delete-orphan")
+
+
+class DocumentRemarkTarget(Base):
+    __tablename__ = "document_remark_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    remark_id = Column(Integer, ForeignKey("document_remarks.id"), nullable=False)
+    routing_id = Column(Integer, ForeignKey("document_department_routings.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    # Relationships
+    remark  = relationship("DocumentRemark", back_populates="targets")
+    routing = relationship("DocumentDepartmentRouting", back_populates="remark_targets")
 
 
 # =========================================================
@@ -569,12 +727,12 @@ class DocumentExtractedField(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
-    field_name = Column(String(100), nullable=False)  # TITLE, REFERENCE_NO, DEPARTMENT, EMPLOYEE, DEADLINE, PRIORITY
+    field_name = Column(String(100), nullable=False)
     extracted_value = Column(Text, nullable=True)
     confidence = Column(Float, nullable=True)
     source_page = Column(Integer, default=1, nullable=True)
     source_text = Column(Text, nullable=True)
-    verified_value = Column(Text, nullable=True)  # DS-verified value (preserved upon re-analysis)
+    verified_value = Column(Text, nullable=True)
     verified_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     verified_at = Column(DateTime, nullable=True)
 
@@ -594,10 +752,10 @@ class RoutingSuggestion(Base):
     document_id = Column(Integer, ForeignKey("documents.doc_id"), unique=True, nullable=False)
     suggested_department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     suggested_employee_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    routing_confidence = Column(Float, nullable=False)  # 0.0 to 1.0
+    routing_confidence = Column(Float, nullable=False)
     routing_reason = Column(Text, nullable=False)
     routing_source = Column(SAEnum(RoutingSource, name="routing_source_enum"), default=RoutingSource.DOCUMENT_CONTENT, nullable=False)
-    is_director_instruction = Column(Boolean, default=False)  # Highlighted alert for DS
+    is_director_instruction = Column(Boolean, default=False)
     generated_at = Column(DateTime, default=datetime.now)
     confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     confirmed_at = Column(DateTime, nullable=True)
@@ -631,7 +789,7 @@ class Reminder(Base):
 
 
 # =========================================================
-# WORKFLOW HISTORY (Document-centric Audit Trail)
+# WORKFLOW HISTORY (Immutable Document-centric Audit Trail)
 # =========================================================
 
 class WorkflowHistory(Base):
@@ -680,12 +838,11 @@ class AuditLog(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
-    # Relationship for easy access to the acting user's details
     user = relationship("User", foreign_keys=[user_id], lazy="joined")
 
 
 # =========================================================
-# NOTIFICATIONS (In-App Notifications)
+# NOTIFICATIONS (Context-aware In-App Notifications)
 # =========================================================
 
 class Notification(Base):
@@ -706,7 +863,7 @@ class Notification(Base):
 
 
 # =========================================================
-# SYSTEM SETTINGS (Priority Thresholds, Email Templates, etc.)
+# SYSTEM SETTINGS
 # =========================================================
 
 class SystemSetting(Base):
@@ -717,25 +874,3 @@ class SystemSetting(Base):
     value = Column(Text, nullable=False)
     description = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-
-# =========================================================
-# MULTI-DEPARTMENT DOCUMENT ROUTING
-# =========================================================
-
-class DocumentDepartmentRouting(Base):
-    __tablename__ = "document_department_routings"
-
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False, index=True)
-    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
-    department_name = Column(String(100), nullable=False)
-    status = Column(SAEnum(DocumentStatus, name="doc_dept_status"), default=DocumentStatus.UNDER_HOD_PROCESSING, nullable=False)
-    assigned_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
-    assigned_employee_name = Column(String(150), nullable=True)
-    hod_instructions = Column(Text, nullable=True)
-    routed_at = Column(DateTime, default=datetime.now)
-    completed_at = Column(DateTime, nullable=True)
-
-    document = relationship("Document", back_populates="department_routings")
-    department = relationship("Department")
