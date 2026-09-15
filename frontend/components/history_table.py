@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (
     QTableWidget,
+    QAbstractItemView,
     QTableWidgetItem,
     QHeaderView
 )
@@ -34,9 +35,11 @@ class HistoryTable(QTableWidget):
             QTableWidget.NoEditTriggers
         )
 
-        self.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setWordWrap(True)
+        self.verticalHeader().setVisible(False)
+        self.setMinimumHeight(180)
 
     # ====================================
     # LOAD HISTORY
@@ -44,7 +47,7 @@ class HistoryTable(QTableWidget):
 
     def load_history(self, history):
 
-        self.history = history
+        self.history = list(history or [])
 
         self.setRowCount(
             len(history)

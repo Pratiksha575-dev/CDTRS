@@ -1,14 +1,13 @@
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
 class WorkAssignmentMemberModel:
     """
-    Represents one employee/member inside a WorkAssignment team.
+    Represents one active or completed member of a WorkAssignment.
 
-    A WorkAssignment can contain one or many members. The first/primary
-    member may also be represented by WorkAssignment.assigned_to_id for
-    backward compatibility with older frontend code.
+    A team WorkAssignment can contain multiple members. Each member
+    represents an independent user who is allowed to work on the
+    assignment and submit progress against the same work_assignment_id.
     """
 
     def __init__(
@@ -25,9 +24,9 @@ class WorkAssignmentMemberModel:
         self.id = id
         self.work_assignment_id = work_assignment_id
         self.user_id = user_id
-        self.user_name = user_name or "Unknown Employee"
+        self.user_name = user_name or "Unknown User"
         self.context_membership_id = context_membership_id
-        self.is_active = is_active
+        self.is_active = bool(is_active)
         self.assigned_at = assigned_at
         self.completed_at = completed_at
 
@@ -38,24 +37,9 @@ class WorkAssignmentMemberModel:
 
         return cls(
             id=data.get("id"),
-            work_assignment_id=data.get(
-                "work_assignment_id",
-                data.get("assignment_id"),
-            ),
-            user_id=data.get(
-                "user_id",
-                data.get("assigned_to_user_id"),
-            ),
-            user_name=data.get(
-                "user_name",
-                data.get(
-                    "full_name",
-                    data.get(
-                        "assigned_to_name",
-                        data.get("assigned_to_user_name"),
-                    ),
-                ),
-            ),
+            work_assignment_id=data.get("work_assignment_id"),
+            user_id=data.get("user_id"),
+            user_name=data.get("user_name"),
             context_membership_id=data.get("context_membership_id"),
             is_active=data.get("is_active", True),
             assigned_at=data.get("assigned_at"),
@@ -70,23 +54,18 @@ class WorkAssignmentMemberModel:
         if isinstance(value, dict):
             return cls.from_dict(value)
 
+        if value is None:
+            return cls()
+
         return cls(
             id=getattr(value, "id", None),
             work_assignment_id=getattr(
                 value,
                 "work_assignment_id",
-                getattr(value, "assignment_id", None),
+                None,
             ),
-            user_id=getattr(
-                value,
-                "user_id",
-                getattr(value, "assigned_to_user_id", None),
-            ),
-            user_name=getattr(
-                value,
-                "user_name",
-                getattr(value, "full_name", None),
-            ),
+            user_id=getattr(value, "user_id", None),
+            user_name=getattr(value, "user_name", None),
             context_membership_id=getattr(
                 value,
                 "context_membership_id",
@@ -109,20 +88,11 @@ class WorkAssignmentMemberModel:
             "completed_at": self.completed_at,
         }
 
-    @property
-    def employee_id(self) -> Optional[int]:
-        """Backward-compatible alias."""
-        return self.user_id
-
-    @property
-    def employee_name(self) -> str:
-        """Backward-compatible alias."""
-        return self.user_name
-
     def __repr__(self) -> str:
         return (
-            f"WorkAssignmentMemberModel("
+            "WorkAssignmentMemberModel("
             f"id={self.id}, "
+            f"work_assignment_id={self.work_assignment_id}, "
             f"user_id={self.user_id}, "
             f"user_name={self.user_name!r}, "
             f"is_active={self.is_active})"
@@ -131,13 +101,22 @@ class WorkAssignmentMemberModel:
 
 class WorkAssignmentModel:
     """
-    Frontend representation of a backend WorkAssignment.
+    Canonical frontend representation of a WorkAssignment.
 
-    Supports both:
-      1. Legacy single-employee assignments
-      2. New team assignments containing multiple members
+    A WorkAssignment belongs to exactly one document and one routing
+    branch through routing_id.
 
-    The backend remains authoritative for assignment state.
+    Single-user work:
+        One WorkAssignment
+        assigned_to_id -> individual worker
+
+    Team work:
+        One WorkAssignment
+        members -> multiple workers
+
+    Every progress update must reference the specific work_assignment_id.
+    Therefore different routing branches and different direct employees
+    remain independent workstreams.
     """
 
     def __init__(
@@ -151,16 +130,12 @@ class WorkAssignmentModel:
         instructions: Optional[str] = None,
         is_active: bool = True,
         created_at: Optional[str] = None,
-
-        # New canonical assignment fields
         department_id: Optional[int] = None,
         routing_id: Optional[int] = None,
         requires_hod_validation: bool = False,
         team_name: Optional[str] = None,
         is_team: bool = False,
         members: Optional[List[Any]] = None,
-
-        # Additional lifecycle fields returned by backend
         assigned_at: Optional[str] = None,
         completed_at: Optional[str] = None,
         change_reason: Optional[str] = None,
@@ -169,22 +144,22 @@ class WorkAssignmentModel:
         self.document_id = document_id
 
         self.assigned_by_id = assigned_by_id
-        self.assigned_by_name = assigned_by_name or "Unknown"
+        self.assigned_by_name = assigned_by_name or "Unknown User"
 
-        # Legacy / compatibility primary assignee
         self.assigned_to_id = assigned_to_id
-        self.assigned_to_name = assigned_to_name or (
-            "Not Assigned" if assigned_to_id is None else "Unknown Employee"
-        )
+        self.assigned_to_name = assigned_to_name
 
         self.instructions = instructions
-        self.is_active = is_active
+        self.is_active = bool(is_active)
         self.created_at = created_at
 
-        # Canonical routing/assignment fields
+        # Canonical routing relationship.
         self.department_id = department_id
         self.routing_id = routing_id
-        self.requires_hod_validation = bool(requires_hod_validation)
+
+        self.requires_hod_validation = bool(
+            requires_hod_validation
+        )
 
         self.team_name = team_name
         self.is_team = bool(is_team)
@@ -193,29 +168,17 @@ class WorkAssignmentModel:
         self.completed_at = completed_at
         self.change_reason = change_reason
 
-        # Team members
-        self.members: List[WorkAssignmentMemberModel] = []
+        self.members: List[WorkAssignmentMemberModel] = [
+            WorkAssignmentMemberModel.from_any(member)
+            for member in (members or [])
+        ]
 
-        if members:
-            self.members = [
-                WorkAssignmentMemberModel.from_any(member)
-                for member in members
-            ]
-
-        # If multiple members exist, this is a team even when backend did
-        # not explicitly include is_team.
+        # A multi-member assignment is always a team assignment.
         if len(self.members) > 1:
             self.is_team = True
 
-        # If the backend supplied members but omitted the compatibility
-        # primary assignee, derive it from the first member.
-        if self.members and self.assigned_to_id is None:
-            primary = self.members[0]
-            self.assigned_to_id = primary.user_id
-            self.assigned_to_name = primary.user_name
-
     # ------------------------------------------------------------------
-    # Construction helpers
+    # Construction
     # ------------------------------------------------------------------
 
     @classmethod
@@ -223,49 +186,17 @@ class WorkAssignmentModel:
         if not data:
             return cls()
 
-        raw_members = (
-            data.get("members")
-            or data.get("assignment_members")
-            or data.get("team_members")
-            or []
-        )
-
-        # Some backend responses may expose member objects through
-        # a nested assignment object.
-        if not raw_members and isinstance(data.get("assignment"), dict):
-            raw_members = (
-                data["assignment"].get("members")
-                or data["assignment"].get("assignment_members")
-                or []
-            )
+        raw_members = data.get("members") or []
 
         return cls(
             id=data.get("id"),
-            document_id=data.get(
-                "document_id",
-                data.get("doc_id"),
-            ),
+            document_id=data.get("document_id"),
 
-            assigned_by_id=data.get(
-                "assigned_by_id",
-                data.get("assigned_by_user_id"),
-            ),
-            assigned_by_name=data.get(
-                "assigned_by_name",
-                data.get("assigned_by_user_name"),
-            ),
+            assigned_by_id=data.get("assigned_by_id", data.get("assigned_by_user_id")),
+            assigned_by_name=data.get("assigned_by_name"),
 
-            assigned_to_id=data.get(
-                "assigned_to_id",
-                data.get("assigned_to_user_id"),
-            ),
-            assigned_to_name=data.get(
-                "assigned_to_name",
-                data.get(
-                    "assigned_to_user_name",
-                    data.get("assigned_to_name"),
-                ),
-            ),
+            assigned_to_id=data.get("assigned_to_id", data.get("assigned_to_user_id")),
+            assigned_to_name=data.get("assigned_to_name"),
 
             instructions=data.get("instructions"),
             is_active=data.get("is_active", True),
@@ -273,6 +204,7 @@ class WorkAssignmentModel:
 
             department_id=data.get("department_id"),
             routing_id=data.get("routing_id"),
+
             requires_hod_validation=data.get(
                 "requires_hod_validation",
                 False,
@@ -296,15 +228,14 @@ class WorkAssignmentModel:
         if isinstance(value, dict):
             return cls.from_dict(value)
 
-        members = getattr(value, "members", None)
+        if value is None:
+            return cls()
+
+        members = getattr(value, "members", None) or []
 
         return cls(
             id=getattr(value, "id", None),
-            document_id=getattr(
-                value,
-                "document_id",
-                getattr(value, "doc_id", None),
-            ),
+            document_id=getattr(value, "document_id", None),
 
             assigned_by_id=getattr(
                 value,
@@ -314,7 +245,7 @@ class WorkAssignmentModel:
             assigned_by_name=getattr(
                 value,
                 "assigned_by_name",
-                getattr(value, "assigned_by_user_name", None),
+                None,
             ),
 
             assigned_to_id=getattr(
@@ -325,36 +256,81 @@ class WorkAssignmentModel:
             assigned_to_name=getattr(
                 value,
                 "assigned_to_name",
-                getattr(value, "assigned_to_user_name", None),
+                None,
             ),
 
-            instructions=getattr(value, "instructions", None),
-            is_active=getattr(value, "is_active", True),
-            created_at=getattr(value, "created_at", None),
+            instructions=getattr(
+                value,
+                "instructions",
+                None,
+            ),
+            is_active=getattr(
+                value,
+                "is_active",
+                True,
+            ),
+            created_at=getattr(
+                value,
+                "created_at",
+                None,
+            ),
 
-            department_id=getattr(value, "department_id", None),
-            routing_id=getattr(value, "routing_id", None),
+            department_id=getattr(
+                value,
+                "department_id",
+                None,
+            ),
+            routing_id=getattr(
+                value,
+                "routing_id",
+                None,
+            ),
+
             requires_hod_validation=getattr(
                 value,
                 "requires_hod_validation",
                 False,
             ),
 
-            team_name=getattr(value, "team_name", None),
-            is_team=getattr(value, "is_team", False),
-            members=members or [],
+            team_name=getattr(
+                value,
+                "team_name",
+                None,
+            ),
+            is_team=getattr(
+                value,
+                "is_team",
+                False,
+            ),
 
-            assigned_at=getattr(value, "assigned_at", None),
-            completed_at=getattr(value, "completed_at", None),
-            change_reason=getattr(value, "change_reason", None),
+            members=members,
+
+            assigned_at=getattr(
+                value,
+                "assigned_at",
+                None,
+            ),
+            completed_at=getattr(
+                value,
+                "completed_at",
+                None,
+            ),
+            change_reason=getattr(
+                value,
+                "change_reason",
+                None,
+            ),
         )
 
     # ------------------------------------------------------------------
-    # Team helpers
+    # Assignment state
     # ------------------------------------------------------------------
 
     @property
     def active_members(self) -> List[WorkAssignmentMemberModel]:
+        """
+        Return only currently active team members.
+        """
         return [
             member
             for member in self.members
@@ -363,6 +339,9 @@ class WorkAssignmentModel:
 
     @property
     def member_ids(self) -> List[int]:
+        """
+        IDs of all currently active members.
+        """
         return [
             member.user_id
             for member in self.active_members
@@ -371,6 +350,9 @@ class WorkAssignmentModel:
 
     @property
     def member_names(self) -> List[str]:
+        """
+        Names of all currently active members.
+        """
         return [
             member.user_name
             for member in self.active_members
@@ -382,36 +364,103 @@ class WorkAssignmentModel:
         return len(self.active_members)
 
     @property
-    def primary_member(self) -> Optional[WorkAssignmentMemberModel]:
-        if self.active_members:
-            return self.active_members[0]
+    def primary_member(
+        self,
+    ) -> Optional[WorkAssignmentMemberModel]:
+        """
+        Return the first active member of a team.
 
-        if self.members:
-            return self.members[0]
+        This is only a display/convenience concept. It does not mean
+        that the first member owns the workstream over other members.
+        """
+        active = self.active_members
+
+        if active:
+            return active[0]
 
         return None
+
+    # ------------------------------------------------------------------
+    # User access helpers
+    # ------------------------------------------------------------------
+
+    def contains_user(self, user_id: Optional[int]) -> bool:
+        """
+        Return True when the given user is an active participant
+        in this work assignment.
+        """
+        if user_id is None:
+            return False
+
+        if self.is_team:
+            return user_id in self.member_ids
+
+        return (
+            self.assigned_to_id is not None
+            and self.assigned_to_id == user_id
+            and self.is_active
+        )
+
+    def is_assigned_to_user(
+        self,
+        user_id: Optional[int],
+    ) -> bool:
+        """
+        Explicit assignment check used by UI permission decisions.
+        """
+        return self.contains_user(user_id)
+
+    # ------------------------------------------------------------------
+    # Display helpers
+    # ------------------------------------------------------------------
 
     @property
     def display_assignee(self) -> str:
         """
-        Human-readable assignment label suitable for tables/cards.
+        Human-readable representation of the current workstream.
         """
 
-        names = self.member_names
+        if self.is_team:
+            names = self.member_names
 
-        if len(names) == 1:
-            return names[0]
-
-        if len(names) > 1:
-            if self.team_name:
+            if self.team_name and names:
                 return f"{self.team_name} ({len(names)} members)"
 
-            return f"{len(names)} team members"
+            if names:
+                return f"{len(names)} team members"
 
-        if self.assigned_to_name and self.assigned_to_name != "Not Assigned":
+            if self.team_name:
+                return self.team_name
+
+            return "Team"
+
+        if self.assigned_to_name:
             return self.assigned_to_name
 
+        if self.assigned_to_id is not None:
+            return f"User #{self.assigned_to_id}"
+
         return "Not Assigned"
+
+    @property
+    def workstream_label(self) -> str:
+        """
+        Label suitable for a workstream selector in the document viewer.
+        """
+
+        if self.team_name:
+            return self.team_name
+
+        if self.is_team:
+            return f"Team Assignment #{self.id}"
+
+        if self.assigned_to_name:
+            return self.assigned_to_name
+
+        if self.assigned_to_id is not None:
+            return f"User #{self.assigned_to_id}"
+
+        return f"Work Assignment #{self.id}"
 
     # ------------------------------------------------------------------
     # Serialization
@@ -425,7 +474,6 @@ class WorkAssignmentModel:
             "assigned_by_id": self.assigned_by_id,
             "assigned_by_name": self.assigned_by_name,
 
-            # Backward-compatible primary assignee
             "assigned_to_id": self.assigned_to_id,
             "assigned_to_name": self.assigned_to_name,
 
@@ -433,10 +481,11 @@ class WorkAssignmentModel:
             "is_active": self.is_active,
             "created_at": self.created_at,
 
-            # Canonical assignment information
             "department_id": self.department_id,
             "routing_id": self.routing_id,
-            "requires_hod_validation": self.requires_hod_validation,
+            "requires_hod_validation": (
+                self.requires_hod_validation
+            ),
 
             "team_name": self.team_name,
             "is_team": self.is_team,
@@ -453,9 +502,10 @@ class WorkAssignmentModel:
 
     def __repr__(self) -> str:
         return (
-            f"WorkAssignmentModel("
+            "WorkAssignmentModel("
             f"id={self.id}, "
             f"document_id={self.document_id}, "
+            f"routing_id={self.routing_id}, "
             f"assigned_to_id={self.assigned_to_id}, "
             f"is_team={self.is_team}, "
             f"member_count={self.member_count}, "

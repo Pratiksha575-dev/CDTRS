@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from components.state_widgets import EmptyStateWidget
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, RoleEnum, WorkflowStageEnum
+from models.enums import DocumentStatusEnum, RoleEnum
 from services.auth_service import auth_service
 from services.dashboard_service import dashboard_service
 from services.document_service import document_service
@@ -38,22 +38,58 @@ class DashboardPage(QWidget):
     view_requested = Signal(object, str)
     navigate_requested = Signal(str, object)  # Emits target page name (e.g. "Inbox", "Documents") and filter dictionary
 
-    def __init__(self, role: str = "Director Secretary"):
+    def __init__(self, role: str = "DS"):
         super().__init__()
-        self.role = RoleEnum.normalize(role)
+        self._role = RoleEnum.normalize(role)
+        self._dashboard_initialized = False
         self.documents: List[DocumentModel] = []
+
         self.setup_ui()
+        self._dashboard_initialized = True
         self.refresh()
+
         from services.event_bus import event_bus
         event_bus.data_changed.connect(self.refresh)
         event_bus.inbox_updated.connect(self.refresh)
+
+    @property
+    def role(self) -> str:
+        return self._role
+
+    @role.setter
+    def role(self, value: str):
+        new_role = RoleEnum.normalize(value)
+        if new_role == getattr(self, "_role", None):
+            return
+
+        self._role = new_role
+
+        # MainWindow changes dashboard_page.role directly when the active
+        # work context changes. Rebuild the dashboard immediately so that
+        # role-specific KPI cards/table controls actually exist for the new
+        # context before MainWindow calls refresh().
+        if getattr(self, "_dashboard_initialized", False):
+            self.setup_ui()
+            self.refresh()
 
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
 
     def setup_ui(self):
-        main_layout = QVBoxLayout()
+        # setup_ui can be called more than once because the active work
+        # context may change the dashboard role (e.g. EMPLOYEE <-> HOD).
+        # Reuse the existing top-level layout instead of calling
+        # setLayout() a second time, which would leave the old widgets
+        # attached and cause role-specific attributes to be missing.
+        existing_layout = self.layout()
+        if existing_layout is not None:
+            self._clear_layout(existing_layout)
+            main_layout = existing_layout
+        else:
+            main_layout = QVBoxLayout()
+            self.setLayout(main_layout)
+
         main_layout.setContentsMargins(30, 25, 30, 30)
         main_layout.setSpacing(18)
 
@@ -198,12 +234,27 @@ class DashboardPage(QWidget):
         # --------------------------------
         # ROLE-SPECIFIC CONTENT
         # --------------------------------
-        if self.role == RoleEnum.DIRECTOR_SECRETARY.value or self.role == "Director Secretary":
+        if self.role == RoleEnum.DS.value or self.role == "DS":
             self._setup_ds_actionable_cards(main_layout)
         else:
             self._setup_standard_queue_table(main_layout)
 
-        self.setLayout(main_layout)
+        # The layout is assigned above on first construction and reused on
+        # subsequent role/context changes.
+        main_layout.update()
+
+    def _clear_layout(self, layout):
+        """Remove all widgets/layouts from an existing dashboard layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
 
     def _setup_ds_actionable_cards(self, main_layout: QVBoxLayout):
         """Sets up clean operational Action Required navigation sections for DS."""
@@ -274,9 +325,9 @@ class DashboardPage(QWidget):
         main_layout.addWidget(section_lbl)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels([
-            "Reference", "Title", "Priority", "Department / Origin", "Status", "Stage"
+            "Reference", "Title", "Priority", "Department / Origin", "Status"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -288,7 +339,6 @@ class DashboardPage(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
 
         main_layout.addWidget(self.table, 1)
 
@@ -360,7 +410,7 @@ class DashboardPage(QWidget):
         self.documents = document_service.get_documents()
 
         if self.role == RoleEnum.DIRECTOR.value:
-            dir_docs = [d for d in self.documents if d.current_stage == WorkflowStageEnum.DIRECTOR.value or d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value]
+            dir_docs = [d for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value]
 
             # Use in-memory attribute checks — no per-document network calls (avoids UI freeze)
             initial_count = 0
@@ -377,8 +427,7 @@ class DashboardPage(QWidget):
 
             reviewed_count = sum(
                 1 for d in self.documents
-                if (bool(d.director_remark) or d.status == "Director Review Completed")
-                and d.current_stage != "DIRECTOR"
+                if bool(d.director_remark) or d.status == "Director Review Completed"
             )
             critical_count = sum(1 for d in dir_docs if (d.priority or "").lower() in ("high", "red"))
 
@@ -392,33 +441,25 @@ class DashboardPage(QWidget):
                 self._populate_table(display_list)
 
         elif self.role in (RoleEnum.HOD.value, "HOD"):
-            current_user = auth_service.get_current_user()
-            user_dept_name = current_user.department_name if current_user else None
-            user_dept_id = current_user.department_id if current_user else None
-
+            # GET /documents is already scoped by the active HOD work context.
+            # Do not derive departmental ownership from legacy document fields.
             hod_docs = [
                 d for d in self.documents
-                if (user_dept_name is None or (d.target_department_name or d.department or "").lower() == user_dept_name.lower() or d.target_department_id == user_dept_id)
-                and (
-                    d.current_stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value)
-                    or d.status in (
-                        DocumentStatusEnum.UNDER_HOD_PROCESSING.value,
-                        DocumentStatusEnum.ASSIGNED_FOR_EXECUTION.value,
-                        DocumentStatusEnum.IN_PROGRESS.value,
-                        DocumentStatusEnum.PROGRESS_UPDATED.value
-                    )
+                if d.status in (
+                    DocumentStatusEnum.UNDER_HOD_PROCESSING.value,
+                    DocumentStatusEnum.ASSIGNED_FOR_EXECUTION.value,
+                    DocumentStatusEnum.IN_PROGRESS.value,
+                    DocumentStatusEnum.PROGRESS_UPDATED.value,
                 )
             ]
 
             unassigned_count = sum(
                 1 for d in hod_docs
-                if d.current_stage == WorkflowStageEnum.HOD.value
-                and not self._has_active_assignment(d)
+                if not self._has_active_assignment(d)
             )
             assigned_count = sum(
                 1 for d in hod_docs
-                if d.current_stage == WorkflowStageEnum.EMPLOYEE.value
-                or self._has_active_assignment(d)
+                if self._has_active_assignment(d)
             )
             progress_count = sum(1 for d in hod_docs if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value)
             critical_count = sum(1 for d in hod_docs if (d.priority or "").lower() in ("high", "red"))
@@ -467,9 +508,14 @@ class DashboardPage(QWidget):
             except Exception:
                 intake_cnt = 0
 
-            dir_rev_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value or d.current_stage == "DIRECTOR")
-            dir_done_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value or (d.director_remark and d.current_stage == "DS"))
-            hod_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_HOD_PROCESSING.value or d.current_stage == "HOD")
+            dir_rev_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value)
+            dir_done_cnt = sum(
+                1
+                for d in self.documents
+                if d.status == DocumentStatusEnum.RETURNED_TO_DS.value
+                or bool(d.director_remark)
+            )
+            hod_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_HOD_PROCESSING.value)
             prog_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value)
             closed_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.CLOSED.value)
 
@@ -493,7 +539,6 @@ class DashboardPage(QWidget):
                     if d.deadline
                     and self._parse_date(d.deadline)
                     and today <= self._parse_date(d.deadline) <= due_soon_cutoff
-                    and d.current_stage not in (WorkflowStageEnum.CLOSED.value, "Closed", "CLOSED")
                     and (d.status or "").lower() != "closed"
                 )
                 self.act_card_deadlines["sub_label"].setText(f"{upcoming_active_cnt} active documents due within 7 days")
@@ -511,19 +556,10 @@ class DashboardPage(QWidget):
             elif getattr(assignment, "is_active", True) is not False:
                 return True
 
-        return bool(getattr(doc, "assigned_employee_name", None))
+        return False
 
     @staticmethod
     def _is_employee_assigned(doc, employee_id: int) -> bool:
-        if (
-            doc.assigned_employee_id == employee_id
-            or (
-                doc.current_owner_id == employee_id
-                and doc.current_stage == WorkflowStageEnum.EMPLOYEE.value
-            )
-        ):
-            return True
-
         for assignment in getattr(doc, "work_assignments", None) or []:
             if isinstance(assignment, dict):
                 if assignment.get("is_active", True) is False:
@@ -544,10 +580,7 @@ class DashboardPage(QWidget):
                 ):
                     return True
 
-        return any(
-            isinstance(da, dict) and da.get("assigned_employee_id") == employee_id
-            for da in getattr(doc, "doc_assignments", [])
-        )
+        return False
 
     def _parse_date(self, date_str: str):
         if not date_str:
@@ -567,9 +600,15 @@ class DashboardPage(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
             self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
             self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
-            self.table.setItem(row, 3, QTableWidgetItem(doc.department or doc.source or "-"))
+            self.table.setItem(
+                row, 3,
+                QTableWidgetItem(
+                    getattr(doc, "suggested_department_name", None)
+                    or doc.source
+                    or "-"
+                ),
+            )
             self.table.setItem(row, 4, QTableWidgetItem(doc.status or "-"))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.current_stage or "-"))
 
     def _handle_view_selected(self):
         if hasattr(self, "table"):

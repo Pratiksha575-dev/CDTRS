@@ -20,7 +20,11 @@ class ResetPasswordDialog(QDialog):
     def __init__(self, default_username: str = "", parent: QWidget = None):
         super().__init__(parent)
         self.setWindowTitle("Change Password")
-        self.setFixedSize(420, 430)
+        # Responsive dialog: bounded rather than fixed so it remains usable
+        # with Windows display scaling and different monitor sizes.
+        self.setMinimumSize(360, 360)
+        self.resize(420, 430)
+        self.setMaximumSize(520, 520)
         self.setModal(True)
 
         layout = QVBoxLayout()
@@ -199,19 +203,29 @@ class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.resize(700, 540)
+        self.setMinimumSize(520, 420)
+        self.resize(760, 560)
 
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(8)
         main_layout.setAlignment(Qt.AlignCenter)
 
         # Login card
         card = QFrame()
         card.setObjectName("loginCard")
-        card.setFixedWidth(400)
+        # Fixed width caused excessive empty space on some screens and
+        # cramped layouts on others.  Bound the card instead.
+        card.setMinimumWidth(320)
+        card.setMaximumWidth(460)
+        card.setSizePolicy(
+            __import__("PySide6.QtWidgets", fromlist=["QSizePolicy"]).QSizePolicy.Preferred,
+            __import__("PySide6.QtWidgets", fromlist=["QSizePolicy"]).QSizePolicy.Maximum,
+        )
 
         card_layout = QVBoxLayout()
-        card_layout.setContentsMargins(35, 35, 35, 35)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(28, 24, 28, 24)
+        card_layout.setSpacing(9)
 
         # Title
         title = QLabel("CDTRS")

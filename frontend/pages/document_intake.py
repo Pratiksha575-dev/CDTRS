@@ -190,6 +190,7 @@ class DocumentIntakePage(QWidget):
 
         self.priority_input = QComboBox()
         self.priority_input.addItems([
+            PriorityEnum.CRITICAL.value,
             PriorityEnum.HIGH.value,
             PriorityEnum.MEDIUM.value,
             PriorityEnum.LOW.value
@@ -629,10 +630,8 @@ class DocumentIntakePage(QWidget):
             confidence=float(getattr(self, "extracted_ocr_confidence", 0.0)),
             attachment_count=getattr(self, "incoming_attachment_count", 1 if self.selected_file else 0),
             attachments_list=getattr(self, "incoming_attachments_list", [os.path.basename(self.selected_file)] if self.selected_file else []),
-            target_department_name=None,
-            target_department_id=None,
-            assigned_employee_name=None,
-            assigned_employee_id=None,
+            # Canonical routing suggestions only.
+            # Operational routing is created later as DocumentDepartmentRouting branches.
             suggested_department_name=dept_text,
             suggested_department_id=target_dept_id,
             suggested_employee_name=emp_text,

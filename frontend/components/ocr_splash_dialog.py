@@ -62,7 +62,9 @@ class OCRSplashDialog(QDialog):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
-        self.setFixedSize(480, 260)
+        self.setMinimumSize(360, 220)
+        self.setMaximumSize(640, 360)
+        self.resize(480, 260)
 
         self._step_index = 0
         self._steps = [
@@ -98,7 +100,7 @@ class OCRSplashDialog(QDialog):
         self.card.setGraphicsEffect(shadow)
 
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(28, 24, 28, 24)
+        card_layout.setContentsMargins(22, 20, 22, 20)
         card_layout.setSpacing(12)
 
         # Header Row (Icon + Title)
@@ -163,8 +165,7 @@ class OCRSplashDialog(QDialog):
             file_badge.setStyleSheet("font-size: 11px; color: #64748B; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 4px; padding: 4px 8px;")
             card_layout.addWidget(file_badge)
 
-        card_layout.addStretch()
-        main_layout.addWidget(self.card)
+        main_layout.addWidget(self.card, 1)
 
         # Step rotation timer for animated text feedback
         self._step_timer = QTimer(self)
@@ -195,8 +196,8 @@ class OCRSplashDialog(QDialog):
             "title": title,
             "extracted_text": f"[OCR error: {error_msg}]",
             "confidence": 0,
-            "suggested_department": "Administration",
-            "suggested_employee": "Not Assigned",
+            "suggested_department": None,
+            "suggested_employee": None,
             "priority": "Medium",
             "deadline": "",
             "is_handwritten": False,

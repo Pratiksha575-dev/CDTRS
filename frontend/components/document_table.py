@@ -1,152 +1,184 @@
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
+)
 
 from models.document import DocumentModel
 
 
 class DocumentTable(QTableWidget):
-    """
-    Standardized, robust Document Table for CDTRS.
-    Supports both DocumentModel instances and legacy dictionaries with priority badges and stage indicators.
+    """Reusable document table backed by the canonical document model.
+
+    Operational department/staff information comes from WorkAssignment and
+    routing branches. DocumentModel suggestion fields are used only when no
+    confirmed assignment exists.
     """
 
     document_selected = Signal(object)
 
-    def __init__(self):
-        super().__init__()
+    HEADERS = [
+        "Reference",
+        "Subject / Title",
+        "Priority",
+        "Department",
+        "Assigned Staff",
+        "Deadline",
+        "Status",
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.documents: List[DocumentModel] = []
-        self.setColumnCount(8)
-        self.setHorizontalHeaderLabels([
-            "Reference",
-            "Subject / Title",
-            "Priority",
-            "Department",
-            "Assigned Staff / Team",
-            "Deadline",
-            "Status",
-            "Stage"
-        ])
-
-        self.setSelectionBehavior(QTableWidget.SelectRows)
-        self.setSelectionMode(QTableWidget.SingleSelection)
-        self.setEditTriggers(QTableWidget.NoEditTriggers)
-
-        header = self.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-
-        self.itemSelectionChanged.connect(self.on_selection_changed)
-
-    def load_documents(self, documents: List[Union[DocumentModel, dict]]):
-        self.documents = documents
-        self.setRowCount(len(documents))
-
-        for row, doc in enumerate(documents):
-            if isinstance(doc, DocumentModel):
-                ref = doc.reference or "-"
-                title = doc.title or "Untitled"
-                prio = doc.priority or "Medium"
-                dept = doc.department or doc.target_department_name or "-"
-                emp = self._assignment_display(doc)
-                deadline = doc.deadline or "-"
-                status = doc.status or "-"
-                stage = doc.current_stage or "-"
-            else:
-                ref = doc.get("reference") or f"CDTRS-2026-{doc.get('id', 0):03d}"
-                title = doc.get("title") or doc.get("subject") or "Untitled"
-                prio = doc.get("priority") or "Medium"
-                dept = doc.get("department") or "-"
-                emp = self._assignment_display(doc)
-                deadline = doc.get("deadline") or "-"
-                status = doc.get("status") or "-"
-                stage = doc.get("current_stage") or "-"
-
-            self.setItem(row, 0, QTableWidgetItem(str(ref)))
-            self.setItem(row, 1, QTableWidgetItem(str(title)))
-
-            prio_item = QTableWidgetItem(str(prio))
-            prio_str = str(prio).lower()
-            if prio_str in ("high", "red"):
-                prio_item.setForeground(Qt.darkRed)
-            elif prio_str in ("medium", "orange", "yellow"):
-                prio_item.setForeground(Qt.darkYellow)
-            else:
-                prio_item.setForeground(Qt.darkGreen)
-            self.setItem(row, 2, prio_item)
-
-            self.setItem(row, 3, QTableWidgetItem(str(dept)))
-            self.setItem(row, 4, QTableWidgetItem(str(emp)))
-            self.setItem(row, 5, QTableWidgetItem(str(deadline)))
-            self.setItem(row, 6, QTableWidgetItem(str(status)))
-            self.setItem(row, 7, QTableWidgetItem(str(stage)))
-
+        self.setColumnCount(len(self.HEADERS))
+        self.setHorizontalHeaderLabels(self.HEADERS)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setVisible(False)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.setWordWrap(True)
+        self.setSizeAdjustPolicy(QAbstractItemView.SizeAdjustPolicy.AdjustIgnored)
+        self.setMinimumHeight(180)
+        self.itemSelectionChanged.connect(self._selection_changed)
 
     @staticmethod
-    def _assignment_display(doc) -> str:
-        """Return a compact single/team assignment label for table display."""
-        assignments = getattr(doc, "work_assignments", None)
-        if assignments is None and isinstance(doc, dict):
-            assignments = doc.get("work_assignments") or doc.get("assignments")
+    def _value(obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
 
-        labels = []
-        for assignment in assignments or []:
-            if isinstance(assignment, dict):
-                if not assignment.get("is_active", True):
-                    continue
-                team_name = assignment.get("team_name")
-                members = assignment.get("members") or []
-                member_names = []
-                for member in members:
-                    if isinstance(member, dict):
-                        name = member.get("user_name") or member.get("full_name") or member.get("name")
-                    else:
-                        name = getattr(member, "user_name", None) or getattr(member, "full_name", None) or getattr(member, "name", None)
-                    if name:
-                        member_names.append(str(name))
-                if team_name:
-                    labels.append(f"{team_name} ({len(member_names)} members)" if member_names else str(team_name))
-                elif member_names:
-                    labels.append(", ".join(member_names))
-                elif assignment.get("assigned_to_user_name") or assignment.get("assigned_to_name"):
-                    labels.append(str(assignment.get("assigned_to_user_name") or assignment.get("assigned_to_name")))
-            else:
-                if not getattr(assignment, "is_active", True):
-                    continue
-                display = getattr(assignment, "display_name", None)
-                if display:
-                    labels.append(str(display))
-                    continue
-                team_name = getattr(assignment, "team_name", None)
-                member_names = getattr(assignment, "active_member_names", None) or getattr(assignment, "member_names", None) or []
-                if team_name:
-                    labels.append(f"{team_name} ({len(member_names)} members)" if member_names else str(team_name))
-                elif member_names:
-                    labels.append(", ".join(map(str, member_names)))
-                else:
-                    name = getattr(assignment, "assigned_to_user_name", None) or getattr(assignment, "assigned_to_name", None)
-                    if name:
-                        labels.append(str(name))
+    @classmethod
+    def _active_assignments(cls, document: Any) -> list:
+        assignments = cls._value(document, "work_assignments", None) or []
+        return [
+            a for a in assignments
+            if cls._value(a, "is_active", True) is not False
+        ]
 
-        if labels:
-            return " | ".join(labels)
+    @classmethod
+    def _department_text(cls, document: Any) -> str:
+        names = []
+        for assignment in cls._active_assignments(document):
+            routing = cls._value(assignment, "routing", None)
+            department = cls._value(assignment, "department", None)
+            name = cls._value(assignment, "department_name", None)
+            if not name and department:
+                name = cls._value(department, "name", None) or str(department)
+            if not name and routing:
+                name = cls._value(routing, "department_name", None)
+                if not name:
+                    routed_department = cls._value(routing, "department", None)
+                    if routed_department:
+                        name = cls._value(routed_department, "name", None) or str(routed_department)
+            if name and str(name) not in names:
+                names.append(str(name))
+        if names:
+            return " | ".join(names)
 
-        return getattr(doc, "assigned_employee_name", None) or (doc.get("assigned_employee_name") if isinstance(doc, dict) else None) or "-"
+        # A routing suggestion is advisory intelligence, not confirmed routing.
+        # Never display it as the document's assigned department.
+        branches = cls._value(document, "department_routings", None) or cls._value(document, "branches", None) or []
+        for branch in branches:
+            if cls._value(branch, "is_active", True) is False:
+                continue
+            if cls._value(branch, "branch_type", None) != "DEPARTMENT_HOD":
+                continue
+            name = cls._value(branch, "department_name", None)
+            department = cls._value(branch, "department", None)
+            if not name and department:
+                name = cls._value(department, "name", None) or str(department)
+            if name and str(name) not in names:
+                names.append(str(name))
+        return " | ".join(names) if names else "Not Specified"
 
-    def on_selection_changed(self):
+    @classmethod
+    def _staff_text(cls, document: Any) -> str:
+        displays = []
+        for assignment in cls._active_assignments(document):
+            display = cls._value(assignment, "display_assignee", None)
+            if callable(display):
+                try:
+                    display = display()
+                except Exception:
+                    display = None
+            if display:
+                displays.append(str(display))
+                continue
+
+            team = cls._value(assignment, "team_name", None)
+            members = cls._value(assignment, "members", None) or []
+            names = []
+            for member in members:
+                name = (
+                    cls._value(member, "user_name", None)
+                    or cls._value(member, "employee_name", None)
+                    or cls._value(member, "name", None)
+                )
+                if name:
+                    names.append(str(name))
+            if not names:
+                name = (
+                    cls._value(assignment, "assigned_to_user_name", None)
+                    or cls._value(assignment, "assigned_to_name", None)
+                )
+                if name:
+                    names.append(str(name))
+            if team and names:
+                displays.append(f"{team} ({', '.join(names)})")
+            elif team:
+                displays.append(str(team))
+            elif names:
+                displays.append(", ".join(names))
+
+        if displays:
+            return " | ".join(dict.fromkeys(displays))
+
+        # Suggestions are never operational assignments.
+        return "Not Assigned"
+
+    def load_documents(self, documents: Optional[List[DocumentModel]] = None):
+        self.documents = list(documents or [])
+        self.setRowCount(len(self.documents))
+
+        for row, document in enumerate(self.documents):
+            values = [
+                self._value(document, "reference", "-"),
+                self._value(document, "subject", None) or self._value(document, "title", "-"),
+                self._value(document, "priority", "Medium"),
+                self._department_text(document),
+                self._staff_text(document),
+                self._value(document, "deadline", None) or "—",
+                self._value(document, "status", "Received"),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.ItemDataRole.UserRole, document)
+                self.setItem(row, column, item)
+
+        self.resizeRowsToContents()
+        self.verticalHeader().setDefaultSectionSize(34)
+
+    def _selection_changed(self):
+        document = self.get_selected_document()
+        if document is not None:
+            self.document_selected.emit(document)
+
+    def get_selected_document(self) -> Optional[DocumentModel]:
         row = self.currentRow()
-        if 0 <= row < len(self.documents):
-            self.document_selected.emit(self.documents[row])
+        if row < 0 or row >= len(self.documents):
+            return None
+        return self.documents[row]
 
-    def get_selected_document(self) -> Optional[Union[DocumentModel, dict]]:
-        row = self.currentRow()
-        if 0 <= row < len(self.documents):
-            return self.documents[row]
-        return None
+    def clear_documents(self):
+        self.documents = []
+        self.setRowCount(0)
+
+    def selectedItems(self):
+        return super().selectedItems()

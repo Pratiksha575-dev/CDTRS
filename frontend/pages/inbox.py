@@ -1,11 +1,10 @@
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -18,25 +17,43 @@ from PySide6.QtWidgets import (
 
 from components.state_widgets import EmptyStateWidget
 from models.document import DocumentModel
-from services.document_service import document_service
+from repositories.provider import get_repository
 
 
 class InboxPage(QWidget):
     """
     Director Secretary (DS) Incoming Communications & Document Intake Queue.
-    Displays incoming dispatches, government emails, and departmental communications
-    awaiting OCR text extraction and canonical workflow registration.
+
+    IMPORTANT ARCHITECTURE RULE:
+        DS Inbox is ONLY the external/mail intake queue.
+
+        External mail
+            -> DS Inbox
+            -> Process
+            -> Canonical Document
+            -> Documents / Workflow
+
+        Manual Upload
+            -> Documents directly
+
+        Director returned document
+            -> Documents directly
+
+    The general document/workflow queue must never be mixed into this page.
     """
 
     process_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
-        self.documents: List[DocumentModel] = []
+
+        self.documents: List[Any] = []
         self._displayed_docs: List[Any] = []
+
         self.setup_ui()
 
         from services.event_bus import event_bus
+
         event_bus.inbox_updated.connect(self.load_documents)
         event_bus.data_changed.connect(self.load_documents)
 
@@ -49,157 +66,319 @@ class InboxPage(QWidget):
         main_layout.setContentsMargins(30, 25, 30, 30)
         main_layout.setSpacing(14)
 
-        # --------------------------------
-        # PAGE HEADER & ACTIONS
-        # --------------------------------
+        # ------------------------------------------------------------
+        # HEADER
+        # ------------------------------------------------------------
         header_row = QHBoxLayout()
-        header_vbox = QVBoxLayout()
-        header_vbox.setSpacing(2)
+        header_row.setSpacing(10)
 
-        title = QLabel("Incoming Communications & Intake")
-        title.setObjectName("pageTitle")
-
-        subtitle = QLabel(
-            "Official incoming dispatches, government emails, and departmental communications awaiting DS intake and OCR extraction."
+        title = self._make_title("Incoming Communications")
+        subtitle = self._make_subtitle(
+            "External mail and dispatches awaiting Director Secretary processing"
         )
-        subtitle.setObjectName("pageSubtitle")
 
-        header_vbox.addWidget(title)
-        header_vbox.addWidget(subtitle)
-        header_row.addLayout(header_vbox, 1)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
 
-        # Sync Status Badge
-        self.sync_badge = QLabel("🟢 Ready")
-        self.sync_badge.setStyleSheet(
-            "background-color: #F0FDF4; color: #166534; border: 1px solid #BBF7D0; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 600;"
-        )
-        header_row.addWidget(self.sync_badge)
+        header_row.addLayout(title_box)
+        header_row.addStretch()
+
+        self.sync_badge = self._make_badge("🟢 Ready")
 
         self.sync_outlook_btn = QPushButton("🔄 Sync Now")
-        self.sync_outlook_btn.setStyleSheet(
-            "background-color: #0F172A; color: white; font-weight: 600; padding: 8px 16px; border-radius: 5px; font-size: 12px;"
-        )
         self.sync_outlook_btn.clicked.connect(self._sync_outlook)
+
+        header_row.addWidget(self.sync_badge)
         header_row.addWidget(self.sync_outlook_btn)
 
         main_layout.addLayout(header_row)
 
-        # --------------------------------
-        # SEARCH & FILTER BAR
-        # --------------------------------
+        # ------------------------------------------------------------
+        # FILTER BAR
+        # ------------------------------------------------------------
         filter_row = QHBoxLayout()
         filter_row.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 Search by sender, subject, reference, or keywords...")
-        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.search_input.setPlaceholderText(
+            "Search sender, subject, source or communication type..."
+        )
         self.search_input.textChanged.connect(self.apply_filters)
 
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems([
-            "All Incoming Items",
-            "With Attached Files",
-            "Email Body / No Attachment"
-        ])
-        self.filter_combo.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
+        self.filter_combo.addItems(
+            [
+                "All Incoming",
+                "With Attached Files",
+                "Email Body / No Attachment",
+            ]
+        )
         self.filter_combo.currentIndexChanged.connect(self.apply_filters)
 
         clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
         clear_btn.clicked.connect(self._clear_filters)
 
-        filter_row.addWidget(self.search_input, 2)
-        filter_row.addWidget(self.filter_combo, 1)
+        filter_row.addWidget(self.search_input, 1)
+        filter_row.addWidget(self.filter_combo)
         filter_row.addWidget(clear_btn)
+
         main_layout.addLayout(filter_row)
 
-        # --------------------------------
-        # TABLE & EMPTY STATE CONTAINER
-        # --------------------------------
+        # ------------------------------------------------------------
+        # TABLE / EMPTY STATE
+        # ------------------------------------------------------------
         self.table_stack = QStackedWidget()
 
         self.table = QTableWidget()
         self.table.setColumnCount(8)
-        self.table.setHorizontalHeaderLabels([
-            "Source",
-            "Sender / Origin",
-            "Subject / Document Title",
-            "Ingestion Mode",
-            "Format",
-            "Attachments",
-            "Received",
-            "Intake Status"
-        ])
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Source",
+                "Sender",
+                "Subject",
+                "Type",
+                "Format",
+                "Attachments",
+                "Received",
+                "Status",
+            ]
+        )
+
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.doubleClicked.connect(self.process_selected)
-        # Enable process button only when a row is actually selected
-        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
 
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.cellDoubleClicked.connect(
+            lambda *_: self.process_selected()
+        )
 
         self.empty_widget = EmptyStateWidget(
-            title="No incoming documents found",
-            message="All incoming mail, dispatches, and emails have been processed, or no items match your search."
+            "No Incoming Communications",
+            "There are currently no external communications waiting for processing.",
         )
 
         self.table_stack.addWidget(self.table)
         self.table_stack.addWidget(self.empty_widget)
+
         main_layout.addWidget(self.table_stack, 1)
 
-        # --------------------------------
-        # BOTTOM ACTION BAR
-        # --------------------------------
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
+        # ------------------------------------------------------------
+        # ACTION BAR
+        # ------------------------------------------------------------
+        action_row = QHBoxLayout()
 
-        self.process_button = QPushButton("⚡ Run OCR & Process Document")
-        self.process_button.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 24px; border-radius: 5px;")
-        self.process_button.setEnabled(False)  # Disabled until a row is selected
+        action_row.addStretch()
+
+        self.process_button = QPushButton("Process Selected")
+        self.process_button.setEnabled(False)
         self.process_button.clicked.connect(self.process_selected)
-        button_layout.addWidget(self.process_button)
 
-        main_layout.addLayout(button_layout)
+        action_row.addWidget(self.process_button)
+
+        main_layout.addLayout(action_row)
+
         self.setLayout(main_layout)
 
+    # ------------------------------------------------------------
+    # SMALL UI HELPERS
+    # ------------------------------------------------------------
+
+    def _make_title(self, text: str):
+        from PySide6.QtWidgets import QLabel
+
+        label = QLabel(text)
+        label.setObjectName("pageTitle")
+        return label
+
+    def _make_subtitle(self, text: str):
+        from PySide6.QtWidgets import QLabel
+
+        label = QLabel(text)
+        label.setObjectName("pageSubtitle")
+        return label
+
+    def _make_badge(self, text: str):
+        from PySide6.QtWidgets import QLabel
+
+        label = QLabel(text)
+        label.setObjectName("statusBadge")
+        return label
+
+    # ------------------------------------------------------------
+    # LOAD DS INBOX
+    # ------------------------------------------------------------
 
     def load_documents(self):
-        raw_inbox = document_service.get_inbox()
-        # Strict Mail-Only Intake Queue: Only Outlook and Government Mail incoming communications
-        self.documents = [
-            d for d in raw_inbox
-            if (d.mode if isinstance(d, DocumentModel) else (d.get("mode") or d.get("source_type"))) not in ("Manual Upload", "MANUAL_UPLOAD")
-        ]
+        """
+        Load ONLY the external/mail intake queue.
+
+        Do NOT use document_service.get_inbox() here because that endpoint
+        represents workflow documents, not mailbox intake.
+
+        The repository method get_intake_items() maps to:
+            GET /api/v1/intake
+        """
+
+        try:
+            repo = get_repository()
+            intake_items = repo.get_intake_items()
+
+        except Exception:
+            self.documents = []
+            self._displayed_docs = []
+
+            self.sync_badge.setText("🔴 Backend unavailable")
+            self.table_stack.setCurrentWidget(self.empty_widget)
+            self.process_button.setEnabled(False)
+
+            return
+
+        normalized: List[Dict[str, Any]] = []
+
+        for item in intake_items or []:
+            if not isinstance(item, dict):
+                continue
+
+            source_type = str(
+                item.get("source_type")
+                or item.get("mode")
+                or ""
+            ).upper()
+
+            # --------------------------------------------------------
+            # MANUAL UPLOADS NEVER BELONG IN DS INBOX
+            # --------------------------------------------------------
+            if source_type in (
+                "MANUAL_UPLOAD",
+                "MANUAL",
+                "MANUAL UPLOAD",
+            ):
+                continue
+
+            processing_status = str(
+                item.get("processing_status")
+                or item.get("status")
+                or "NEW"
+            )
+
+            # Backend already removes PROCESSED messages, but keep this
+            # frontend guard as defense-in-depth.
+            if processing_status.upper() == "PROCESSED":
+                continue
+
+            received_at = (
+                item.get("received_at")
+                or item.get("created_at")
+                or ""
+            )
+
+            received_text = str(received_at)
+
+            if "T" in received_text:
+                received_text = received_text.split("T", 1)[0]
+
+            sender_name = (
+                item.get("sender_name")
+                or item.get("sender_email")
+                or "External"
+            )
+
+            subject = (
+                item.get("subject")
+                or f"Incoming Message #{item.get('id', '')}"
+            )
+
+            normalized.append(
+                {
+                    "id": item.get("id"),
+                    "title": subject,
+                    "source": sender_name,
+                    "created_by": (
+                        item.get("sender_email")
+                        or item.get("sender_name")
+                        or "External"
+                    ),
+                    "mode": (
+                        item.get("source_type")
+                        or "Government Mail"
+                    ),
+                    "format": "Email",
+                    "file_type": "Email",
+                    "attachment_count": (
+                        1 if item.get("has_attachments") else 0
+                    ),
+                    "date": received_text,
+                    "status": processing_status,
+                    "sender_name": item.get("sender_name"),
+                    "sender_email": item.get("sender_email"),
+                    "subject": item.get("subject"),
+                    "body": item.get("body_reference") or "",
+                    "body_reference": item.get("body_reference"),
+                    "external_message_id": item.get(
+                        "external_message_id"
+                    ),
+                    "received_at": item.get("received_at"),
+                    "has_attachments": bool(
+                        item.get("has_attachments")
+                    ),
+                    "processing_status": processing_status,
+                    "created_at": item.get("created_at"),
+                    "file_path": "",
+                }
+            )
+
+        self.documents = normalized
+        self.sync_badge.setText("🟢 Ready")
+
         self.apply_filters()
+
+    # ------------------------------------------------------------
+    # FILTERS
+    # ------------------------------------------------------------
 
     def apply_filters(self):
         search_query = self.search_input.text().strip().lower()
         filter_type = self.filter_combo.currentText()
 
-        filtered = []
+        filtered: List[Any] = []
+
         for doc in self.documents:
-            source = str((doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "").lower()
-            sender = str((doc.created_by if isinstance(doc, DocumentModel) else doc.get("created_by")) or "").lower()
-            title = str((doc.title if isinstance(doc, DocumentModel) else doc.get("title")) or "").lower()
-            mode = str((doc.mode if isinstance(doc, DocumentModel) else doc.get("mode")) or "").lower()
-            att_cnt = (doc.attachment_count if isinstance(doc, DocumentModel) else doc.get("attachment_count")) or 0
+            if isinstance(doc, DocumentModel):
+                source = str(doc.source or "").lower()
+                sender = str(doc.created_by or "").lower()
+                title = str(doc.title or "").lower()
+                mode = str(doc.mode or "").lower()
+                att_cnt = doc.attachment_count or 0
+            else:
+                source = str(doc.get("source") or "").lower()
+                sender = str(doc.get("created_by") or "").lower()
+                title = str(doc.get("title") or "").lower()
+                mode = str(doc.get("mode") or "").lower()
+                att_cnt = doc.get("attachment_count") or 0
 
-            # Filter Dropdown (matching renamed labels)
-            if filter_type == "With Attached Files" and att_cnt < 1:
-                continue
-            if filter_type == "Email Body / No Attachment" and att_cnt > 0:
+            if (
+                filter_type == "With Attached Files"
+                and att_cnt < 1
+            ):
                 continue
 
-            # Search Text Filter
+            if (
+                filter_type == "Email Body / No Attachment"
+                and att_cnt > 0
+            ):
+                continue
+
             if search_query:
                 match = (
                     search_query in source
@@ -207,38 +386,52 @@ class InboxPage(QWidget):
                     or search_query in title
                     or search_query in mode
                 )
+
                 if not match:
                     continue
 
             filtered.append(doc)
 
         self._displayed_docs = filtered
+
         if not filtered:
+            self.table.setRowCount(0)
             self.table_stack.setCurrentWidget(self.empty_widget)
             self.process_button.setEnabled(False)
             return
 
         self.table_stack.setCurrentWidget(self.table)
-        # Don't auto-enable button here — only enable when a row is selected
-        self.process_button.setEnabled(self.table.currentRow() >= 0)
+
         self.table.setRowCount(len(filtered))
 
-
         for row, doc in enumerate(filtered):
-            source = (doc.source if isinstance(doc, DocumentModel) else doc.get("source")) or "External"
+            if isinstance(doc, DocumentModel):
+                source = doc.source or "External"
+                sender = doc.created_by or source
+                title = doc.title or ""
+                mode = doc.mode or "Government Mail"
+                fmt = doc.format or doc.file_type or "Email"
+                att_cnt = doc.attachment_count or 0
+                received = doc.date or "Today"
+                status = doc.status or "NEW"
+            else:
+                source = doc.get("source") or "External"
+                sender = (
+                    doc.get("created_by")
+                    or doc.get("sender_email")
+                    or source
+                )
+                title = doc.get("title") or ""
+                mode = doc.get("mode") or "Government Mail"
+                fmt = (
+                    doc.get("format")
+                    or doc.get("file_type")
+                    or "Email"
+                )
+                att_cnt = doc.get("attachment_count") or 0
+                received = doc.get("date") or "Today"
+                status = doc.get("status") or "NEW"
 
-            # Use actual sender data from backend — prefer created_by (email/username), fall back to source
-            sender_label = (
-                (doc.created_by if isinstance(doc, DocumentModel) else doc.get("created_by"))
-                or source
-                or "External Dispatch"
-            )
-
-            title = (doc.title if isinstance(doc, DocumentModel) else doc.get("title")) or ""
-            mode = (doc.mode if isinstance(doc, DocumentModel) else doc.get("mode")) or "Government Mail"
-            fmt = (doc.format or doc.file_type if isinstance(doc, DocumentModel) else doc.get("format", doc.get("file_type"))) or "PDF"
-
-            att_cnt = (doc.attachment_count if isinstance(doc, DocumentModel) else doc.get("attachment_count")) or 0
             if att_cnt > 1:
                 att_str = f"📎 {att_cnt} attachments"
             elif att_cnt == 1:
@@ -246,49 +439,91 @@ class InboxPage(QWidget):
             else:
                 att_str = "No attachments"
 
-            received = (doc.date if isinstance(doc, DocumentModel) else doc.get("date")) or "Today"
-            status = (doc.status if isinstance(doc, DocumentModel) else doc.get("status")) or "New / Received"
-
-            self.table.setItem(row, 0, QTableWidgetItem(str(source)))
-            self.table.setItem(row, 1, QTableWidgetItem(str(sender_label)))
-            self.table.setItem(row, 2, QTableWidgetItem(str(title)))
-            self.table.setItem(row, 3, QTableWidgetItem(str(mode)))
-            self.table.setItem(row, 4, QTableWidgetItem(str(fmt or "PDF")))
-            self.table.setItem(row, 5, QTableWidgetItem(str(att_str)))
-            self.table.setItem(row, 6, QTableWidgetItem(str(received)))
+            self.table.setItem(
+                row,
+                0,
+                QTableWidgetItem(str(source)),
+            )
+            self.table.setItem(
+                row,
+                1,
+                QTableWidgetItem(str(sender)),
+            )
+            self.table.setItem(
+                row,
+                2,
+                QTableWidgetItem(str(title)),
+            )
+            self.table.setItem(
+                row,
+                3,
+                QTableWidgetItem(str(mode)),
+            )
+            self.table.setItem(
+                row,
+                4,
+                QTableWidgetItem(str(fmt)),
+            )
+            self.table.setItem(
+                row,
+                5,
+                QTableWidgetItem(att_str),
+            )
+            self.table.setItem(
+                row,
+                6,
+                QTableWidgetItem(str(received)),
+            )
 
             status_item = QTableWidgetItem(str(status))
             status_item.setForeground(Qt.darkBlue)
-            self.table.setItem(row, 7, status_item)
+
+            self.table.setItem(
+                row,
+                7,
+                status_item,
+            )
+
+        self.process_button.setEnabled(
+            self.table.currentRow() >= 0
+        )
 
     def _clear_filters(self):
         self.search_input.clear()
         self.filter_combo.setCurrentIndex(0)
 
+    # ------------------------------------------------------------
+    # SELECTION / PROCESS
+    # ------------------------------------------------------------
+
     def _on_selection_changed(self):
-        """Enable process button only when a row is actually selected."""
-        has_selection = self.table.currentRow() >= 0
-        self.process_button.setEnabled(has_selection)
+        self.process_button.setEnabled(
+            self.table.currentRow() >= 0
+        )
 
     def process_selected(self):
-        """Emits selected intake item for OCR extraction and document processing."""
         row = self.table.currentRow()
+
         if row < 0 or row >= len(self._displayed_docs):
             QMessageBox.information(
                 self,
                 "No Document Selected",
-                "Please select an incoming document from the queue to process."
+                "Please select an incoming communication to process.",
             )
             return
 
         selected_item = self._displayed_docs[row]
+
         self.process_requested.emit(selected_item)
 
+    # ------------------------------------------------------------
+    # OUTLOOK AUTO SYNC
+    # ------------------------------------------------------------
+
     def _background_autosync(self):
-        """Silently auto-syncs mailbox in background without intrusive popups."""
         try:
             from datetime import datetime
-            from repositories.provider import get_repository
+
             repo = get_repository()
             result = repo.sync_outlook()
 
@@ -297,48 +532,87 @@ class InboxPage(QWidget):
 
             if status == "success":
                 synced_cnt = result.get("synced_count", 0)
+
                 if synced_cnt > 0:
-                    self.sync_badge.setText(f"🟢 Auto-Synced ({now_str}) • {synced_cnt} new mail(s)")
+                    self.sync_badge.setText(
+                        f"🟢 Auto-Synced ({now_str}) • "
+                        f"{synced_cnt} new mail(s)"
+                    )
                     self.load_documents()
                 else:
-                    self.sync_badge.setText(f"🟢 Auto-Synced ({now_str})")
+                    self.sync_badge.setText(
+                        f"🟢 Auto-Synced ({now_str})"
+                    )
+
             elif status == "not_configured":
-                self.sync_badge.setText("⚪ Standby (Manual Mode)")
+                self.sync_badge.setText(
+                    "⚪ Standby (Manual Mode)"
+                )
+
         except Exception:
             pass
 
     def _sync_outlook(self):
-        """Triggers manual mailbox sync with responsive button state."""
         self.sync_outlook_btn.setEnabled(False)
         self.sync_outlook_btn.setText("⏳ Syncing...")
+
         try:
             from datetime import datetime
-            from repositories.provider import get_repository
+
             repo = get_repository()
             result = repo.sync_outlook()
 
             status = result.get("status")
-            message = result.get("message", "Mailbox synchronization complete.")
+            message = result.get(
+                "message",
+                "Mailbox synchronization complete.",
+            )
+
             now_str = datetime.now().strftime("%H:%M:%S")
 
             if status == "success":
                 synced_cnt = result.get("synced_count", 0)
-                self.sync_badge.setText(f"🟢 Synced ({now_str}) • {synced_cnt} new mail(s)")
-                QMessageBox.information(self, "Outlook Synchronized", message)
+
+                self.sync_badge.setText(
+                    f"🟢 Synced ({now_str}) • "
+                    f"{synced_cnt} new mail(s)"
+                )
+
+                QMessageBox.information(
+                    self,
+                    "Outlook Synchronized",
+                    message,
+                )
+
             elif status == "not_configured":
-                self.sync_badge.setText("⚪ Standby (Manual Mode)")
+                self.sync_badge.setText(
+                    "⚪ Standby (Manual Mode)"
+                )
+
                 QMessageBox.information(
                     self,
                     "Outlook Notice",
-                    f"{message}\n\nManual upload and existing intake documents remain fully accessible."
+                    f"{message}\n\n"
+                    "Manual upload and existing intake "
+                    "documents remain fully accessible.",
                 )
+
             else:
-                QMessageBox.warning(self, "Sync Issue", message)
+                QMessageBox.warning(
+                    self,
+                    "Sync Issue",
+                    message,
+                )
 
             self.load_documents()
 
         except Exception as ex:
-            QMessageBox.warning(self, "Sync Error", f"Could not complete Outlook sync: {str(ex)}")
+            QMessageBox.warning(
+                self,
+                "Sync Error",
+                f"Could not complete Outlook sync:\n{ex}",
+            )
+
         finally:
             self.sync_outlook_btn.setEnabled(True)
             self.sync_outlook_btn.setText("🔄 Sync Now")

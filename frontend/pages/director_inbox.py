@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, WorkflowStageEnum
+from models.enums import DocumentStatusEnum
 from services.document_service import document_service
 
 
@@ -168,13 +168,14 @@ class DirectorInboxPage(QWidget):
         filtered = []
 
         for doc in self.documents:
-            is_active_dir = bool(
-                doc.current_stage in (WorkflowStageEnum.DIRECTOR.value, "DIRECTOR", "Director")
-                or doc.status in (DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value, "Under Director Review", "UNDER_DIRECTOR_REVIEW")
+            is_active_dir = doc.status in (
+                DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value,
+                "Under Director Review",
+                "UNDER_DIRECTOR_REVIEW",
             )
             has_remark = bool(doc.director_remark)
             is_returned = bool(
-                (has_remark or doc.status in (DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value, "Director Review Completed"))
+                (has_remark or doc.status in (DocumentStatusEnum.RETURNED_TO_DS.value, "Director Review Completed"))
                 and not is_active_dir
             )
             is_progress = bool(
@@ -209,7 +210,7 @@ class DirectorInboxPage(QWidget):
                 ref = str(doc.reference or "").lower()
                 title = str(doc.title or "").lower()
                 source = str(doc.source or "").lower()
-                dept = str(doc.target_department_name or doc.suggested_department_name or "").lower()
+                dept = str(doc.suggested_department_name or "").lower()
                 prio = str(doc.priority or "").lower()
                 remark = str(doc.director_remark or "").lower()
 

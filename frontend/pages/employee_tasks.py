@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, WorkflowStageEnum
+from models.enums import DocumentStatusEnum
 from services.auth_service import auth_service
 from services.document_service import document_service
 
@@ -168,11 +168,7 @@ class EmployeeTasksPage(QWidget):
         )
 
     def _is_assigned_to_employee(self, doc, employee_id):
-        if (
-            doc.assigned_employee_id == employee_id
-            or doc.current_owner_id == employee_id
-            or getattr(doc, "employee_id", None) == employee_id
-        ):
+        if getattr(doc, "employee_id", None) == employee_id:
             return True
 
         for assignment in getattr(doc, "work_assignments", None) or []:
@@ -183,11 +179,7 @@ class EmployeeTasksPage(QWidget):
             if self._employee_in_assignment(assignment, employee_id):
                 return True
 
-        return any(
-            isinstance(da, dict)
-            and da.get("assigned_employee_id") == employee_id
-            for da in getattr(doc, "doc_assignments", [])
-        )
+        return False
 
     def load_tasks(self):
         """Loads only documents assigned to the authenticated employee."""
@@ -200,13 +192,6 @@ class EmployeeTasksPage(QWidget):
             self.documents = [
                 d for d in all_docs
                 if self._is_assigned_to_employee(d, emp_id)
-                and d.current_stage in (
-                    WorkflowStageEnum.EMPLOYEE.value,
-                    WorkflowStageEnum.CLOSED.value,
-                    "EMPLOYEE",
-                    "Employee",
-                    "Closed",
-                )
             ]
 
         self.apply_filter()

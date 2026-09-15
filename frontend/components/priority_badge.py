@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QSizePolicy
 
 
 class PriorityBadge(QLabel):
@@ -10,9 +10,10 @@ class PriorityBadge(QLabel):
             self.alignment()
         )
 
-        self.setMinimumWidth(
-            80
-        )
+        self.setMinimumWidth(64)
+        self.setMaximumWidth(110)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setWordWrap(False)
 
         self.set_priority(
             priority
@@ -24,13 +25,20 @@ class PriorityBadge(QLabel):
 
     def set_priority(self, priority):
 
-        self.priority = priority or "Medium"
+        raw = str(priority or "Medium").strip()
+        normalized = raw.replace("_", " ").replace("-", " ").title()
+        aliases = {
+            "High": "Red",
+            "Critical": "Red",
+            "Urgent": "Red",
+            "Medium High": "Orange",
+            "Normal": "Yellow",
+            "Low": "Green",
+        }
+        self.priority = aliases.get(normalized, normalized)
+        self.setText(self.priority)
 
-        self.setText(
-            self.priority
-        )
-
-        if priority == "Red":
+        if self.priority == "Red":
 
             self.setStyleSheet("""
                 QLabel {
@@ -42,7 +50,7 @@ class PriorityBadge(QLabel):
                 }
             """)
 
-        elif priority == "Orange":
+        elif self.priority == "Orange":
 
             self.setStyleSheet("""
                 QLabel {
@@ -54,7 +62,7 @@ class PriorityBadge(QLabel):
                 }
             """)
 
-        elif priority == "Yellow":
+        elif self.priority == "Yellow":
 
             self.setStyleSheet("""
                 QLabel {

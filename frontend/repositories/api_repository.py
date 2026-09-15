@@ -24,19 +24,20 @@ class APIRepository(BaseRepository):
     Translates service calls into REST API requests against centralized Endpoints.
     """
 
-    # Mapping frontend RouteTypeEnum values to backend RouteType enum member strings
+    # Canonical routing types.
+    #
+    # Operational routing is represented by DocumentDepartmentRouting
+    # branches. Director review/return/follow-up are separate workflow
+    # actions and use their dedicated endpoints below.
     ROUTE_TYPE_MAP = {
-        RouteTypeEnum.DS_TO_DIRECTOR.value: "INITIAL_DIRECTOR_REVIEW",
-        RouteTypeEnum.DIRECTOR_TO_DS.value: "RETURN_TO_DS",
-        RouteTypeEnum.DS_TO_HOD.value: "POST_REVIEW_TO_HOD",
-        RouteTypeEnum.DS_TO_EMPLOYEE.value: "POST_REVIEW_TO_EMPLOYEE",
-        RouteTypeEnum.DS_TO_DIRECTOR_FOLLOWUP.value: "FOLLOW_UP_TO_DIRECTOR",
-        # Pass-through for exact backend enum member names
-        "INITIAL_DIRECTOR_REVIEW": "INITIAL_DIRECTOR_REVIEW",
-        "RETURN_TO_DS": "RETURN_TO_DS",
-        "POST_REVIEW_TO_HOD": "POST_REVIEW_TO_HOD",
-        "POST_REVIEW_TO_EMPLOYEE": "POST_REVIEW_TO_EMPLOYEE",
-        "FOLLOW_UP_TO_DIRECTOR": "FOLLOW_UP_TO_DIRECTOR",
+        RouteTypeEnum.DEPARTMENT_HOD.value: RouteTypeEnum.DEPARTMENT_HOD.value,
+        RouteTypeEnum.DIRECT_EMPLOYEE.value: RouteTypeEnum.DIRECT_EMPLOYEE.value,
+        RouteTypeEnum.TSO.value: RouteTypeEnum.TSO.value,
+        "DS_TO_DIRECTOR": "INITIAL_DIRECTOR_REVIEW",
+        "DIRECTOR_TO_DS": "RETURN_TO_DS",
+        "DS_TO_HOD": "POST_REVIEW_TO_HOD",
+        "DS_TO_EMPLOYEE": "POST_REVIEW_TO_EMPLOYEE",
+        "DS_TO_DIRECTOR_FOLLOWUP": "FOLLOW_UP_TO_DIRECTOR",
     }
 
     def __init__(self):
@@ -48,22 +49,22 @@ class APIRepository(BaseRepository):
 
     def authenticate(self, username: str, password: str) -> Optional[UserModel]:
         """
-        Validates credentials, stores the JWT, loads the authenticated profile,
-        and establishes the user's active WorkContextMembership.
+        Authenticate against the real backend and preserve the complete
+        context membership collection returned by the backend.
 
-        The backend currently exposes contexts through /auth/contexts, so the
-        repository does not assume that login must contain a top-level
-        ``contexts`` field.
+        This is important because ContextManager/AuthService use the
+        authenticated UserModel as the source for the workspace selector.
+        A profile-only /auth/me response must not discard the memberships
+        returned by /auth/login or /auth/contexts.
         """
         payload = {"username": username.strip(), "password": password}
+
         try:
-            response = api_client.post(Endpoints.AUTH_LOGIN, json=payload)
+            response = api_client.post(Endpoints.AUTH_LOGIN, json=payload) or {}
         except UnauthorizedError:
             return None
         except Exception:
             raise
-
-        response = response or {}
 
         token = response.get("access_token")
         if token:
@@ -76,8 +77,8 @@ class APIRepository(BaseRepository):
         if not user_data:
             return None
 
-        # LoginResponse in the current backend may expose the active context
-        # separately, while /auth/me may expose context_memberships.
+        # The backend may provide memberships directly in the login response,
+        # or under /auth/me as context_memberships.
         active_context_id = (
             response.get("active_context_id")
             or response.get("active_context_membership_id")
@@ -87,11 +88,14 @@ class APIRepository(BaseRepository):
 
         contexts = (
             response.get("contexts")
+            or response.get("context_memberships")
+            or user_data.get("contexts")
             or user_data.get("context_memberships")
             or []
         )
 
-        # If login did not include memberships, use the authoritative endpoint.
+        # If login did not include memberships, explicitly retrieve the real
+        # backend context collection. Never manufacture contexts locally.
         if not contexts and token:
             try:
                 contexts = self.get_user_contexts()
@@ -122,12 +126,58 @@ class APIRepository(BaseRepository):
         return self._current_user
 
     def get_current_user(self) -> Optional[UserModel]:
-        """Returns currently authenticated user profile."""
+        """
+        Return the authenticated user while preserving the complete context
+        membership state used by the workspace selector.
+        """
         if not self._current_user and api_client._auth_token:
             try:
                 user_data = api_client.get(Endpoints.AUTH_ME)
-                if user_data:
-                    self._current_user = UserModel.from_dict(user_data)
+                if not user_data:
+                    return None
+
+                contexts = (
+                    user_data.get("context_memberships")
+                    or user_data.get("contexts")
+                    or []
+                )
+
+                # /auth/me may return no memberships in some backend versions.
+                if not contexts:
+                    try:
+                        contexts = api_client.get(Endpoints.AUTH_CONTEXTS) or []
+                    except Exception:
+                        contexts = []
+
+                if contexts:
+                    user_data["context_memberships"] = contexts
+
+                active_id = (
+                    user_data.get("active_context_id")
+                    or user_data.get("active_context_membership_id")
+                    or api_client.get_active_context_id()
+                )
+
+                if active_id is None and contexts:
+                    # Prefer the backend-marked active membership; otherwise
+                    # leave selection to ContextManager.
+                    active = next(
+                        (
+                            c for c in contexts
+                            if c.get("is_active") is True
+                            or c.get("active") is True
+                        ),
+                        None,
+                    )
+                    if active:
+                        active_id = active.get("id")
+
+                if active_id is not None:
+                    user_data["active_context_id"] = active_id
+                    user_data["active_context_membership_id"] = active_id
+                    api_client.set_active_context_id(int(active_id))
+
+                self._current_user = UserModel.from_dict(user_data)
             except Exception:
                 return None
         return self._current_user
@@ -173,6 +223,14 @@ class APIRepository(BaseRepository):
 
         return result
 
+    def get_active_context_id(self) -> Optional[int]:
+        """Return the membership ID currently attached to API requests."""
+        return api_client.get_active_context_id()
+
+    def clear_active_context(self) -> None:
+        """Clear only the client-side active context."""
+        api_client.set_active_context_id(None)
+
     def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
         """Resets user password via backend reset endpoint requiring current password."""
         payload = {
@@ -194,48 +252,115 @@ class APIRepository(BaseRepository):
             # cause documents to be routed to wrong departments.
             return []
 
-    def get_users(self, role: Optional[str] = None, department_id: Optional[int] = None) -> List[UserModel]:
+    def get_users(
+        self,
+        role: Optional[str] = None,
+        department_id: Optional[int] = None
+    ) -> List[UserModel]:
         """
-        Retrieves users. Uses /users, falling back to /departments/{id}/employees.
+        Retrieve users from the backend.
+
+        `role` is treated as a compatibility filter for callers that still use
+        the repository's role argument. When context memberships are present,
+        their context types are also considered so a person such as a TSO who
+        additionally has an EMPLOYEE context is not incorrectly excluded.
+
+        Department filtering remains a user/employee lookup filter; operational
+        document authorization is always enforced by the backend.
         """
         users: List[UserModel] = []
+        raw_users: List[Dict[str, Any]] = []
+
         try:
-            data = api_client.get(Endpoints.USERS_LIST)
-            users = [UserModel.from_dict(u) for u in data]
+            data = api_client.get(Endpoints.USERS_LIST) or []
+            raw_users = data if isinstance(data, list) else []
+            users = [UserModel.from_dict(u) for u in raw_users]
         except Exception:
-            target_dept = department_id or (self._current_user.department_id if self._current_user else None)
-            if target_dept:
+            target_dept = department_id
+            if target_dept is None and self._current_user is not None:
+                target_dept = getattr(self._current_user, "department_id", None)
+
+            if target_dept is not None:
                 try:
-                    data = api_client.get(Endpoints.DEPARTMENT_EMPLOYEES(target_dept))
+                    data = api_client.get(
+                        Endpoints.DEPARTMENT_EMPLOYEES(target_dept)
+                    ) or []
+                    raw_users = data if isinstance(data, list) else []
                     users = [
                         UserModel(
                             id=emp.get("user_id") or emp.get("id"),
-                            username=emp.get("employee_code", f"emp_{emp.get('id')}"),
+                            username=emp.get(
+                                "employee_code",
+                                f"emp_{emp.get('id')}"
+                            ),
                             full_name=emp.get("full_name", ""),
                             role="Employee",
                             department_id=emp.get("department_id"),
-                            department_name=None,
-                            is_active=emp.get("is_active", True)
+                            department_name=emp.get("department_name"),
+                            is_active=emp.get("is_active", True),
                         )
-                        for emp in data
+                        for emp in raw_users
                     ]
                 except Exception:
                     users = []
+                    raw_users = []
 
-        # Populate department_name if missing
+        # Fill department names from the authoritative department endpoint
+        # only when the user payload did not already contain one.
         try:
-            depts = {d.id: d.name for d in self.get_departments()}
+            depts = {
+                d.id: d.name
+                for d in self.get_departments()
+            }
             for u in users:
-                if u.department_id and not u.department_name:
-                    u.department_name = depts.get(u.department_id, "General")
+                uid = getattr(u, "department_id", None)
+                if uid and not getattr(u, "department_name", None):
+                    u.department_name = depts.get(uid, "General")
         except Exception:
             pass
 
         if role:
             normalized_target = RoleEnum.normalize(role).lower()
-            users = [u for u in users if (u.role or "").lower() == normalized_target]
-        if department_id:
-            users = [u for u in users if u.department_id == department_id]
+
+            filtered: List[UserModel] = []
+            for index, user in enumerate(users):
+                base_role = str(
+                    getattr(user, "role", "") or ""
+                ).lower()
+
+                matches = base_role == normalized_target
+
+                # Context membership data can establish an operational role
+                # independently of the persisted base User.role.
+                raw = raw_users[index] if index < len(raw_users) else {}
+                memberships = (
+                    raw.get("context_memberships")
+                    or raw.get("contexts")
+                    or []
+                )
+
+                if not matches:
+                    for membership in memberships:
+                        context_type = str(
+                            membership.get("context_type")
+                            or membership.get("type")
+                            or membership.get("role")
+                            or ""
+                        ).lower()
+                        if RoleEnum.normalize(context_type).lower() == normalized_target:
+                            matches = True
+                            break
+
+                if matches:
+                    filtered.append(user)
+
+            users = filtered
+
+        if department_id is not None:
+            users = [
+                u for u in users
+                if getattr(u, "department_id", None) == department_id
+            ]
 
         return users
 
@@ -245,36 +370,12 @@ class APIRepository(BaseRepository):
 
     def get_inbox(self) -> List[DocumentModel]:
         """
-        Retrieves incoming intake queue (Outlook emails & dispatches) for DS intake,
-        falling back to documents inbox queue.
-        """
-        try:
-            intake_data = api_client.get(Endpoints.INTAKE_LIST)
-            if intake_data:
-                docs = []
-                for item in intake_data:
-                    # Only show un-processed (NEW) intake items
-                    status_str = str(item.get("processing_status", "")).upper()
-                    if status_str in ("PROCESSED", "IGNORED", "FAILED"):
-                        continue
-                    doc_dict = {
-                        "id": item.get("id"),
-                        "title": item.get("subject") or f"Incoming Dispatch #{item.get('id')}",
-                        "subject": item.get("subject"),
-                        "date": item.get("received_at"),
-                        "mode": item.get("source_type") or "Outlook",
-                        "source": item.get("sender_name") or item.get("sender_email") or "Outlook",
-                        "created_by": item.get("sender_email") or item.get("sender_name"),
-                        "status": "New / Received",
-                        "attachment_count": 1 if item.get("has_attachments") else 0,
-                        "description": item.get("body_reference")
-                    }
-                    docs.append(DocumentModel.from_dict(doc_dict))
-                return docs
-        except Exception:
-            pass
+        Retrieve the document inbox for the active operational context.
 
-        data = api_client.get(Endpoints.DOCUMENTS_INBOX)
+        DS intake items are intentionally not mixed into the generic document
+        inbox. Call get_intake_items() for the Outlook/intake queue.
+        """
+        data = api_client.get(Endpoints.DOCUMENTS_INBOX) or []
         return [DocumentModel.from_dict(d) for d in data]
 
     def get_intake_items(self) -> List[Dict[str, Any]]:
@@ -318,19 +419,63 @@ class APIRepository(BaseRepository):
 
         # Apply filtering
         if status and status != "All Status":
-            docs = [d for d in docs if (d.status or "").lower() == status.lower()]
+            docs = [
+                d for d in docs
+                if (getattr(d, "status", None) or "").lower() == status.lower()
+            ]
+        def _document_department_text(doc: DocumentModel) -> str:
+            # Document-level department is no longer an operational routing
+            # source of truth. These advisory fields are safe for display/filter
+            # when supplied by the backend.
+            suggested = getattr(doc, "suggested_department_name", None)
+            if suggested:
+                return str(suggested)
+
+            routings = (
+                getattr(doc, "department_routings", None)
+                or getattr(doc, "routing_branches", None)
+                or getattr(doc, "branches", None)
+                or []
+            )
+            names: List[str] = []
+            for branch in routings:
+                if isinstance(branch, dict):
+                    name = (
+                        branch.get("target_department_name")
+                        or branch.get("department_name")
+                    )
+                else:
+                    name = (
+                        getattr(branch, "target_department_name", None)
+                        or getattr(branch, "department_name", None)
+                    )
+                if name and str(name) not in names:
+                    names.append(str(name))
+            return ", ".join(names)
+
         if department and department != "All Departments":
-            docs = [d for d in docs if (d.department or "").lower() == department.lower()]
+            target = department.lower()
+            docs = [
+                d for d in docs
+                if target in _document_department_text(d).lower()
+            ]
+
         if source and source != "All Sources":
-            docs = [d for d in docs if (d.source or "").lower() == source.lower()]
+            docs = [
+                d for d in docs
+                if (getattr(d, "source", None) or "").lower()
+                == source.lower()
+            ]
+
         if search:
             q = search.lower().strip()
             docs = [
                 d for d in docs
-                if q in (d.title or "").lower()
-                or q in (d.reference or "").lower()
-                or q in (d.source or "").lower()
-                or q in (d.department or "").lower()
+                if q in (getattr(d, "title", None) or "").lower()
+                or q in (getattr(d, "reference", None) or "").lower()
+                or q in (getattr(d, "source", None) or "").lower()
+                or q in _document_department_text(d).lower()
+                or q in (getattr(d, "suggested_employee_name", None) or "").lower()
             ]
 
         return docs
@@ -340,89 +485,61 @@ class APIRepository(BaseRepository):
         data = api_client.get(Endpoints.DOCUMENT_DETAIL(document_id))
         return DocumentModel.from_dict(data) if data else None
 
-    # def create_document(self, document: DocumentModel, file_path: Optional[str] = None) -> DocumentModel:
-    #     """
-    #     Creates a new canonical document. When file_path is provided, uses the
-    #     multipart manual-upload pipeline. Otherwise sends JSON creation payload.
-    #     """
-    #     raw_date = str(document.date).split()[0] if document.date else datetime.now().strftime("%Y-%m-%d")
-    #     priority_val = PriorityEnum.normalize(document.priority).upper()
-
-    #     if file_path:
-    #         form_data = {
-    #             "title": document.title,
-    #             "received_date": raw_date,
-    #             "mode": document.mode or "Manual Upload",
-    #             "priority": priority_val,
-    #             "source": document.source or "Manual Intake",
-    #             "description": document.remarks or document.title or "Uploaded document",
-    #             "ocr_text": document.ocr_text or "",
-    #             "suggested_department_id": str(document.suggested_department_id) if document.suggested_department_id else "",
-    #             "suggested_department_name": document.suggested_department_name or "",
-    #             "suggested_employee_id": str(document.suggested_employee_id) if document.suggested_employee_id else "",
-    #             "suggested_employee_name": document.suggested_employee_name or ""
-    #         }
-    #         data = api_client.upload(
-    #             Endpoints.INTAKE_MANUAL_UPLOAD,
-    #             file_path_or_tuple=file_path,
-    #             field_name="file",
-    #             extra_data=form_data
-    #         )
-    #     else:
-    #         payload = {
-    #             "title": document.title,
-    #             "received_date": raw_date,
-    #             "mode": document.mode or "Manual Upload",
-    #             "priority": priority_val,
-    #             "source": document.source or "External",
-    #             "deadline": str(document.deadline).split()[0] if document.deadline else None,
-    #             "description": document.remarks or document.title,
-    #             "target_department_id": document.target_department_id,
-    #             "target_department_name": document.target_department_name,
-    #             "suggested_department_id": document.suggested_department_id,
-    #             "suggested_department_name": document.suggested_department_name,
-    #             "suggested_employee_id": document.suggested_employee_id,
-    #             "suggested_employee_name": document.suggested_employee_name,
-    #         }
-    #         data = api_client.post(Endpoints.DOCUMENT_CREATE, json=payload)
-
-    #     return DocumentModel.from_dict(data)
-    def create_document(self, document: DocumentModel, file_path: Optional[str] = None) -> DocumentModel:
+    def create_document(
+        self,
+        document: DocumentModel,
+        file_path: Optional[str] = None
+    ) -> DocumentModel:
         """
-        Creates a new canonical document. When file_path is provided, uses the
-        multipart manual-upload pipeline. Otherwise sends JSON creation payload.
+        Create a canonical document through the live backend.
+
+        If file_path is supplied, use the DS manual-intake multipart endpoint.
+        Otherwise use the canonical JSON /documents endpoint.
+
+        Routing fields here are advisory suggestions only. Operational routing
+        is created separately through the canonical branch endpoints.
         """
         raw_date = (
-            str(document.date).split()[0]
-            if document.date
+            str(getattr(document, "date", "")).split()[0]
+            if getattr(document, "date", None)
             else datetime.now().strftime("%Y-%m-%d")
         )
-        priority_val = PriorityEnum.normalize(document.priority).upper()
-        conf_val = getattr(document, "confidence", None)
-        if conf_val is None:
-            conf_val = getattr(document, "routing_confidence", None)
-        if conf_val is not None:
-            try:
-                cv = float(conf_val)
-                conf_val = (cv / 100.0) if cv > 1.0 else cv
-            except (ValueError, TypeError):
-                conf_val = None
+        priority_val = PriorityEnum.normalize(
+            getattr(document, "priority", None)
+        ).upper()
 
         if file_path:
             form_data = {
-                "title": document.title,
+                "title": getattr(document, "title", "") or "Untitled document",
                 "received_date": raw_date,
-                "mode": document.mode or "Manual Upload",
+                "mode": getattr(document, "mode", None) or "Manual Upload",
                 "priority": priority_val,
-                "source": document.source or "Manual Intake",
-                "description": document.remarks or document.title or "Uploaded document",
-                "ocr_text": document.ocr_text or "",
-                "confidence": str(conf_val) if conf_val is not None else "",
-                "suggested_department_id": str(document.suggested_department_id) if document.suggested_department_id else "",
-                "suggested_department_name": document.suggested_department_name or "",
-                "suggested_employee_id": str(document.suggested_employee_id) if document.suggested_employee_id else "",
-                "suggested_employee_name": document.suggested_employee_name or "",
+                "source": getattr(document, "source", None) or "Manual Intake",
+                "description": (
+                    getattr(document, "remarks", None)
+                    or getattr(document, "description", None)
+                    or getattr(document, "title", None)
+                    or "Uploaded document"
+                ),
+                "ocr_text": getattr(document, "ocr_text", None) or "",
+                "suggested_department_id": (
+                    str(document.suggested_department_id)
+                    if getattr(document, "suggested_department_id", None)
+                    else ""
+                ),
+                "suggested_department_name": (
+                    getattr(document, "suggested_department_name", None) or ""
+                ),
+                "suggested_employee_id": (
+                    str(document.suggested_employee_id)
+                    if getattr(document, "suggested_employee_id", None)
+                    else ""
+                ),
+                "suggested_employee_name": (
+                    getattr(document, "suggested_employee_name", None) or ""
+                ),
             }
+
             data = api_client.upload(
                 Endpoints.INTAKE_MANUAL_UPLOAD,
                 file_path_or_tuple=file_path,
@@ -431,29 +548,47 @@ class APIRepository(BaseRepository):
             )
         else:
             payload = {
-                "title": document.title,
+                "title": getattr(document, "title", "") or "Untitled document",
                 "received_date": raw_date,
-                "mode": document.mode or "Manual Upload",
+                "mode": getattr(document, "mode", None) or "External",
+                "source": getattr(document, "source", None) or "External",
+                "deadline": (
+                    str(getattr(document, "deadline", "")).split()[0]
+                    if getattr(document, "deadline", None)
+                    else None
+                ),
+                "description": (
+                    getattr(document, "remarks", None)
+                    or getattr(document, "description", None)
+                    or getattr(document, "title", None)
+                    or "Document"
+                ),
                 "priority": priority_val,
-                "source": document.source or "External",
-                "deadline": str(document.deadline).split()[0] if document.deadline else None,
-                "description": document.remarks or document.title,
-                "ocr_text": document.ocr_text or "",
-                "confidence": conf_val,
-                "target_department_id": document.target_department_id,
-                "target_department_name": document.target_department_name,
-                "suggested_department_id": document.suggested_department_id,
-                "suggested_department_name": document.suggested_department_name,
-                "suggested_employee_id": document.suggested_employee_id,
-                "suggested_employee_name": document.suggested_employee_name,
+                "suggested_department_id": getattr(
+                    document, "suggested_department_id", None
+                ),
+                "suggested_department_name": getattr(
+                    document, "suggested_department_name", None
+                ),
+                "suggested_employee_id": getattr(
+                    document, "suggested_employee_id", None
+                ),
+                "suggested_employee_name": getattr(
+                    document, "suggested_employee_name", None
+                ),
+                "ocr_text": getattr(document, "ocr_text", None),
+                "confidence": getattr(document, "confidence", None),
             }
             data = api_client.post(Endpoints.DOCUMENT_CREATE, json=payload)
 
+        if not data:
+            raise RuntimeError("Backend returned an empty document response.")
+
         return DocumentModel.from_dict(data)
 
-    def close_document(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def close_document(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """Permanently closes a completed document."""
-        payload = {"remarks": remarks}
+        payload = {"remarks": remarks, "expected_version": expected_version}
         data = api_client.post(Endpoints.DOCUMENT_CLOSE(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
@@ -468,7 +603,8 @@ class APIRepository(BaseRepository):
         to_user_id: Optional[int] = None,
         to_department_id: Optional[int] = None,
         remarks: Optional[str] = None,
-        requires_hod_validation=False
+        requires_hod_validation: bool = False,
+        expected_version: Optional[int] = None,
     ) -> DocumentModel:
         """
         Routes a document. Translates frontend RouteTypeEnum values to backend
@@ -480,32 +616,33 @@ class APIRepository(BaseRepository):
             "to_user_id": to_user_id,
             "to_department_id": to_department_id,
             "remarks": remarks,
-            "requires_hod_validation":requires_hod_validation,
+            "requires_hod_validation": requires_hod_validation,
+            "expected_version": expected_version,
         }
         data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
-    def save_director_remark(self, document_id: int, remark: str) -> DocumentModel:
+    def save_director_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
         """Director saves or updates a remark on the document."""
-        payload = {"director_remark": remark}
+        payload = {"director_remark": remark, "expected_version": expected_version}
         data = api_client.put(Endpoints.DIRECTOR_REMARK(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
-    def return_to_ds(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def return_to_ds(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """Director returns reviewed document back to DS."""
-        payload = {"remarks": remarks}
+        payload = {"remarks": remarks, "expected_version": expected_version}
         data = api_client.post(Endpoints.DOCUMENT_RETURN_TO_DS(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
-    def save_hod_remark(self, document_id: int, remark: str) -> DocumentModel:
+    def save_hod_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
         """HOD saves or updates department remarks on the document."""
-        payload = {"hod_remark": remark}
+        payload = {"hod_remark": remark, "expected_version": expected_version}
         data = api_client.put(Endpoints.HOD_REMARK(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
-    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """DS forwards employee progress update to Director as follow-up."""
-        payload = {"remarks": remarks}
+        payload = {"remarks": remarks, "expected_version": expected_version}
         data = api_client.post(Endpoints.DOCUMENT_FOLLOW_UP(document_id), json=payload)
         return DocumentModel.from_dict(data)
 
@@ -518,7 +655,10 @@ class APIRepository(BaseRepository):
         document_id: int,
         assigned_to_id: int,
         instructions: Optional[str] = None,
-        requires_hod_validation: bool = False
+        requires_hod_validation: bool = False,
+        routing_id: Optional[int] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> WorkAssignmentModel:
         """
         HOD delegates work on a document to an employee.
@@ -527,9 +667,38 @@ class APIRepository(BaseRepository):
         payload = {
             "assigned_to_user_id": assigned_to_id,
             "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation
+            "requires_hod_validation": requires_hod_validation,
+            "routing_id": routing_id,
+            "change_reason": change_reason,
+            "expected_version": expected_version,
         }
         data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
+        return WorkAssignmentModel.from_dict(data)
+
+    def hod_assign_team(
+        self, document_id: int, member_user_ids: List[int], routing_id: Optional[int] = None,
+        team_name: Optional[str] = None, instructions: Optional[str] = None,
+        requires_hod_validation: bool = False, expected_version: Optional[int] = None,
+    ) -> WorkAssignmentModel:
+        payload = {
+            "member_user_ids": member_user_ids, "routing_id": routing_id,
+            "team_name": team_name, "instructions": instructions,
+            "requires_hod_validation": requires_hod_validation, "expected_version": expected_version,
+        }
+        data = api_client.post(Endpoints.DOCUMENT_HOD_ASSIGN_TEAM(document_id), json=payload)
+        return WorkAssignmentModel.from_dict(data)
+
+    def ds_assign_team(
+        self, document_id: int, member_user_ids: List[int], routing_id: Optional[int] = None,
+        team_name: Optional[str] = None, instructions: Optional[str] = None,
+        requires_hod_validation: bool = False, expected_version: Optional[int] = None,
+    ) -> WorkAssignmentModel:
+        payload = {
+            "member_user_ids": member_user_ids, "routing_id": routing_id,
+            "team_name": team_name, "instructions": instructions,
+            "requires_hod_validation": requires_hod_validation, "expected_version": expected_version,
+        }
+        data = api_client.post(Endpoints.DOCUMENT_DS_ASSIGN_TEAM(document_id), json=payload)
         return WorkAssignmentModel.from_dict(data)
 
     def assign_multi(self, document_id: int, assignments_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -548,75 +717,33 @@ class APIRepository(BaseRepository):
         """HOD updates an assignment record."""
         return api_client.patch(Endpoints.DOCUMENT_ASSIGNMENT_UPDATE(document_id, assignment_id), json=update_dict) or {}
 
-    def hod_validate_progress(self, document_id: int, progress_id: int, action: str, note: Optional[str] = None) -> ProgressUpdateModel:
-        """HOD validates (approve or return) an employee progress update."""
+    def hod_validate_progress(
+        self,
+        document_id: int,
+        progress_id: int,
+        action: str,
+        note: Optional[str] = None
+    ) -> ProgressUpdateModel:
+        """
+        HOD validates an employee progress update.
+
+        The active HOD membership is propagated automatically by APIClient via
+        X-Work-Context-Id; it is deliberately not duplicated in the JSON body.
+        """
         payload = {"action": action, "note": note}
-        data = api_client.post(Endpoints.PROGRESS_HOD_VALIDATE(document_id, progress_id), json=payload)
+        data = api_client.post(
+            Endpoints.PROGRESS_HOD_VALIDATE(document_id, progress_id),
+            json=payload,
+        )
         return ProgressUpdateModel.from_dict(data)
 
     def get_assignments(self, document_id: int) -> List[WorkAssignmentModel]:
         """Retrieves assignment records for a document."""
         try:
-            data = api_client.get(Endpoints.DOCUMENT_ASSIGN(document_id))
+            data = api_client.get(Endpoints.DOCUMENT_ASSIGNMENTS(document_id))
             return [WorkAssignmentModel.from_dict(a) for a in data]
         except Exception:
             return []
-
-    def hod_assign_team(
-        self,
-        document_id: int,
-        member_user_ids: List[int],
-        routing_id: Optional[int] = None,
-        team_name: Optional[str] = None,
-        instructions: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        """
-        HOD creates one work assignment containing multiple employee members.
-        Backend remains authoritative for scope, validation, and assignment state.
-        """
-        payload = {
-            "member_user_ids": [int(user_id) for user_id in member_user_ids],
-            "routing_id": routing_id,
-            "team_name": team_name,
-            "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation,
-            "expected_version": expected_version,
-        }
-        data = api_client.post(
-            f"/documents/{document_id}/hod-assign-team",
-            json=payload,
-        )
-        return WorkAssignmentModel.from_dict(data)
-
-    def ds_assign_team(
-        self,
-        document_id: int,
-        member_user_ids: List[int],
-        routing_id: Optional[int] = None,
-        team_name: Optional[str] = None,
-        instructions: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        """
-        DS creates one work assignment containing multiple employees.
-        Supports cross-department teams where allowed by the backend.
-        """
-        payload = {
-            "member_user_ids": [int(user_id) for user_id in member_user_ids],
-            "routing_id": routing_id,
-            "team_name": team_name,
-            "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation,
-            "expected_version": expected_version,
-        }
-        data = api_client.post(
-            f"/documents/{document_id}/ds-assign-team",
-            json=payload,
-        )
-        return WorkAssignmentModel.from_dict(data)
 
     def create_branches(
         self,
@@ -663,7 +790,7 @@ class APIRepository(BaseRepository):
         remark_text: Optional[str] = None,
         expected_version: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Legacy compatibility wrapper; current workflow uses free-text Director remark + return-to-DS."""
+        """Director submits machine-readable decision (CONTINUE or CLOSE)."""
         payload = {
             "decision": decision,
             "remark_text": remark_text,
@@ -690,14 +817,21 @@ class APIRepository(BaseRepository):
         self,
         document_id: int,
         description: str,
-        attachment_file_path: Optional[str] = None
+        work_assignment_id: Optional[int] = None,
+        attachment_file_path: Optional[str] = None,
     ) -> ProgressUpdateModel:
         """
         Employee submits a progress update.
         Creates progress record via JSON, then uploads attachment if provided.
         """
-        payload = {"description": description}
-        data = api_client.post(Endpoints.PROGRESS_CREATE(document_id), json=payload)
+        payload = {"description": description, "work_assignment_id": work_assignment_id}
+        # APIClient automatically sends the selected EMPLOYEE/TSO context
+        # through X-Work-Context-Id. The backend binds the progress update to
+        # the corresponding WorkAssignment.
+        data = api_client.post(
+            Endpoints.PROGRESS_CREATE(document_id),
+            json=payload,
+        )
         prog = ProgressUpdateModel.from_dict(data)
 
         if attachment_file_path:

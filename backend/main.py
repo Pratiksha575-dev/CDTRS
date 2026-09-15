@@ -271,8 +271,6 @@ def require_context_types(*context_types: WorkContextType):
     ):
         if active_context and active_context.context_type in context_types:
             return current_user
-        if current_user.role.value in [ct.value for ct in context_types]:
-            return current_user
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access denied. Active work context must be one of: {[ct.value for ct in context_types]}"
@@ -284,19 +282,27 @@ def require_context_types(*context_types: WorkContextType):
 # SECURITY & ISOLATION HELPERS
 # =========================================================
 
-def _get_authorized_doc_or_404(db: Session, doc_id: int, user: models.User) -> models.Document:
+def _get_authorized_doc_or_404(
+    db: Session,
+    doc_id: int,
+    user: models.User,
+    active_context: Optional[models.WorkContextMembership] = None,
+) -> models.Document:
     doc = crud.get_document(db, doc_id)
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
-    if not crud.is_document_accessible(db, doc, user):
+    if not crud.is_document_accessible(
+        db, doc, user,
+        context_id=active_context.id if active_context else None,
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this document.")
 
     return doc
 
 
 def _assert_not_closed(doc: models.Document) -> None:
-    if doc.current_stage == models.WorkflowStage.CLOSED:
+    if doc.status == models.DocumentStatus.CLOSED:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Document is already closed. Normal workflow mutations are rejected.",
@@ -711,7 +717,6 @@ async def manual_intake_upload(
         source=source,
         mode=mode,
         priority=Priority(priority),
-        target_department_id=None,
         suggested_department_id=sugg_dept_id,
         suggested_employee_id=sugg_emp_id,
         ocr_text=ocr_text,
@@ -816,8 +821,15 @@ async def create_document(
 def get_documents(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    return crud.get_accessible_documents_for_user(db, current_user)
+    # Resolving active_context here is intentional even before CRUD receives
+    # context-aware scoping. It guarantees that every document-list request
+    # validates X-Work-Context-Id before data is returned.
+    return crud.get_accessible_documents_for_user(
+        db, current_user,
+        context_id=active_context.id if active_context else None,
+    )
 
 
 @app.get(
@@ -829,8 +841,13 @@ def get_documents(
 def get_inbox(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    return crud.get_inbox(db, current_user)
+    # Validate the selected work context for this request.
+    return crud.get_inbox(
+        db, current_user,
+        context_id=active_context.id if active_context else None,
+    )
 
 
 @app.get(
@@ -843,8 +860,9 @@ def get_document(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    return _get_authorized_doc_or_404(db, document_id, current_user)
+    return _get_authorized_doc_or_404(db, document_id, current_user, active_context)
 
 
 # =========================================================
@@ -861,9 +879,10 @@ async def route_document(
     document_id: int,
     route_req: schemas.RouteRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     result = crud.route_document(db, document_id, route_req, current_user)
@@ -891,7 +910,7 @@ async def create_document_branches(
     current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
     active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     try:
@@ -921,8 +940,9 @@ def get_document_branches(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     return crud.get_document_branches(db, document_id)
 
 
@@ -941,7 +961,7 @@ async def assign_branch_employee(
     current_user: models.User = Depends(require_context_types(WorkContextType.HOD, WorkContextType.DS, WorkContextType.ADMIN)),
     active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     try:
@@ -975,7 +995,7 @@ async def submit_director_review(
     current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
     active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     try:
@@ -1004,9 +1024,10 @@ async def save_director_remark(
     document_id: int,
     body: schemas.DirectorRemarkUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DIRECTOR)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     result = crud.save_director_remark(db, document_id, body.director_remark, current_user, body.expected_version)
@@ -1027,9 +1048,10 @@ async def return_to_ds(
     document_id: int,
     body: schemas.ReturnToDSRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DIRECTOR)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     ds_user_id = doc.created_by
@@ -1051,9 +1073,10 @@ async def save_hod_remark(
     document_id: int,
     body: schemas.HODRemarkUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.HOD)),
+current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     result = crud.save_hod_remark(db, document_id, body.hod_remark, current_user, body.expected_version)
@@ -1078,15 +1101,8 @@ async def hod_assign_team(
     current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
     active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
-
-    if current_user.role == UserRole.HOD and active_context and active_context.department_id:
-        if current_user.department_id != active_context.department_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Active HOD context does not match the user's department.",
-            )
 
     try:
         assignment = crud.create_hod_team_assignment(
@@ -1127,7 +1143,7 @@ async def ds_assign_team(
     current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
     active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
     try:
         assignment = crud.create_hod_team_assignment(
@@ -1152,98 +1168,33 @@ async def ds_assign_team(
     return assignment
 
 
+
+
+
+
+
+
+
+
 @app.post(
-    f"{API_V1}/documents/{{document_id}}/assign",
+    f"{API_V1}/documents/{{document_id}}/assignments/{{assignment_id}}/complete",
     response_model=schemas.AssignmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="HOD: Assign an employee to a document",
+    tags=["Documents — Assignments"],
+    summary="Employee/TSO: Complete own work assignment",
 )
-async def assign_employee(
-    document_id: int,
-    assign_req: schemas.AssignmentRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
-    _assert_not_closed(doc)
-
-    target_user = crud.get_user_by_id(db, assign_req.assigned_to_user_id)
-    if not target_user or target_user.role != UserRole.EMPLOYEE:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Target user must be an active EMPLOYEE.")
-
-    result = crud.assign_employee(db, document_id, assign_req, current_user)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
-    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/assign-multi",
-    response_model=List[schemas.DocumentAssignmentResponse],
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="DS: Configure multi-department / multi-employee assignments for a document",
-)
-async def assign_multi(
-    document_id: int,
-    body: schemas.MultiAssignRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
-    _assert_not_closed(doc)
-
-    result = crud.create_document_assignments(db, document_id, body.assignments, current_user)
-    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.get(
-    f"{API_V1}/documents/{{document_id}}/assignments",
-    response_model=List[schemas.DocumentAssignmentResponse],
-    tags=["Documents — Workflow"],
-    summary="Get all assignments for a document",
-)
-def get_assignments(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user)
-    return crud.get_document_assignments(db, document_id)
-
-
-@app.patch(
-    f"{API_V1}/documents/{{document_id}}/assignments/{{assignment_id}}",
-    response_model=schemas.DocumentAssignmentResponse,
-    tags=["Documents — Workflow"],
-    summary="HOD / DS: Update an assignment (assign employee / change validation rule)",
-)
-async def update_assignment(
+async def complete_assignment(
     document_id: int,
     assignment_id: int,
-    body: schemas.DocumentAssignmentCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS, UserRole.HOD)),
+    current_user: models.User = Depends(require_context_types(WorkContextType.EMPLOYEE, WorkContextType.TSO)),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
-    _assert_not_closed(doc)
-
-    result = crud.update_document_assignment(
-        db,
-        assignment_id=assignment_id,
-        assigned_employee_id=body.assigned_employee_id,
-        instructions=body.instructions,
-        requires_hod_validation=body.requires_hod_validation,
-        user=current_user
-    )
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
+    _assert_not_closed(_get_authorized_doc_or_404(db, document_id, current_user, active_context))
+    result = crud.complete_work_assignment(db, document_id, assignment_id, current_user, active_context.id if active_context else None)
     if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found.")
-
-    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
+        raise HTTPException(status_code=400, detail="Assignment cannot be completed.")
+    await crud.event_manager.broadcast("ASSIGNMENT_COMPLETED", document_id=document_id, user_id=current_user.id)
     return result
 
 
@@ -1258,12 +1209,16 @@ async def submit_progress(
     document_id: int,
     prog: schemas.ProgressCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.EMPLOYEE)),
+current_user: models.User = Depends(require_context_types(WorkContextType.EMPLOYEE, WorkContextType.TSO)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
-    result = crud.create_progress_update(db, document_id, prog, current_user)
+    result = crud.create_progress_update(
+        db, document_id, prog, current_user,
+        context_id=active_context.id if active_context else None
+    )
     if not result:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -1282,9 +1237,10 @@ async def hod_validate_progress(
     progress_id: int,
     val_req: schemas.HODValidationRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.HOD)),
+current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     result = crud.hod_validate_progress_update(
@@ -1293,7 +1249,8 @@ async def hod_validate_progress(
         progress_id=progress_id,
         action=val_req.action,
         note=val_req.note,
-        current_user=current_user
+        current_user=current_user,
+        context_id=active_context.id if active_context else None
     )
     if not result:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not validate progress update. Check IDs and action.")
@@ -1312,8 +1269,9 @@ def get_progress(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     return crud.get_progress_updates(db, document_id)
 
 
@@ -1327,9 +1285,10 @@ async def follow_up_to_director(
     document_id: int,
     body: schemas.FollowUpRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     directors = crud.get_users_by_role(db, UserRole.DIRECTOR)
@@ -1354,10 +1313,11 @@ async def close_document(
     document_id: int,
     body: schemas.CloseRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
-    if doc.current_stage == models.WorkflowStage.CLOSED:
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
+    if doc.status == models.DocumentStatus.CLOSED:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document is already closed.")
 
     try:
@@ -1386,8 +1346,9 @@ def get_document_remarks(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     return crud.get_document_remarks(db, document_id)
 
 
@@ -1403,9 +1364,10 @@ def get_document_remarks(
 async def process_ocr(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     ocr_result = crud.trigger_ocr_processing(db, document_id)
     if not ocr_result:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -1424,8 +1386,9 @@ def get_ocr_details(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     ocr = crud.get_document_ocr(db, document_id)
     fields = db.query(models.DocumentExtractedField).filter(models.DocumentExtractedField.document_id == document_id).all()
 
@@ -1455,9 +1418,10 @@ def verify_ocr_field(
     document_id: int,
     req: schemas.FieldVerifyRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     field = crud.verify_extracted_field(db, document_id, req.field_name, req.verified_value, current_user)
     return field
 
@@ -1470,9 +1434,10 @@ def verify_ocr_field(
 async def reanalyze_ocr(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     ocr_result = crud.reanalyze_document_ocr(db, document_id)
     await crud.event_manager.broadcast("OCR_COMPLETED", document_id=document_id, user_id=current_user.id)
     return {"message": "Re-analysis completed. Verified fields were preserved.", "confidence": ocr_result.confidence}
@@ -1492,9 +1457,10 @@ def analyze_routing(
     document_id: int,
     body: schemas.RoutingAnalyzeRequest = schemas.RoutingAnalyzeRequest(),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
+active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     suggestion = crud.generate_routing_suggestion(db, document_id, body.include_director_remark)
     if not suggestion:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -1529,8 +1495,9 @@ def get_routing_suggestion_endpoint(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     suggestion = crud.get_routing_suggestion(db, document_id)
     if not suggestion:
         suggestion = crud.generate_routing_suggestion(db, document_id)
@@ -1573,8 +1540,9 @@ async def upload_attachment(
     attachment_type: str = Form(default="SUPPORTING_DOCUMENT"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user)
+    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     _assert_not_closed(doc)
 
     file_ext = Path(file.filename or "").suffix.lower()
@@ -1637,8 +1605,9 @@ def get_document_attachments(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     return crud.get_attachments(db, document_id)
 
 
@@ -1652,11 +1621,12 @@ def get_attachment(
     attachment_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
     att = crud.get_attachment(db, attachment_id)
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found.")
-    _get_authorized_doc_or_404(db, att.document_id, current_user)
+    _get_authorized_doc_or_404(db, att.document_id, current_user, active_context)
     return att
 
 
@@ -1669,13 +1639,14 @@ def download_attachment(
     attachment_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
     att = crud.get_attachment(db, attachment_id)
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found.")
 
     # Strict authorization check against parent document
-    _get_authorized_doc_or_404(db, att.document_id, current_user)
+    _get_authorized_doc_or_404(db, att.document_id, current_user, active_context)
 
     file_path = UPLOAD_DIR / att.storage_key
     if not file_path.exists():
@@ -1715,8 +1686,9 @@ def get_document_history(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     return crud.get_document_history(db, document_id)
 
 
@@ -1735,8 +1707,9 @@ def send_document_action_reminder(
     body: Optional[schemas.ReminderSendRequest] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user)
+    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
     custom_msg = body.message if body else None
     result = crud.send_document_reminder(
         db=db,
@@ -1871,39 +1844,8 @@ def get_dashboard(
 
 
 # =========================================================
-# MULTI-DEPARTMENT DOCUMENT ROUTING
-# =========================================================
-
-class MultiRouteRequest(BaseModel):
-    target_department_ids: List[int]
-    instructions: Optional[str] = None
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/multi-route",
-    tags=["Routing"],
-    summary="Route document to multiple departments concurrently",
-)
-def route_document_multi_dept(
-    document_id: int,
-    body: MultiRouteRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS, UserRole.DIRECTOR, UserRole.ADMIN)),
-):
-    routings = crud.multi_route_document(
-        db=db,
-        document_id=document_id,
-        target_department_ids=body.target_department_ids,
-        instructions=body.instructions,
-        current_user=current_user
-    )
-    return {"message": f"Document routed to {len(routings)} departments successfully."}
-
-
-# =========================================================
 # ADMINISTRATOR SUITE ENDPOINTS
 # =========================================================
-
 @app.get(
     f"{API_V1}/admin/users",
     tags=["Admin"],
@@ -1913,32 +1855,396 @@ def admin_list_users(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
 ):
+    """
+    Admin: Return all users with profile information and their
+    canonical work-context memberships.
+
+    Department name is resolved from Department using department_id.
+    User does not expose a department_name field directly.
+    """
+
     users = crud.get_admin_users(db)
+
     res = []
+
     for u in users:
-        m = u.managed_depts
+        # --------------------------------------------------------------
+        # Resolve user's primary department.
+        #
+        # User stores department_id, while Department stores the
+        # human-readable name.
+        # --------------------------------------------------------------
+        department_name = None
+
+        if u.department_id is not None:
+            department = crud.get_department_by_id(
+                db,
+                u.department_id,
+            )
+
+            if department:
+                department_name = department.name
+
+        # --------------------------------------------------------------
+        # Normalize managed departments.
+        #
+        # Older records may contain either:
+        #   - JSON array string
+        #   - single string
+        #   - NULL
+        # --------------------------------------------------------------
+        managed_departments = u.managed_depts
+
         try:
             import json
-            m_list = json.loads(m) if (m and m.startswith("[")) else ([m] if m else [])
+
+            if (
+                managed_departments
+                and isinstance(managed_departments, str)
+                and managed_departments.startswith("[")
+            ):
+                managed_list = json.loads(
+                    managed_departments
+                )
+            else:
+                managed_list = (
+                    [managed_departments]
+                    if managed_departments
+                    else []
+                )
+
         except Exception:
-            m_list = [m] if m else []
-        res.append({
-            "id": u.id,
-            "username": u.username,
-            "full_name": u.full_name,
-            "role": u.role.value if hasattr(u.role, "value") else str(u.role),
-            "employee_code": u.employee_code,
-            "designation": u.designation,
-            "department": u.department_name,
-            "department_id": u.department_id,
-            "managed_depts": m_list,
-            "email": u.email,
-            "outlook_email": u.outlook_email,
-            "gov_email": u.gov_email,
-            "is_active": u.is_active,
-            "created_at": str(u.created_at) if u.created_at else None
-        })
+            managed_list = (
+                [managed_departments]
+                if managed_departments
+                else []
+            )
+
+        # Make sure the response always contains a list.
+        if not isinstance(managed_list, list):
+            managed_list = [managed_list]
+
+        # --------------------------------------------------------------
+        # Canonical work-context memberships.
+        # --------------------------------------------------------------
+        context_rows = []
+
+        memberships = crud.get_user_context_memberships(
+            db,
+            u.id,
+        )
+
+        for membership in memberships:
+            # Resolve department name from department_id.
+            context_department_name = None
+
+            if membership.department_id is not None:
+                context_department = (
+                    crud.get_department_by_id(
+                        db,
+                        membership.department_id,
+                    )
+                )
+
+                if context_department:
+                    context_department_name = (
+                        context_department.name
+                    )
+
+            context_rows.append(
+                {
+                    "id": membership.id,
+                    "user_id": membership.user_id,
+                    "context_type": (
+                        membership.context_type.value
+                        if hasattr(
+                            membership.context_type,
+                            "value",
+                        )
+                        else str(
+                            membership.context_type
+                        )
+                    ),
+                    "department_id": membership.department_id,
+                    "department_name": context_department_name,
+                    "is_active": membership.is_active,
+                    "created_at": (
+                        str(membership.created_at)
+                        if membership.created_at
+                        else None
+                    ),
+                    "updated_at": (
+                        str(membership.updated_at)
+                        if membership.updated_at
+                        else None
+                    ),
+                }
+            )
+
+        # --------------------------------------------------------------
+        # Return normalized Admin user record.
+        # --------------------------------------------------------------
+        res.append(
+            {
+                "id": u.id,
+                "username": u.username,
+                "full_name": u.full_name,
+                "role": (
+                    u.role.value
+                    if hasattr(u.role, "value")
+                    else str(u.role)
+                ),
+                "employee_code": u.employee_code,
+                "designation": u.designation,
+
+                # User does not have department_name.
+                "department": department_name,
+                "department_id": u.department_id,
+
+                "managed_depts": managed_list,
+
+                "email": u.email,
+                "outlook_email": u.outlook_email,
+                "gov_email": u.gov_email,
+
+                "is_active": u.is_active,
+
+                "context_memberships": context_rows,
+
+                # Keep the first active membership as the displayed
+                # active context fallback for the Admin UI.
+                "active_context_id": (
+                    next(
+                        (
+                            row["id"]
+                            for row in context_rows
+                            if row["is_active"]
+                        ),
+                        None,
+                    )
+                ),
+
+                "created_at": (
+                    str(u.created_at)
+                    if u.created_at
+                    else None
+                ),
+            }
+        )
+
     return res
+
+@app.get(
+    f"{API_V1}/admin/users/{{user_id}}/contexts",
+    response_model=List[schemas.WorkContextMembershipResponse],
+    tags=["Admin"],
+    summary="Admin: Get all active work contexts for a user",
+)
+def admin_get_user_contexts(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Return the canonical active work-context memberships for one user."""
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    return crud.get_user_context_memberships(db, user_id)
+
+
+@app.post(
+    f"{API_V1}/admin/users/{{user_id}}/contexts",
+    response_model=schemas.WorkContextMembershipResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Admin"],
+    summary="Admin: Add a canonical work context to a user",
+)
+def admin_add_user_context(
+    user_id: int,
+    body: schemas.WorkContextMembershipCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """
+    Add one canonical operational context to a user.
+
+    Context membership is the source of operational identity.  This endpoint
+    deliberately does not replace the user's other memberships, so a person
+    may legitimately have multiple contexts such as:
+        EMPLOYEE • FCTD
+        HOD      • PSTD
+
+    Department is required for HOD/EMPLOYEE contexts and is not accepted for
+    global contexts such as ADMIN/DS/DIRECTOR/TSO.
+    """
+    if body.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path user_id and body user_id must match.",
+        )
+
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot add an active work context to an inactive user.",
+        )
+
+    context_type = body.context_type
+    department_required = {
+        WorkContextType.HOD,
+        WorkContextType.EMPLOYEE,
+    }
+    department_forbidden = {
+        WorkContextType.ADMIN,
+        WorkContextType.DS,
+        WorkContextType.DIRECTOR,
+        WorkContextType.TSO,
+    }
+
+    if context_type in department_required and body.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Department ID is required for {context_type.value} context.",
+        )
+
+    if context_type in department_forbidden and body.department_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Department ID must be empty for {context_type.value} context.",
+        )
+
+    if body.department_id is not None:
+        dept = crud.get_department_by_id(db, body.department_id)
+        if not dept or not dept.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected department does not exist or is inactive.",
+            )
+
+    # Prevent duplicate active logical memberships. TSO is handled specially
+    # by crud.create_work_context_membership(), which enforces the single
+    # active TSO rule.
+    if context_type != WorkContextType.TSO and body.is_active:
+        existing = (
+            db.query(models.WorkContextMembership)
+            .filter(
+                models.WorkContextMembership.user_id == user_id,
+                models.WorkContextMembership.context_type == context_type,
+                models.WorkContextMembership.department_id == body.department_id,
+                models.WorkContextMembership.is_active == True,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This active work context already exists for the user.",
+            )
+
+    try:
+        membership = crud.create_work_context_membership(db, body)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    crud.log_audit_event(
+        db=db,
+        user_id=current_user.id,
+        action="WORK_CONTEXT_ADDED",
+        entity_type="WorkContextMembership",
+        entity_id=membership.id,
+        description=(
+            f"Admin added {membership.context_type.value if hasattr(membership.context_type, 'value') else membership.context_type} "
+            f"context for user '{user.username}'"
+            + (
+                f" in department '{membership.department_name}'"
+                if membership.department_name
+                else ""
+            )
+        ),
+    )
+
+    return membership
+
+
+@app.delete(
+    f"{API_V1}/admin/users/{{user_id}}/contexts/{{context_id}}",
+    response_model=schemas.WorkContextMembershipResponse,
+    tags=["Admin"],
+    summary="Admin: Deactivate a user's work context",
+)
+def admin_deactivate_user_context(
+    user_id: int,
+    context_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Deactivate one canonical work-context membership without deleting it."""
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    membership = crud.get_context_membership(db, context_id)
+    if not membership or membership.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Work context membership not found for this user.",
+        )
+
+    if not membership.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Work context membership is already inactive.",
+        )
+
+    # Do not allow an Admin to remove the only active context of the user.
+    active_memberships = crud.get_user_context_memberships(db, user_id)
+    if len(active_memberships) <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user must retain at least one active work context.",
+        )
+
+    try:
+        result = crud.deactivate_work_context_membership(db, context_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Work context membership not found.",
+        )
+
+    crud.log_audit_event(
+        db=db,
+        user_id=current_user.id,
+        action="WORK_CONTEXT_DEACTIVATED",
+        entity_type="WorkContextMembership",
+        entity_id=context_id,
+        description=(
+            f"Admin deactivated work context {context_id} "
+            f"for user '{user.username}'."
+        ),
+    )
+
+    return result
 
 
 @app.get(

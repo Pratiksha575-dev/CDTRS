@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Any
 from datetime import date, datetime
 
@@ -229,7 +229,6 @@ class BranchResponse(BaseModel):
     document_id:                     int
     branch_type:                     BranchType
     department_id:                   Optional[int] = None
-    department_name:                 Optional[str] = None
     routed_by_user_id:               Optional[int] = None
     routed_by_context_membership_id: Optional[int] = None
     target_context_membership_id:    Optional[int] = None
@@ -239,6 +238,7 @@ class BranchResponse(BaseModel):
     is_active:                       bool
     version:                         int
     routed_at:                       datetime
+    instructions:                    Optional[str] = None
     completed_at:                    Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -262,41 +262,11 @@ class DocumentCreate(BaseModel):
     mode:                    str = "Manual Upload"
     priority:                Priority = Priority.MEDIUM
     source_message_id:       Optional[int] = None
-    target_department_id:    Optional[int] = None
     suggested_department_id: Optional[int] = None
     suggested_employee_id:   Optional[int] = None
     ocr_text:                Optional[str] = None
     confidence:              Optional[float] = None
     director_remark:         Optional[str] = None
-
-
-# Legacy read compatibility schema
-class DocumentAssignmentCreate(BaseModel):
-    department_id:           Optional[int] = None
-    assigned_employee_id:    Optional[int] = None
-    requires_hod_validation: bool = False
-    instructions:            Optional[str] = None
-
-
-class DocumentAssignmentResponse(BaseModel):
-    id:                      int
-    document_id:             int
-    department_id:           Optional[int] = None
-    department_name:         Optional[str] = None
-    assigned_employee_id:    Optional[int] = None
-    employee_name:           Optional[str] = None
-    assigned_by_user_id:     int
-    requires_hod_validation: bool
-    assignment_status:       AssignmentStatus
-    instructions:            Optional[str] = None
-    created_at:              datetime
-    completed_at:            Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class MultiAssignRequest(BaseModel):
-    assignments: List[DocumentAssignmentCreate]
 
 
 # =========================================================
@@ -323,75 +293,62 @@ class DirectorReviewResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
-    doc_id:                    int
-    reference_no:              str
-    title:                     str
-    description:               Optional[str] = None
-    received_date:             date
-    deadline:                  Optional[date] = None
-    source:                    Optional[str] = None
-    mode:                      str
-    priority:                  Priority
-    status:                    DocumentStatus
-    current_stage:             WorkflowStage
-    current_owner_id:          Optional[int] = None
-    target_department_id:      Optional[int] = None
-    target_department_name:    Optional[str] = None
-    assigned_employee_name:    Optional[str] = None
-    assigned_employee_id:      Optional[int] = None
-    suggested_department_id:   Optional[int] = None
+    doc_id: int
+    reference_no: str
+    title: str
+    description: Optional[str] = None
+    received_date: date
+    deadline: Optional[date] = None
+    source: Optional[str] = None
+    mode: str
+    priority: Priority
+    status: DocumentStatus
+    suggested_department_id: Optional[int] = None
     suggested_department_name: Optional[str] = None
-    suggested_employee_id:     Optional[int] = None
-    suggested_employee_name:   Optional[str] = None
-    routing_confidence:        Optional[float] = None
-    routing_reason:            Optional[str] = None
-    is_director_instruction:   bool = False
-    created_by:                int
-    source_message_id:         Optional[int] = None
-    ocr_status:                OCRStatus
-    version:                   int
-    director_remark:           Optional[str] = None
-    hod_remark:                Optional[str] = None
-    doc_assignments:           List[DocumentAssignmentResponse] = []
-    branches:                  List[BranchResponse] = []
-    director_reviews:          List[DirectorReviewResponse] = []
-    created_at:                datetime
-    updated_at:                datetime
-    closed_at:                 Optional[datetime] = None
-
+    suggested_employee_id: Optional[int] = None
+    suggested_employee_name: Optional[str] = None
+    routing_confidence: Optional[float] = None
+    routing_reason: Optional[str] = None
+    is_director_instruction: bool = False
+    created_by: int
+    source_message_id: Optional[int] = None
+    ocr_status: OCRStatus
+    version: int
+    director_remark: Optional[str] = None
+    hod_remark: Optional[str] = None
+    branches: List[BranchResponse] = Field(default_factory=list)
+    work_assignments: List["AssignmentResponse"] = Field(default_factory=list)
+    director_reviews: List[DirectorReviewResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)
 
-
 class DocumentListResponse(BaseModel):
-    doc_id:                    int
-    reference_no:              str
-    title:                     str
-    description:               Optional[str] = None
-    source:                    Optional[str] = None
-    priority:                  Priority
-    status:                    DocumentStatus
-    current_stage:             WorkflowStage
-    target_department_id:      Optional[int] = None
-    target_department_name:    Optional[str] = None
-    assigned_employee_name:    Optional[str] = None
-    assigned_employee_id:      Optional[int] = None
-    suggested_department_id:   Optional[int] = None
+    doc_id: int
+    reference_no: str
+    title: str
+    description: Optional[str] = None
+    source: Optional[str] = None
+    priority: Priority
+    status: DocumentStatus
+    suggested_department_id: Optional[int] = None
     suggested_department_name: Optional[str] = None
-    suggested_employee_id:     Optional[int] = None
-    suggested_employee_name:   Optional[str] = None
-    routing_confidence:        Optional[float] = None
-    routing_reason:            Optional[str] = None
-    is_director_instruction:   bool = False
-    director_remark:           Optional[str] = None
-    hod_remark:                Optional[str] = None
-    ocr_status:                OCRStatus
-    version:                   int
-    received_date:             date
-    deadline:                  Optional[date] = None
-    doc_assignments:           List[DocumentAssignmentResponse] = []
-    branches:                  List[BranchResponse] = []
-    created_at:                datetime
-    updated_at:                datetime
+    suggested_employee_id: Optional[int] = None
+    suggested_employee_name: Optional[str] = None
+    routing_confidence: Optional[float] = None
+    routing_reason: Optional[str] = None
+    is_director_instruction: bool = False
+    director_remark: Optional[str] = None
+    hod_remark: Optional[str] = None
+    ocr_status: OCRStatus
+    version: int
+    received_date: date
+    deadline: Optional[date] = None
+    branches: List[BranchResponse] = Field(default_factory=list)
+    work_assignments: List["AssignmentResponse"] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -447,7 +404,7 @@ class AssignmentResponse(BaseModel):
     document_id:                       int
     assigned_by_user_id:               int
     assigned_to_user_id:               int
-    routing_id:                        Optional[int] = None
+    routing_id:                        int
     assigned_to_context_membership_id: Optional[int] = None
     requires_hod_validation:           bool = False
     instructions:                      Optional[str] = None
@@ -456,6 +413,9 @@ class AssignmentResponse(BaseModel):
     change_reason:                     Optional[str] = None
     assigned_at:                       datetime
     completed_at:                      Optional[datetime] = None
+    team_name:                         Optional[str] = None
+    is_team:                           bool = False
+    members:                           List["AssignmentMemberResponse"] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -473,6 +433,7 @@ class AssignmentMemberResponse(BaseModel):
     id: int
     work_assignment_id: int
     user_id: int
+    user_name: Optional[str] = None
     context_membership_id: Optional[int] = None
     is_active: bool
     assigned_at: datetime
@@ -512,6 +473,8 @@ class HODTeamAssignmentResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+AssignmentResponse.model_rebuild()
 
 # =========================================================
 # DOCUMENT REMARKS (History)
@@ -558,7 +521,7 @@ class ProgressResponse(BaseModel):
     hod_reviewed_by_user_id: Optional[int] = None
     hod_reviewer_name:       Optional[str] = None
     hod_reviewed_at:         Optional[datetime] = None
-    work_assignment_id:      Optional[int] = None
+    work_assignment_id:      int
     created_at:              datetime
 
     model_config = ConfigDict(from_attributes=True)

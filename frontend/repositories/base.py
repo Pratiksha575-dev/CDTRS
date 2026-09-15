@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 from models import (
     AttachmentModel,
     DocumentModel,
-    DocumentRouteModel,
     NotificationModel,
     ProgressUpdateModel,
     UserModel,
@@ -17,7 +16,7 @@ from models.department import DepartmentModel
 class BaseRepository(ABC):
     """
     Abstract repository protocol defining data access operations for CDTRS V2.
-    Implemented by APIRepository (FastAPI live client) and MockRepository (in-memory test store).
+    Implemented by APIRepository (FastAPI live client).
     """
 
     # =========================================================
@@ -95,7 +94,7 @@ class BaseRepository(ABC):
         pass
 
     @abstractmethod
-    def close_document(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def close_document(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """Closes a completed document (DS action)."""
         pass
 
@@ -110,28 +109,30 @@ class BaseRepository(ABC):
         route_type: str,
         to_user_id: Optional[int] = None,
         to_department_id: Optional[int] = None,
-        remarks: Optional[str] = None
+        remarks: Optional[str] = None,
+        requires_hod_validation: bool = False,
+        expected_version: Optional[int] = None,
     ) -> DocumentModel:
         """Performs a routing transition (DS -> Director, DS -> HOD, DS -> Employee, etc.)."""
         pass
 
     @abstractmethod
-    def save_director_remark(self, document_id: int, remark: str) -> DocumentModel:
+    def save_director_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
         """Saves/updates Director remark on document without returning it."""
         pass
 
     @abstractmethod
-    def return_to_ds(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def return_to_ds(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """Director workflow action returning reviewed document back to DS."""
         pass
 
     @abstractmethod
-    def save_hod_remark(self, document_id: int, remark: str) -> DocumentModel:
+    def save_hod_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
         """Saves/updates HOD remark on document without assigning."""
         pass
 
     @abstractmethod
-    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None) -> DocumentModel:
+    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
         """DS forwards employee progress update to Director as follow-up."""
         pass
 
@@ -144,7 +145,11 @@ class BaseRepository(ABC):
         self,
         document_id: int,
         assigned_to_id: int,
-        instructions: Optional[str] = None
+        instructions: Optional[str] = None,
+        requires_hod_validation: bool = False,
+        routing_id: Optional[int] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> WorkAssignmentModel:
         """HOD delegates work on a document to an employee."""
         pass
@@ -163,6 +168,7 @@ class BaseRepository(ABC):
         self,
         document_id: int,
         description: str,
+        work_assignment_id: Optional[int] = None,
         attachment_file_path: Optional[str] = None
     ) -> ProgressUpdateModel:
         """Employee submits a free-text progress update with optional attachment."""

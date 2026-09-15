@@ -24,11 +24,13 @@ class LoadingSpinnerWidget(QFrame):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(12)
-        layout.setContentsMargins(20, 30, 20, 30)
+        layout.setContentsMargins(16, 22, 16, 22)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)  # Indeterminate mode
-        self.progress_bar.setFixedWidth(200)
+        self.progress_bar.setMinimumWidth(120)
+        self.progress_bar.setMaximumWidth(320)
+        self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress_bar.setFixedHeight(6)
         self.progress_bar.setTextVisible(False)
 
@@ -65,7 +67,7 @@ class ErrorStateWidget(QFrame):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(10)
-        layout.setContentsMargins(20, 30, 20, 30)
+        layout.setContentsMargins(16, 22, 16, 22)
 
         # Error Icon / Badge
         self.icon_label = QLabel("⚠️")
@@ -93,8 +95,10 @@ class ErrorStateWidget(QFrame):
             btn_layout.setAlignment(Qt.AlignCenter)
 
             self.retry_button = QPushButton("Retry")
-            self.retry_button.setFixedWidth(120)
-            self.retry_button.setFixedHeight(34)
+            self.retry_button.setMinimumWidth(100)
+            self.retry_button.setMaximumWidth(160)
+            self.retry_button.setMinimumHeight(32)
+            self.retry_button.setMaximumHeight(38)
             self.retry_button.setStyleSheet("""
                 QPushButton {
                     background-color: #0F172A;
@@ -140,7 +144,7 @@ class EmptyStateWidget(QFrame):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(8)
-        layout.setContentsMargins(20, 40, 20, 40)
+        layout.setContentsMargins(16, 26, 16, 26)
 
         self.icon_label = QLabel(icon)
         self.icon_label.setAlignment(Qt.AlignCenter)

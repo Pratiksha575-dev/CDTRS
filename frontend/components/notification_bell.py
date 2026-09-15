@@ -28,6 +28,12 @@ class NotificationBellWidget(QWidget):
         from services.event_bus import event_bus
         event_bus.notifications_updated.connect(self.refresh)
         event_bus.data_changed.connect(self.refresh)
+        try:
+            from context_manager import context_manager
+            context_manager.active_context_changed.connect(self.refresh)
+            self._context_manager = context_manager
+        except Exception:
+            self._context_manager = None
 
     def setup_ui(self):
         layout = QHBoxLayout()
@@ -35,7 +41,8 @@ class NotificationBellWidget(QWidget):
         layout.setSpacing(4)
 
         self.bell_button = QPushButton("🔔")
-        self.bell_button.setFixedSize(36, 36)
+        self.bell_button.setMinimumSize(34, 34)
+        self.bell_button.setMaximumSize(40, 40)
         self.bell_button.setStyleSheet("""
             QPushButton {
                 background-color: transparent;

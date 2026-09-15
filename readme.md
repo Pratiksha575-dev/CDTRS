@@ -891,7 +891,8 @@ Core
 - context manager
 - navigation registry
 
-Shell
+ui
+-login
 - MainWindow
 - Sidebar
 

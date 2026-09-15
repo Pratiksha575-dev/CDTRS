@@ -2,151 +2,170 @@ from enum import Enum
 
 
 class RoleEnum(str, Enum):
-    """Core user roles in CDTRS V2."""
-    DIRECTOR_SECRETARY = "Director Secretary"  # DS (Replaces legacy "Master")
-    DIRECTOR = "Director"
+    ADMIN = "ADMIN"
+    DS = "DS"
+    DIRECTOR_SECRETARY = "DS"
+    DIRECTOR = "DIRECTOR"
     HOD = "HOD"
-    EMPLOYEE = "Employee"
+    EMPLOYEE = "EMPLOYEE"
     TSO = "TSO"
-    ADMINISTRATOR = "Administrator"
-    READ_ONLY = "Read-only User"
 
     @classmethod
-    def normalize(cls, role_str: str) -> str:
-        """Maps legacy role names to V2 standardized names."""
-        if not role_str:
-            return cls.DIRECTOR_SECRETARY.value
-        s = role_str.strip().lower()
-        if s in ("master", "ds", "director secretary"):
-            return cls.DIRECTOR_SECRETARY.value
-        if s in ("director",):
-            return cls.DIRECTOR.value
-        if s in ("hod",):
-            return cls.HOD.value
-        if s in ("employee",):
-            return cls.EMPLOYEE.value
-        if s in ("tso", "technical staff officer"):
-            return cls.TSO.value
-        if s in ("admin", "administrator"):
-            return cls.ADMINISTRATOR.value
-        return role_str
+    def normalize(cls, value) -> str:
+        """
+        Normalize backend/frontend role values to the canonical
+        operational context type.
+        """
+        if value is None:
+            return ""
 
+        text = str(value).strip().upper()
+
+        aliases = {
+            "ADMINISTRATOR": cls.ADMIN.value,
+            "MASTER": cls.ADMIN.value,
+            "DIRECTOR_SECRETARY": cls.DS.value,
+            "DIRECTOR SECRETARY": cls.DS.value,
+            "SECRETARY": cls.DS.value,
+            "HEAD OF DEPARTMENT": cls.HOD.value,
+            "HEAD_OF_DEPARTMENT": cls.HOD.value,
+            "TECHNICAL SUPPORT OFFICER": cls.TSO.value,
+            "TECHNICAL_SUPPORT_OFFICER": cls.TSO.value,
+        }
+
+        return aliases.get(text, text)
 
 
 class DocumentStatusEnum(str, Enum):
-    """User-facing lifecycle statuses for CDTRS V2 documents."""
-    RECEIVED = "Received"
-    UNDER_DIRECTOR_REVIEW = "Under Director Review"
-    DIRECTOR_REVIEW_COMPLETED = "Director Review Completed"
-    UNDER_HOD_PROCESSING = "Under HOD Processing"
-    ASSIGNED_FOR_EXECUTION = "Assigned for Execution"
-    IN_PROGRESS = "In Progress"
-    PROGRESS_UPDATED = "Progress Updated"
-    PROGRESS_FOLLOWUP_UNDER_REVIEW = "Progress Follow-up Under Review"
-    REVIEW_COMPLETED = "Review Completed"
-    CLOSED = "Closed"
+    RECEIVED = "RECEIVED"
+    UNDER_DIRECTOR_REVIEW = "UNDER_DIRECTOR_REVIEW"
+    RETURNED_TO_DS = "RETURNED_TO_DS"
+    UNDER_HOD_PROCESSING = "UNDER_HOD_PROCESSING"
+    ASSIGNED_FOR_EXECUTION = "ASSIGNED_FOR_EXECUTION"
+    PROGRESS_UPDATED = "PROGRESS_UPDATED"
+    COMPLETED = "COMPLETED"
+    CLOSED = "CLOSED"
+    CANCELLED = "CANCELLED"
+    IN_PROGRESS = "IN_PROGRESS"
+    REVIEW_COMPLETED = "REVIEW_COMPLETED"
+    DIRECTOR_REVIEW_COMPLETED = "RETURNED_TO_DS"
 
     @classmethod
-    def normalize(cls, val: str) -> str:
-        if not val:
-            return cls.RECEIVED.value
-        s = val.strip()
-        # Direct match by value
-        for member in cls:
-            if member.value.lower() == s.lower():
-                return member.value
-            if member.name.lower() == s.lower():
-                return member.value
-        # Uppercase backend enum mapping
-        mapping = {
-            "RECEIVED": cls.RECEIVED.value,
-            "UNDER_DIRECTOR_REVIEW": cls.UNDER_DIRECTOR_REVIEW.value,
-            "DIRECTOR_REVIEW_COMPLETED": cls.DIRECTOR_REVIEW_COMPLETED.value,
-            "UNDER_HOD_PROCESSING": cls.UNDER_HOD_PROCESSING.value,
-            "ASSIGNED_FOR_EXECUTION": cls.ASSIGNED_FOR_EXECUTION.value,
-            "IN_PROGRESS": cls.IN_PROGRESS.value,
-            "PROGRESS_UPDATED": cls.PROGRESS_UPDATED.value,
-            "PROGRESS_FOLLOWUP_UNDER_REVIEW": cls.PROGRESS_FOLLOWUP_UNDER_REVIEW.value,
-            "REVIEW_COMPLETED": cls.REVIEW_COMPLETED.value,
-            "CLOSED": cls.CLOSED.value,
+    def normalize(cls, value) -> str:
+        if value is None:
+            return ""
+
+        text = str(value).strip()
+
+        aliases = {
+            "Director Review": cls.UNDER_DIRECTOR_REVIEW.value,
+            "Under Director Review": cls.UNDER_DIRECTOR_REVIEW.value,
+            "Director Review Completed": cls.RETURNED_TO_DS.value,
+            "DIRECTOR_REVIEW_COMPLETED": cls.RETURNED_TO_DS.value,
+            "Returned to DS": cls.RETURNED_TO_DS.value,
+            "Under HOD Processing": cls.UNDER_HOD_PROCESSING.value,
+            "Assigned for Execution": cls.ASSIGNED_FOR_EXECUTION.value,
+            "Progress Updated": cls.PROGRESS_UPDATED.value,
+            "Completed": cls.COMPLETED.value,
+            "Closed": cls.CLOSED.value,
+            "Cancelled": cls.CANCELLED.value,
         }
-        return mapping.get(s.upper(), val)
+
+        return aliases.get(text, text.upper().replace(" ", "_"))
+
+
+class PriorityEnum(str, Enum):
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+    @classmethod
+    def normalize(cls, value) -> str:
+        if value is None:
+            return cls.MEDIUM.value
+
+        text = str(value).strip().upper()
+
+        aliases = {
+            "CRITICAL": cls.CRITICAL.value,
+            "URGENT": cls.CRITICAL.value,
+            "RED": cls.CRITICAL.value,
+            "NORMAL": cls.MEDIUM.value,
+            "ORANGE": cls.MEDIUM.value,
+            "YELLOW": cls.MEDIUM.value,
+
+            "GREEN": cls.LOW.value,
+        }
+
+        return aliases.get(text, text)
+
+
+class IngestionModeEnum(str, Enum):
+    GOVERNMENT_MAIL = "GOVERNMENT_MAIL"
+    OUTLOOK = "OUTLOOK"
+    MANUAL_UPLOAD = "MANUAL_UPLOAD"
+
+    @classmethod
+    def normalize(cls, value) -> str:
+        if value is None:
+            return ""
+
+        text = str(value).strip().upper()
+
+        aliases = {
+            "GOVERNMENT MAIL": cls.GOVERNMENT_MAIL.value,
+            "GOVT MAIL": cls.GOVERNMENT_MAIL.value,
+            "GOVT_MAIL": cls.GOVERNMENT_MAIL.value,
+
+            "OUTLOOK MAIL": cls.OUTLOOK.value,
+            "OUTLOOK_EMAIL": cls.OUTLOOK.value,
+
+            "MANUAL UPLOAD": cls.MANUAL_UPLOAD.value,
+            "MANUAL": cls.MANUAL_UPLOAD.value,
+        }
+
+        return aliases.get(text, text)
 
 
 class WorkflowStageEnum(str, Enum):
-    """Internal workflow routing stages controlling operational ownership and permissions."""
+    """Display/workflow stage derived from document lifecycle state."""
     DS = "DS"
     DIRECTOR = "DIRECTOR"
     HOD = "HOD"
     EMPLOYEE = "EMPLOYEE"
+    TSO = "TSO"
     CLOSED = "CLOSED"
 
 
-class PriorityEnum(str, Enum):
-    """Business priority levels for CDTRS documents."""
-    HIGH = "High"
-    MEDIUM = "Medium"
-    LOW = "Low"
-
-    # Color aliases for compatibility
-    RED = "High"
-    ORANGE = "Medium"
-    YELLOW = "Medium"
-    GREEN = "Low"
-
-    @classmethod
-    def normalize(cls, val: str) -> str:
-        if not val:
-            return cls.MEDIUM.value
-        v = val.strip().lower()
-        if v in ("high", "red", "critical", "urgent"):
-            return cls.HIGH.value
-        if v in ("medium", "orange", "yellow", "normal"):
-            return cls.MEDIUM.value
-        if v in ("low", "green", "routine"):
-            return cls.LOW.value
-        return cls.MEDIUM.value
-
-
-# PZ_26/08: Streamlined IngestionModeEnum to 3 canonical modes (Government Mail, Outlook, Manual Upload)
-# with aliases mapping Fax, Physical, Scanned, Direct Submission into Manual Upload.
-class IngestionModeEnum(str, Enum):
-    """Channels / modes through which documents enter CDTRS."""
-    GOVERNMENT_MAIL = "Government Mail"
-    OUTLOOK = "Outlook"
-    MANUAL_UPLOAD = "Manual Upload"
-
-    # Backward compatibility aliases
-    INTERNAL_OUTLOOK = "Outlook"
-    EMAIL = "Outlook"
-    INTRANET = "Government Mail"
-    FAX = "Manual Upload"
-    SCANNED = "Manual Upload"
-    PHYSICAL = "Manual Upload"
-    DIRECT_SUBMISSION = "Manual Upload"
-    OTHER = "Manual Upload"
-
-    @classmethod
-    def normalize(cls, val: str) -> str:
-        if not val:
-            return cls.MANUAL_UPLOAD.value
-        s = str(val).strip().lower()
-        if any(k in s for k in ("gov", "nic", "government")):
-            return cls.GOVERNMENT_MAIL.value
-        if any(k in s for k in ("outlook", "email", "intranet")):
-            return cls.OUTLOOK.value
-        if any(k in s for k in ("manual", "scan", "fax", "physical", "direct", "upload")):
-            return cls.MANUAL_UPLOAD.value
-        for m in cls:
-            if m.value.lower() == s:
-                return m.value
-        return cls.MANUAL_UPLOAD.value
-
-
 class RouteTypeEnum(str, Enum):
-    """Document routing transition categories (DS routing decisions)."""
-    DS_TO_DIRECTOR = "DS_TO_DIRECTOR"
-    DIRECTOR_TO_DS = "DIRECTOR_TO_DS"
-    DS_TO_HOD = "DS_TO_HOD"
-    DS_TO_EMPLOYEE = "DS_TO_EMPLOYEE"
-    DS_TO_DIRECTOR_FOLLOWUP = "DS_TO_DIRECTOR_FOLLOWUP"
+    """
+    Canonical operational routing branch types.
+
+    These represent actual routing branches, not workflow history
+    transitions such as DS_TO_DIRECTOR.
+    """
+
+    DEPARTMENT_HOD = "DEPARTMENT_HOD"
+    DIRECT_EMPLOYEE = "DIRECT_EMPLOYEE"
+    TSO = "TSO"
+
+    @classmethod
+    def normalize(cls, value) -> str:
+        if value is None:
+            return ""
+
+        text = str(value).strip().upper()
+
+        aliases = {
+            "DEPARTMENT HOD": cls.DEPARTMENT_HOD.value,
+            "HOD": cls.DEPARTMENT_HOD.value,
+
+            "DIRECT EMPLOYEE": cls.DIRECT_EMPLOYEE.value,
+            "EMPLOYEE": cls.DIRECT_EMPLOYEE.value,
+
+            "TECHNICAL SUPPORT OFFICER": cls.TSO.value,
+            "TECHNICAL_SUPPORT_OFFICER": cls.TSO.value,
+        }
+
+        return aliases.get(text, text)

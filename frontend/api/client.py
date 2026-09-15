@@ -112,12 +112,48 @@ class APIClient:
         return settings.api_timeout
 
     def set_auth_token(self, token: Optional[str]) -> None:
-        """Sets the active authentication token (e.g. JWT Bearer token)."""
+        """
+        Set the active authentication token.
+
+        A new/cleared authentication session must never inherit a stale
+        WorkContextMembership from the previous session. AuthService will
+        explicitly set the correct context after successful login.
+        """
+        if token is None:
+            self._auth_token = None
+            self._active_context_id = None
+            return
+
+        if token != self._auth_token:
+            # New authenticated session: do not carry the previous user's
+            # context into the new session.
+            self._active_context_id = None
+
         self._auth_token = token
 
     def set_active_context_id(self, context_id: Optional[int]) -> None:
-        """Sets the active operational work context ID for multi-context users."""
-        self._active_context_id = context_id
+        """
+        Set the active WorkContextMembership ID.
+
+        Context IDs are membership IDs, not role IDs or department IDs.
+        None explicitly clears the context.
+        """
+        if context_id is None:
+            self._active_context_id = None
+            return
+
+        if isinstance(context_id, bool):
+            raise ValueError("context_id must be an integer membership ID")
+
+        try:
+            normalized_id = int(context_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("context_id must be an integer membership ID") from exc
+
+        if normalized_id <= 0:
+            raise ValueError("context_id must be a positive membership ID")
+
+        self._active_context_id = normalized_id
 
     def get_active_context_id(self) -> Optional[int]:
         """Returns the currently active work context ID."""
@@ -134,14 +170,25 @@ class APIClient:
             "Accept": "application/json",
             "User-Agent": f"{settings.app_name}/{settings.app_version}"
         }
+        # Caller-supplied headers are allowed, but authentication and active
+        # work context are client-owned session state and therefore must not
+        # be overridable by an individual API call.
+        if custom_headers:
+            headers.update(custom_headers)
+
         if self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
+        else:
+            # Prevent a caller from accidentally reusing an Authorization
+            # header after logout/token clearing.
+            headers.pop("Authorization", None)
 
         if self._active_context_id is not None:
             headers["X-Work-Context-Id"] = str(self._active_context_id)
+        else:
+            # Prevent stale context headers from being supplied by a caller.
+            headers.pop("X-Work-Context-Id", None)
 
-        if custom_headers:
-            headers.update(custom_headers)
         return headers
 
     def _parse_response(self, response: Any) -> Any:
@@ -292,7 +339,11 @@ class APIClient:
         if not HAS_REQUESTS:
             raise NetworkError("The 'requests' package is required for live API communication. Please run: pip install requests")
 
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        if endpoint.startswith(("http://", "https://")):
+            url = endpoint
+        else:
+            url = f"{self.base_url}/{endpoint.lstrip('/')}"
+
         req_headers = self.get_headers()
         req_timeout = timeout or self.timeout
 

@@ -20,6 +20,10 @@ from PySide6.QtWidgets import (
 
 from models.document import DocumentModel
 from repositories.provider import get_repository
+try:
+    from context_manager import context_manager
+except Exception:
+    context_manager = None
 
 
 class RouteToHODDialog(QDialog):
@@ -34,8 +38,8 @@ class RouteToHODDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Route to HOD - {document.reference}")
-        self.setMinimumWidth(400)
-        self.setMaximumWidth(580)
+        self.setMinimumSize(360, 180)
+        self.setMaximumSize(640, 420)
         self.setSizeGripEnabled(True)
         self.setup_ui()
 
@@ -64,10 +68,7 @@ class RouteToHODDialog(QDialog):
         departments = repo.get_departments()
         self._dept_map = {}
 
-        target_dept = (
-            self.document.target_department_name
-            or self.document.suggested_department_name
-        )
+        target_dept = self.document.suggested_department_name
 
         if not target_dept and self.document.id:
             try:
@@ -172,8 +173,8 @@ class RouteToEmployeeDialog(QDialog):
         self.setModal(True)
         self._is_confirmed = False
         self.setWindowTitle(f"Route to Employee - {document.reference}")
-        self.setMinimumWidth(420)
-        self.setMaximumWidth(600)
+        self.setMinimumSize(380, 200)
+        self.setMaximumSize(680, 480)
         self.setSizeGripEnabled(True)
         self.setup_ui()
 
@@ -205,10 +206,7 @@ class RouteToEmployeeDialog(QDialog):
         employees = repo.get_users(role="Employee")
         self._emp_map = {}
 
-        target_emp = (
-            self.document.assigned_employee_name
-            or self.document.suggested_employee_name
-        )
+        target_emp = self.document.suggested_employee_name
 
         if not target_emp and self.document.id:
             try:
@@ -303,6 +301,43 @@ class RouteToEmployeeDialog(QDialog):
         }
 
 
+def _document_routed_department(document: DocumentModel):
+    """Resolve a confirmed department from canonical routing/assignment data."""
+    assignments = getattr(document, "work_assignments", None) or []
+    for assignment in assignments:
+        if getattr(assignment, "is_active", True) is False:
+            continue
+        routing = getattr(assignment, "routing", None)
+        dept = getattr(assignment, "department", None)
+        if dept:
+            return getattr(dept, "name", None) or str(dept)
+        dept_name = getattr(assignment, "department_name", None)
+        if dept_name:
+            return dept_name
+        if routing:
+            dept = getattr(routing, "department", None)
+            if dept:
+                return getattr(dept, "name", None) or str(dept)
+            dept_name = getattr(routing, "department_name", None)
+            if dept_name:
+                return dept_name
+    return None
+
+def _document_routed_department_id(document: DocumentModel):
+    assignments = getattr(document, "work_assignments", None) or []
+    for assignment in assignments:
+        if getattr(assignment, "is_active", True) is False:
+            continue
+        value = getattr(assignment, "department_id", None)
+        if value:
+            return value
+        routing = getattr(assignment, "routing", None)
+        value = getattr(routing, "department_id", None) if routing else None
+        if value:
+            return value
+    return None
+
+
 class HODAssignEmployeeDialog(QDialog):
     """
     Modal dialog for Department Head (HOD) delegating execution
@@ -333,7 +368,7 @@ class HODAssignEmployeeDialog(QDialog):
             "font-size: 15px; font-weight: 600; color: #0F172A;"
         )
 
-        dept_name = self.document.target_department_name or "Department"
+        dept_name = _document_routed_department(self.document) or self.document.suggested_department_name or "Department"
 
         subtitle = QLabel(
             f"Document: {self.document.title}\n"
@@ -351,9 +386,9 @@ class HODAssignEmployeeDialog(QDialog):
         self.emp_combo = QComboBox()
         repo = get_repository()
 
-        dept_name = self.document.target_department_name or "Department"
+        dept_name = _document_routed_department(self.document) or self.document.suggested_department_name or "Department"
 
-        dept_id = self.document.target_department_id
+        dept_id = _document_routed_department_id(self.document)
 
         if not dept_id and dept_name:
             all_depts = repo.get_departments()
@@ -516,11 +551,9 @@ class _TeamAssignmentDialog(QDialog):
     def _load_employees(self):
         repo = get_repository()
 
-        target_department_id = getattr(
-            self.document, "target_department_id", None
-        )
-        target_department_name = getattr(
-            self.document, "target_department_name", None
+        target_department_id = _document_routed_department_id(self.document)
+        target_department_name = _document_routed_department(self.document) or getattr(
+            self.document, "suggested_department_name", None
         )
 
         try:
@@ -790,10 +823,9 @@ class UniversalRoutingDialog(QDialog):
         self._all_employees = []
 
         self.setWindowTitle(f"Route Document - {document.reference}")
-        self.setMinimumWidth(620)
-        self.setMaximumWidth(860)
-        self.setMinimumHeight(500)
-        self.resize(700, 620)
+        self.setMinimumSize(520, 420)
+        self.setMaximumSize(980, 760)
+        self.resize(700, 560)
         self.setSizeGripEnabled(True)
 
         self.setup_ui()
@@ -905,7 +937,7 @@ class UniversalRoutingDialog(QDialog):
 
         name = (
             getattr(self.document, "suggested_department_name", None)
-            or getattr(self.document, "target_department_name", None)
+            or getattr(self.document, "suggested_department_name", None)
         )
         if not name:
             return None
@@ -980,13 +1012,13 @@ class UniversalRoutingDialog(QDialog):
         self._populate_employee_combo(employee_combo)
 
         employee_hint = QLabel(
-            "Select any employee; employees from other departments are allowed."
+            "Select an eligible employee. The backend validates the final assignment."
         )
         employee_hint.setStyleSheet("color: #64748B; font-size: 10px;")
         employee_hint.setWordWrap(True)
 
         tso_label = QLabel(
-            "System Active TSO — the backend will use the currently active TSO."
+            "TSO route — the backend resolves the authorized TSO for the active DS context."
         )
         tso_label.setStyleSheet(
             "color: #0F172A; background-color: #F1F5F9; "
@@ -1210,8 +1242,8 @@ class CloseDocumentDialog(QDialog):
         self.setWindowTitle(
             f"Close Document - {document.reference}"
         )
-        self.setMinimumWidth(420)
-        self.setMaximumWidth(580)
+        self.setMinimumSize(380, 220)
+        self.setMaximumSize(680, 520)
         self.setSizeGripEnabled(True)
 
         self.setup_ui()
@@ -1310,8 +1342,8 @@ class SendReminderDialog(QDialog):
         self.setWindowTitle(
             f"Send Reminder - {document.reference}"
         )
-        self.setMinimumWidth(420)
-        self.setMaximumWidth(600)
+        self.setMinimumSize(380, 200)
+        self.setMaximumSize(680, 480)
         self.setSizeGripEnabled(True)
 
         self.setup_ui()

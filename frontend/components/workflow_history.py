@@ -25,11 +25,9 @@ class WorkflowHistory(QFrame):
 
         layout = QVBoxLayout()
 
-        layout.setContentsMargins(
-            20, 20, 20, 20
-        )
+        layout.setContentsMargins(16, 14, 16, 14)
 
-        layout.setSpacing(12)
+        layout.setSpacing(8)
 
         # --------------------------------
         # TITLE
@@ -61,9 +59,10 @@ class WorkflowHistory(QFrame):
             "Details"
         ])
 
-        self.table.setEditTriggers(
-            QTableWidget.NoEditTriggers
-        )
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(180)
 
         self.table.setSelectionBehavior(
             QTableWidget.SelectRows

@@ -6,132 +6,157 @@ import os
 @dataclass
 class AttachmentModel:
     """
-    Frontend domain model representing a file attachment (original source dispatch or workflow progress).
-    Retains the exact user identity who attached/uploaded the file (uploaded_by / attached_by_id).
+    Frontend domain model for a document attachment.
+
+    An attachment belongs to a document and may optionally belong to a
+    specific ProgressUpdate.
+
+    Operational ownership is not stored here. The uploader is represented
+    only by uploaded_by / uploaded_by_name.
     """
+
     id: Optional[int] = None
-    document_id: int = 0
+    document_id: Optional[int] = None
     progress_update_id: Optional[int] = None
+
     file_name: str = ""
     file_path: str = ""
     file_type: Optional[str] = None
     file_size: Optional[int] = None
-    category: str = "ORIGINAL"  # "ORIGINAL" or "WORKFLOW"
-    source: Optional[str] = None  # e.g. "Government Mail", "Internal Outlook", "Manual Upload", "Employee Progress"
-    uploaded_by: int = 0
+
+    category: str = "ORIGINAL"
+    source: Optional[str] = None
+
+    uploaded_by: Optional[int] = None
     uploaded_by_name: Optional[str] = None
+
     created_at: Optional[str] = None
 
     @property
-    def attached_by_id(self) -> int:
-        """Alias for uploaded_by representing user who attached the file."""
-        return self.uploaded_by
-
-    @attached_by_id.setter
-    def attached_by_id(self, val: int):
-        self.uploaded_by = val
-
-    @property
-    def uploaded_by_id(self) -> int:
-        """Alias for uploaded_by."""
-        return self.uploaded_by
-
-    @uploaded_by_id.setter
-    def uploaded_by_id(self, val: int):
-        self.uploaded_by = val
-
-    @property
-    def attached_by_name(self) -> Optional[str]:
-        """Alias for uploaded_by_name."""
-        return self.uploaded_by_name
-
-    @attached_by_name.setter
-    def attached_by_name(self, val: Optional[str]):
-        self.uploaded_by_name = val
-
-    @property
-    def uploaded_at(self) -> Optional[str]:
-        """Alias for created_at."""
-        return self.created_at
-
-    @uploaded_at.setter
-    def uploaded_at(self, val: Optional[str]):
-        self.created_at = val
-
-    @property
     def extension(self) -> str:
-        """Returns uppercase file extension without dot."""
+        """Return the file extension without the leading dot."""
         if self.file_name and "." in self.file_name:
             return self.file_name.rsplit(".", 1)[-1].upper()
+
         if self.file_type:
             return self.file_type.upper().replace(".", "")
+
         return "FILE"
 
     @property
     def is_previewable(self) -> bool:
-        """Whether the file format can be previewed inside the application."""
-        ext = self.extension.lower()
-        return ext in ("pdf", "png", "jpg", "jpeg", "txt", "log", "docx")
+        """Return whether the frontend supports inline preview."""
+        return self.extension.lower() in {
+            "pdf",
+            "png",
+            "jpg",
+            "jpeg",
+            "txt",
+            "log",
+            "docx",
+        }
 
     @property
     def formatted_size(self) -> str:
-        """Returns human-readable file size."""
-        if not self.file_size:
-            if self.file_path and os.path.exists(self.file_path):
-                size_bytes = os.path.getsize(self.file_path)
-            else:
-                return "145 KB"
-        else:
-            size_bytes = self.file_size
+        """
+        Return a human-readable file size.
+
+        Never invent a size. If neither the backend nor a locally available
+        file provides the size, return an explicit unknown value.
+        """
+        size_bytes = self.file_size
+
+        if size_bytes is None and self.file_path:
+            try:
+                if os.path.isfile(self.file_path):
+                    size_bytes = os.path.getsize(self.file_path)
+            except (OSError, TypeError):
+                size_bytes = None
+
+        if size_bytes is None:
+            return "Unknown size"
+
+        try:
+            size_bytes = int(size_bytes)
+        except (TypeError, ValueError):
+            return "Unknown size"
+
+        if size_bytes < 0:
+            return "Unknown size"
 
         if size_bytes < 1024:
             return f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
+
+        if size_bytes < 1024 * 1024:
             return f"{size_bytes / 1024:.1f} KB"
-        else:
-            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AttachmentModel":
-        uploaded_by_val = (
-            data.get("uploaded_by")
-            or data.get("uploaded_by_user_id")
-            or data.get("attached_by_id")
-            or data.get("uploaded_by_id")
-            or 0
+    def from_dict(
+        cls,
+        data: Optional[Dict[str, Any]],
+    ) -> "AttachmentModel":
+        """Build an attachment model from the backend response."""
+
+        if not data:
+            return cls()
+
+        raw_category = (
+            data.get("category")
+            or data.get("attachment_type")
+            or "ORIGINAL"
         )
-        uploaded_by_name_val = (
-            data.get("uploaded_by_name")
-            or data.get("attached_by_name")
-        )
-        created_at_val = (
-            str(data.get("created_at") or data.get("uploaded_at") or "")
-        )
-        raw_cat = data.get("category") or data.get("attachment_type") or "ORIGINAL"
-        cat_str = str(raw_cat).upper()
-        if cat_str in ("PROGRESS_ATTACHMENT", "WORKFLOW"):
-            category_val = "WORKFLOW"
-        elif cat_str in ("ORIGINAL", "EMAIL_ATTACHMENT", "SUPPORTING_DOCUMENT"):
-            category_val = "ORIGINAL"
-        else:
-            category_val = "WORKFLOW" if data.get("progress_update_id") else "ORIGINAL"
+
+        category = str(raw_category).upper()
+
+        if category == "PROGRESS_ATTACHMENT":
+            category = "WORKFLOW"
+
+        elif category in {
+            "EMAIL_ATTACHMENT",
+            "SUPPORTING_DOCUMENT",
+        }:
+            category = "ORIGINAL"
+
+        elif category not in {"ORIGINAL", "WORKFLOW"}:
+            category = (
+                "WORKFLOW"
+                if data.get("progress_update_id") is not None
+                else "ORIGINAL"
+            )
+
+        file_name = data.get("file_name") or "attachment"
+
+        file_type = data.get("file_type")
+
+        if not file_type and "." in file_name:
+            file_type = file_name.rsplit(".", 1)[-1].upper()
 
         return cls(
             id=data.get("id"),
-            document_id=data.get("document_id", 0),
+            document_id=data.get("document_id"),
             progress_update_id=data.get("progress_update_id"),
-            file_name=data.get("file_name", "attachment"),
-            file_path=data.get("file_path") or data.get("storage_key") or "",
-            file_type=data.get("file_type") or (data.get("file_name", "").rsplit(".", 1)[-1].upper() if "." in data.get("file_name", "") else "PDF"),
+            file_name=file_name,
+            file_path=data.get("file_path")
+            or data.get("storage_key")
+            or "",
+            file_type=file_type,
             file_size=data.get("file_size"),
-            category=category_val,
+            category=category,
             source=data.get("source"),
-            uploaded_by=uploaded_by_val,
-            uploaded_by_name=uploaded_by_name_val,
-            created_at=created_at_val
+            uploaded_by=data.get("uploaded_by"),
+            uploaded_by_name=data.get("uploaded_by_name"),
+            created_at=(
+                str(data.get("created_at"))
+                if data.get("created_at") is not None
+                else None
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the canonical attachment model."""
+
         return {
             "id": self.id,
             "document_id": self.document_id,
@@ -143,10 +168,17 @@ class AttachmentModel:
             "category": self.category,
             "source": self.source,
             "uploaded_by": self.uploaded_by,
-            "attached_by_id": self.uploaded_by,
-            "uploaded_by_id": self.uploaded_by,
             "uploaded_by_name": self.uploaded_by_name,
-            "attached_by_name": self.uploaded_by_name,
             "created_at": self.created_at,
-            "uploaded_at": self.created_at
         }
+
+    def __repr__(self) -> str:
+        return (
+            "AttachmentModel("
+            f"id={self.id}, "
+            f"document_id={self.document_id}, "
+            f"progress_update_id={self.progress_update_id}, "
+            f"file_name={self.file_name!r}, "
+            f"category={self.category!r}, "
+            f"uploaded_by={self.uploaded_by})"
+        )

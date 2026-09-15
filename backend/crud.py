@@ -44,9 +44,48 @@ from models import (
     UserRole, DocumentStatus, WorkflowStage, Priority, RouteType,
     SourceType, MessageProcessingStatus, AttachmentType, OCRStatus,
     RoutingSource, RemarkType, ReminderReason,
-    ProgressValidationStatus, AssignmentStatus,
+    ProgressValidationStatus,
     WorkContextType, DirectorDecision, BranchType
 )
+
+
+# =========================================================
+# CONTEXT RESOLUTION
+# =========================================================
+
+def _resolve_context_membership(
+    db: Session,
+    user: models.User,
+    context_id: Optional[int] = None,
+) -> Optional[models.WorkContextMembership]:
+    """Resolve the work context used by workflow/document operations.
+
+    Every document query must use the same context-resolution rule as the
+    FastAPI dependency.  A supplied context_id must belong to the user and be
+    active.  When no context is supplied, prefer an active context matching
+    the user's role; otherwise use the first active context.
+
+    This helper is deliberately kept in CRUD so service functions cannot
+    accidentally bypass context authorization.
+    """
+    if user is None:
+        return None
+
+    if context_id is not None:
+        return validate_user_context(db, user.id, context_id)
+
+    memberships = get_user_context_memberships(db, user.id)
+    if not memberships:
+        return None
+
+    # Prefer the context that corresponds to the persisted user role.
+    for membership in memberships:
+        context_value = getattr(membership.context_type, "value", membership.context_type)
+        role_value = getattr(user.role, "value", user.role)
+        if context_value == role_value:
+            return membership
+
+    return memberships[0]
 
 
 # =========================================================
@@ -286,7 +325,22 @@ def create_incoming_message(db: Session, intake: schemas.IntakeCreate, has_attac
 
 
 def get_incoming_messages(db: Session) -> List[models.IncomingMessage]:
-    return db.query(models.IncomingMessage).order_by(models.IncomingMessage.created_at.desc()).all()
+    """Return only external intake items still awaiting DS processing.
+
+    Manual uploads never enter this queue. Once an external message has been
+    converted into its canonical Document, its intake record is PROCESSED and
+    disappears from the DS Inbox while the Document remains available under
+    Documents/History.
+    """
+    return (
+        db.query(models.IncomingMessage)
+        .filter(
+            models.IncomingMessage.processing_status
+            != MessageProcessingStatus.PROCESSED
+        )
+        .order_by(models.IncomingMessage.created_at.desc())
+        .all()
+    )
 
 
 def get_incoming_message_by_id(db: Session, msg_id: int) -> Optional[models.IncomingMessage]:
@@ -313,7 +367,6 @@ def process_intake_to_document(db: Session, msg_id: int, proc_req: schemas.Intak
         mode=msg.source_type.value,
         priority=proc_req.priority,
         source_message_id=msg.id,
-        target_department_id=None,
         suggested_department_id=proc_req.suggested_department_id,
         suggested_employee_id=proc_req.suggested_employee_id,
         ocr_text=proc_req.ocr_text,
@@ -379,6 +432,30 @@ def check_concurrency(doc: models.Document, expected_version: Optional[int]) -> 
     return True
 
 
+def _refresh_document_overall_state(db: Session, doc: models.Document) -> None:
+    """Keep document status derived from independent branches without hiding history."""
+    branches = db.query(models.DocumentDepartmentRouting).filter(
+        models.DocumentDepartmentRouting.document_id == doc.doc_id
+    ).all()
+    if not branches:
+        return
+    active = [b for b in branches if b.is_active]
+    if not active:
+        if all(b.status in (DocumentStatus.COMPLETED, DocumentStatus.CLOSED) for b in branches):
+            doc.status = DocumentStatus.COMPLETED
+        return
+    statuses = {b.status for b in active}
+    if DocumentStatus.PROGRESS_UPDATED in statuses:
+        doc.status = DocumentStatus.PROGRESS_UPDATED
+    elif DocumentStatus.IN_PROGRESS in statuses:
+        doc.status = DocumentStatus.IN_PROGRESS
+    elif DocumentStatus.ASSIGNED_FOR_EXECUTION in statuses:
+        doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
+    elif DocumentStatus.UNDER_HOD_PROCESSING in statuses:
+        doc.status = DocumentStatus.UNDER_HOD_PROCESSING
+    doc.updated_at = datetime.now()
+
+
 # =========================================================
 # DOCUMENT CRUD
 # =========================================================
@@ -396,9 +473,6 @@ def create_document(db: Session, doc: schemas.DocumentCreate, created_by: int) -
         mode=doc.mode,
         priority=doc.priority,
         status=DocumentStatus.RECEIVED,
-        current_stage=WorkflowStage.DS,
-        current_owner_id=created_by,
-        target_department_id=doc.target_department_id,
         created_by=created_by,
         source_message_id=doc.source_message_id,
         director_remark=doc.director_remark,
@@ -411,12 +485,12 @@ def create_document(db: Session, doc: schemas.DocumentCreate, created_by: int) -
     db.refresh(db_doc)
 
     # If suggested routing was supplied at creation, initialize advisory routing suggestion
-    if doc.suggested_department_id or doc.suggested_employee_id or doc.target_department_id:
+    if doc.suggested_department_id or doc.suggested_employee_id:
         generate_routing_suggestion(
             db,
             db_doc.doc_id,
             include_director_remark=bool(doc.director_remark),
-            preferred_dept_id=doc.suggested_department_id or doc.target_department_id,
+            preferred_dept_id=doc.suggested_department_id,
             preferred_emp_id=doc.suggested_employee_id
         )
 
@@ -438,290 +512,182 @@ def get_document(db: Session, doc_id: int) -> Optional[models.Document]:
     return db.query(models.Document).filter(models.Document.doc_id == doc_id).first()
 
 
-def get_documents(db: Session) -> List[models.Document]:
-    return db.query(models.Document).order_by(models.Document.created_at.desc()).all()
-
-
-# =========================================================
-# STRICT ROLE & DEPARTMENT SCOPING / INBOX
-# =========================================================
-
-def get_inbox(db: Session, user: models.User) -> List[models.Document]:
-    """
-    Hard-enforced backend scoping:
-    - DS: All documents in DS intake stage
-    - DIRECTOR: Only documents routed to Director (current_stage = DIRECTOR)
-    - HOD: Documents routed to HOD's department (target_department_id OR doc_assignments matching user.department_id)
-    - EMPLOYEE: Documents actively assigned to user via WorkAssignment or DocumentAssignment
-    """
-    if user.role == UserRole.DS:
-        return (
-            db.query(models.Document)
-            .filter(
-                models.Document.current_stage == WorkflowStage.DS,
-                models.Document.status == DocumentStatus.RECEIVED
-            )
-            .order_by(models.Document.created_at.desc())
-            .all()
-        )
-
-    elif user.role == UserRole.DIRECTOR:
-        return (
-            db.query(models.Document)
-            .filter(
-                models.Document.current_stage == WorkflowStage.DIRECTOR,
-                or_(
-                    models.Document.current_owner_id == user.id,
-                    models.Document.current_owner_id == None
-                )
-            )
-            .order_by(models.Document.updated_at.desc())
-            .all()
-        )
-
-    elif user.role == UserRole.HOD:
-        if not user.department_id:
-            return []
-        
-        # Subquery for documents assigned to this department in multi-assignment table
-        multi_dept_doc_ids = (
-            db.query(models.DocumentAssignment.document_id)
-            .filter(models.DocumentAssignment.department_id == user.department_id)
-            .all()
-        )
-        multi_ids = [r[0] for r in multi_dept_doc_ids]
-
-        return (
-            db.query(models.Document)
-            .filter(
-                or_(
-                    and_(
-                        models.Document.current_stage == WorkflowStage.HOD,
-                        models.Document.target_department_id == user.department_id
-                    ),
-                    models.Document.doc_id.in_(multi_ids)
-                )
-            )
-            .order_by(models.Document.updated_at.desc())
-            .all()
-        )
-
-    elif user.role == UserRole.EMPLOYEE:
-        assigned_doc_ids = (
-            db.query(models.WorkAssignment.document_id)
-            .filter(
-                or_(
-                    models.WorkAssignment.assigned_to_user_id == user.id,
-                    models.WorkAssignment.members.any(
-                        and_(
-                            models.WorkAssignmentMember.user_id == user.id,
-                            models.WorkAssignmentMember.is_active == True,
-                        )
-                    ),
-                ),
-                models.WorkAssignment.is_active == True
-            )
-            .all()
-        )
-        multi_assign_ids = (
-            db.query(models.DocumentAssignment.document_id)
-            .filter(models.DocumentAssignment.assigned_employee_id == user.id)
-            .all()
-        )
-        combined_ids = list(set([r[0] for r in assigned_doc_ids] + [r[0] for r in multi_assign_ids]))
-
-        return (
-            db.query(models.Document)
-            .filter(
-                or_(
-                    models.Document.doc_id.in_(combined_ids),
-                    and_(
-                        models.Document.current_owner_id == user.id,
-                        models.Document.current_stage == WorkflowStage.EMPLOYEE
-                    )
-                )
-            )
-            .order_by(models.Document.updated_at.desc())
-            .all()
-        )
-
-    return []
-
-
-def is_document_accessible(db: Session, doc: models.Document, user: models.User) -> bool:
-    """Check if the user is authorized to view this document and its attachments/history."""
-    if user.role in (UserRole.DS, UserRole.DIRECTOR):
+def _document_has_historical_participation(db: Session, doc_id: int, user: models.User, context: Optional[models.WorkContextMembership]) -> bool:
+    """Backend-enforced historical visibility. Active queues are separate from history."""
+    uid = user.id
+    # The DS who registered the canonical document is a legitimate participant
+    # for the entire lifecycle, including the Director-returned state.
+    if db.query(models.Document).filter(
+        models.Document.doc_id == doc_id,
+        models.Document.created_by == uid,
+    ).first():
         return True
-    elif user.role == UserRole.HOD:
-        if user.department_id is not None and doc.target_department_id == user.department_id:
-            return True
-        has_multi = db.query(models.DocumentAssignment).filter(
-            models.DocumentAssignment.document_id == doc.doc_id,
-            models.DocumentAssignment.department_id == user.department_id
-        ).first()
-        return has_multi is not None
-    elif user.role == UserRole.EMPLOYEE:
-        has_assignment = db.query(models.WorkAssignment).filter(
-            models.WorkAssignment.document_id == doc.doc_id,
-            models.WorkAssignment.assigned_to_user_id == user.id
-        ).first()
-        has_multi = db.query(models.DocumentAssignment).filter(
-            models.DocumentAssignment.document_id == doc.doc_id,
-            models.DocumentAssignment.assigned_employee_id == user.id
-        ).first()
-        return (doc.current_owner_id == user.id or has_assignment is not None or has_multi is not None)
+
+    # Direct participation in the workflow ledger.
+    if db.query(models.DocumentRoute).filter(
+        models.DocumentRoute.document_id == doc_id,
+        or_(models.DocumentRoute.from_user_id == uid, models.DocumentRoute.to_user_id == uid)
+    ).first():
+        return True
+    if db.query(models.DirectorReview).filter(models.DirectorReview.document_id == doc_id, models.DirectorReview.director_user_id == uid).first():
+        return True
+    if db.query(models.DocumentRemark).filter(models.DocumentRemark.document_id == doc_id, models.DocumentRemark.author_user_id == uid).first():
+        return True
+    if db.query(models.DocumentDepartmentRouting).filter(models.DocumentDepartmentRouting.document_id == doc_id, models.DocumentDepartmentRouting.routed_by_user_id == uid).first():
+        return True
+    if db.query(models.WorkAssignment).filter(models.WorkAssignment.document_id == doc_id, models.WorkAssignment.assigned_by_user_id == uid).first():
+        return True
+    if db.query(models.WorkAssignmentMember).filter(models.WorkAssignmentMember.user_id == uid, models.WorkAssignmentMember.assignment.has(document_id=doc_id)).first():
+        return True
+    if db.query(models.ProgressUpdate).filter(models.ProgressUpdate.document_id == doc_id, models.ProgressUpdate.submitted_by_user_id == uid).first():
+        return True
+
+    if context is None:
+        return False
+    if context.context_type == WorkContextType.HOD and context.department_id is not None:
+        return db.query(models.DocumentDepartmentRouting).filter(
+            models.DocumentDepartmentRouting.document_id == doc_id,
+            models.DocumentDepartmentRouting.department_id == context.department_id,
+        ).first() is not None
+    # Employee/TSO history is intentionally user-specific, never department-wide.
     return False
 
 
-def get_accessible_documents_for_user(db: Session, user: models.User) -> List[models.Document]:
-    """Returns all documents accessible to the given user based on their role and department."""
-    if user.role in (UserRole.DS, UserRole.DIRECTOR):
+def get_documents(db: Session, user: Optional[models.User] = None, context_id: Optional[int] = None) -> List[models.Document]:
+    if user is None:
         return db.query(models.Document).order_by(models.Document.created_at.desc()).all()
-    elif user.role == UserRole.HOD:
-        if not user.department_id:
-            return []
-        multi_dept_doc_ids = [
-            r[0] for r in db.query(models.DocumentAssignment.document_id)
-            .filter(models.DocumentAssignment.department_id == user.department_id).all()
-        ]
-        return (
-            db.query(models.Document)
-            .filter(
-                or_(
-                    models.Document.target_department_id == user.department_id,
-                    models.Document.doc_id.in_(multi_dept_doc_ids)
-                )
+    context = _resolve_context_membership(db, user, context_id)
+    docs = db.query(models.Document).order_by(models.Document.updated_at.desc()).all()
+    if context and context.context_type == WorkContextType.ADMIN:
+        return []  # Admin is not a workflow participant merely by having admin role.
+    return [d for d in docs if _document_has_historical_participation(db, d.doc_id, user, context)]
+
+
+def get_inbox(db: Session, user: models.User, context_id: Optional[int] = None) -> List[models.Document]:
+    """Active action queue only. Completed work is intentionally removed from inbox."""
+    context = _resolve_context_membership(db, user, context_id)
+    if context is None:
+        return []
+    ct = context.context_type
+    if ct == WorkContextType.ADMIN:
+        return []
+    if ct == WorkContextType.DS:
+        return db.query(models.Document).filter(models.Document.status.in_([
+            DocumentStatus.RECEIVED, DocumentStatus.DIRECTOR_REVIEW_COMPLETED,
+            DocumentStatus.PROGRESS_UPDATED, DocumentStatus.COMPLETED,
+            DocumentStatus.REVIEW_COMPLETED, DocumentStatus.DIRECTOR_REVIEW_COMPLETED,
+        ])).order_by(models.Document.updated_at.desc()).all()
+    if ct == WorkContextType.DIRECTOR:
+        return db.query(models.Document).join(models.DocumentRoute, models.DocumentRoute.document_id == models.Document.doc_id).filter(
+            models.Document.status == DocumentStatus.UNDER_DIRECTOR_REVIEW,
+            models.DocumentRoute.to_user_id == user.id,
+        ).distinct().order_by(models.Document.updated_at.desc()).all()
+    if ct == WorkContextType.HOD and context.department_id is not None:
+        return db.query(models.Document).join(models.DocumentDepartmentRouting, models.DocumentDepartmentRouting.document_id == models.Document.doc_id).filter(
+            models.DocumentDepartmentRouting.department_id == context.department_id,
+            models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
+            models.DocumentDepartmentRouting.is_active == True,
+            models.DocumentDepartmentRouting.status.in_([DocumentStatus.UNDER_HOD_PROCESSING, DocumentStatus.PROGRESS_UPDATED]),
+        ).distinct().order_by(models.Document.updated_at.desc()).all()
+    if ct in (WorkContextType.EMPLOYEE, WorkContextType.TSO):
+        return db.query(models.Document).join(models.WorkAssignment, models.WorkAssignment.document_id == models.Document.doc_id).join(
+            models.WorkAssignmentMember, models.WorkAssignmentMember.work_assignment_id == models.WorkAssignment.id, isouter=True
+        ).filter(
+            models.WorkAssignment.is_active == True,
+            or_(
+                and_(models.WorkAssignment.assigned_to_user_id == user.id, models.WorkAssignment.assigned_to_context_membership_id == context.id),
+                and_(models.WorkAssignmentMember.user_id == user.id, models.WorkAssignmentMember.context_membership_id == context.id, models.WorkAssignmentMember.is_active == True),
             )
-            .order_by(models.Document.updated_at.desc())
-            .all()
-        )
-    elif user.role == UserRole.EMPLOYEE:
-        return get_inbox(db, user)
+        ).distinct().order_by(models.Document.updated_at.desc()).all()
     return []
 
 
-# =========================================================
-# DOCUMENT WORKFLOW TRANSITIONS
-# =========================================================
+def is_document_accessible(db: Session, doc: models.Document, user: models.User, context_id: Optional[int] = None) -> bool:
+    context = _resolve_context_membership(db, user, context_id)
+    return bool(context and context.context_type != WorkContextType.ADMIN and _document_has_historical_participation(db, doc.doc_id, user, context))
 
-def route_document(db: Session, doc_id: int, route_req: schemas.RouteRequest, current_user: models.User) -> Optional[models.Document]:
+
+def get_accessible_documents_for_user(db: Session, user: models.User, context_id: Optional[int] = None) -> List[models.Document]:
+    return get_documents(db, user, context_id)
+
+
+def route_document(
+    db: Session,
+    doc_id: int,
+    route_req: schemas.RouteRequest,
+    current_user: models.User
+) -> Optional[models.Document]:
+    """
+    Route a document. Director review remains a single document-level phase;
+    post-review HOD/employee routing is converted to canonical independent branches.
+    """
     doc = get_document(db, doc_id)
+    if current_user.role != UserRole.DS:
+        raise ValueError("Only DS can perform document routing.")
     if not doc or not check_concurrency(doc, route_req.expected_version):
         return None
 
     if route_req.route_type == RouteType.INITIAL_DIRECTOR_REVIEW:
-        new_stage = WorkflowStage.DIRECTOR
-        new_status = DocumentStatus.UNDER_DIRECTOR_REVIEW
-        new_owner = route_req.to_user_id
+        doc.status = DocumentStatus.UNDER_DIRECTOR_REVIEW
+        doc.updated_at = datetime.now()
+        doc.version += 1
 
-    elif route_req.route_type == RouteType.POST_REVIEW_TO_HOD:
-        new_stage = WorkflowStage.HOD
-        new_status = DocumentStatus.UNDER_HOD_PROCESSING
-        new_owner = None
-        if route_req.to_department_id:
-            doc.target_department_id = route_req.to_department_id
+        db.add(models.DocumentRoute(
+            document_id=doc_id, from_user_id=current_user.id,
+            to_user_id=route_req.to_user_id, to_department_id=route_req.to_department_id,
+            route_type=route_req.route_type, remarks=route_req.remarks, created_at=datetime.now()
+        ))
+        db.commit()
+        db.refresh(doc)
+        return doc
 
-    elif route_req.route_type == RouteType.POST_REVIEW_TO_EMPLOYEE:
-        new_stage = WorkflowStage.EMPLOYEE
-        new_status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-        new_owner = route_req.to_user_id
-        if route_req.to_user_id:
-            target_user = db.query(models.User).filter(models.User.id == route_req.to_user_id).first()
-            if target_user and target_user.department_id:
-                doc.target_department_id = target_user.department_id
-
-            db.query(models.WorkAssignment).filter(
-                models.WorkAssignment.document_id == doc_id,
-                models.WorkAssignment.is_active == True
-            ).update({"is_active": False})
-
-            assign_entry = models.WorkAssignment(
-                document_id=doc_id,
-                assigned_by_user_id=current_user.id,
-                assigned_to_user_id=route_req.to_user_id,
-                requires_hod_validation=route_req.requires_hod_validation,
+    if route_req.route_type == RouteType.POST_REVIEW_TO_HOD:
+        if not route_req.to_department_id:
+            return None
+        create_canonical_branches(
+            db=db, document_id=doc_id,
+            branches=[schemas.BranchCreate(
+                branch_type=BranchType.DEPARTMENT_HOD,
+                department_id=route_req.to_department_id,
+                target_user_id=None,
+                requires_hod_validation=False,
                 instructions=route_req.remarks,
-                is_active=True
-            )
-            db.add(assign_entry)
-
-    elif route_req.route_type == RouteType.FOLLOW_UP_TO_DIRECTOR:
-        new_stage = WorkflowStage.DIRECTOR
-        new_status = DocumentStatus.UNDER_DIRECTOR_REVIEW
-        new_owner = route_req.to_user_id
-    else:
-        return None
-
-    doc.current_stage = new_stage
-    doc.status = new_status
-    doc.current_owner_id = new_owner
-    doc.updated_at = datetime.now()
-    doc.version += 1
-
-    # Record Route entry
-    db_route = models.DocumentRoute(
-        document_id=doc_id,
-        from_user_id=current_user.id,
-        to_user_id=route_req.to_user_id,
-        to_department_id=route_req.to_department_id,
-        route_type=route_req.route_type,
-        remarks=route_req.remarks,
-    )
-    db.add(db_route)
-    db.commit()
-    db.refresh(doc)
-
-    # Workflow history
-    if route_req.route_type == RouteType.INITIAL_DIRECTOR_REVIEW:
-        route_detail = route_req.remarks or "Forwarded for Executive Review"
-    elif route_req.route_type == RouteType.POST_REVIEW_TO_HOD:
-        route_detail = route_req.remarks or f"Destination: {doc.target_department_name or 'Department'} (For departmental processing)"
-    elif route_req.route_type == RouteType.POST_REVIEW_TO_EMPLOYEE:
-        route_detail = route_req.remarks or f"Direct Staff Delegation: {doc.assigned_employee_name or 'Staff'}"
-    elif route_req.route_type == RouteType.FOLLOW_UP_TO_DIRECTOR:
-        route_detail = route_req.remarks or "Progress follow-up forwarded to Director for Executive Review"
-    else:
-        route_detail = route_req.remarks or "Document routed"
-
-    event = _add_workflow_history(
-        db=db,
-        document_id=doc_id,
-        user_id=current_user.id,
-        action=f"ROUTED_{route_req.route_type.value}",
-        from_role=current_user.role.value,
-        to_role=new_stage.value,
-        details=route_detail
-    )
-
-    # Send Notification to recipient
-    if route_req.to_user_id:
-        _create_notification(
-            db=db,
-            user_id=route_req.to_user_id,
-            document_id=doc_id,
-            workflow_event_id=event.id,
-            title=f"Document routed: {doc.reference_no}",
-            message=f"Document '{doc.title}' routed to you by DS."
+            )],
+            current_user=current_user, expected_version=route_req.expected_version,
         )
-    elif route_req.to_department_id:
-        # Notify active HODs of that department
-        dept_hods = db.query(models.User).filter(
-            models.User.department_id == route_req.to_department_id,
-            models.User.role == UserRole.HOD,
-            models.User.is_active == True
-        ).all()
-        for hod in dept_hods:
-            _create_notification(
-                db=db,
-                user_id=hod.id,
-                document_id=doc_id,
-                workflow_event_id=event.id,
-                title=f"New Department Document: {doc.reference_no}",
-                message=f"Document '{doc.title}' routed to your department."
-            )
+        return get_document(db, doc_id)
 
-    return doc
+    if route_req.route_type == RouteType.POST_REVIEW_TO_EMPLOYEE:
+        if not route_req.to_user_id:
+            return None
+        create_canonical_branches(
+            db=db, document_id=doc_id,
+            branches=[schemas.BranchCreate(
+                branch_type=BranchType.DIRECT_EMPLOYEE,
+                target_user_id=route_req.to_user_id,
+                requires_hod_validation=bool(route_req.requires_hod_validation),
+                instructions=route_req.remarks,
+            )],
+            current_user=current_user, expected_version=route_req.expected_version,
+        )
+        return get_document(db, doc_id)
 
+    if route_req.route_type == RouteType.FOLLOW_UP_TO_DIRECTOR:
+        if not route_req.to_user_id:
+            return None
+        doc.status = DocumentStatus.UNDER_DIRECTOR_REVIEW
+        doc.updated_at = datetime.now()
+        doc.version += 1
+        db.add(models.DocumentRoute(
+            document_id=doc_id, from_user_id=current_user.id,
+            to_user_id=route_req.to_user_id, route_type=route_req.route_type,
+            remarks=route_req.remarks, created_at=datetime.now()
+        ))
+        db.commit()
+        db.refresh(doc)
+        return doc
+
+    return None
 
 def save_director_remark(db: Session, doc_id: int, remark: str, current_user: models.User,
                          expected_version: Optional[int] = None) -> Optional[models.Document]:
@@ -767,9 +733,7 @@ def return_to_ds(db: Session, doc_id: int, ds_user_id: int, remarks: Optional[st
     if not doc or not check_concurrency(doc, expected_version):
         return None
 
-    doc.current_stage = WorkflowStage.DS
     doc.status = DocumentStatus.DIRECTOR_REVIEW_COMPLETED
-    doc.current_owner_id = ds_user_id
     if remarks:
         doc.director_remark = remarks
         remark_entry = models.DocumentRemark(
@@ -856,416 +820,309 @@ def save_hod_remark(db: Session, doc_id: int, remark: str, current_user: models.
     return doc
 
 
+def _get_active_employee_context(
+    db: Session,
+    user_id: int,
+    department_id: Optional[int] = None,
+) -> Optional[models.WorkContextMembership]:
+    """Return the user's active EMPLOYEE context, optionally for one department.
+
+    Employee eligibility is membership-based, not persisted-role-based. This
+    is required for users such as a TSO who also work as an EMPLOYEE in FCTD.
+    """
+    q = db.query(models.WorkContextMembership).filter(
+        models.WorkContextMembership.user_id == user_id,
+        models.WorkContextMembership.context_type == WorkContextType.EMPLOYEE,
+        models.WorkContextMembership.is_active == True,
+    )
+    if department_id is not None:
+        q = q.filter(models.WorkContextMembership.department_id == department_id)
+    return q.order_by(models.WorkContextMembership.id.asc()).first()
+
+
 def create_hod_team_assignment(
     db: Session,
     doc_id: int,
     request: schemas.HODTeamAssignmentRequest,
     current_user: models.User,
-    context_id: Optional[int] = None,
+    context_id: Optional[int] = None
 ) -> Optional[models.WorkAssignment]:
-    """Create one WorkAssignment with one or more employee members.
-
-    HOD: same-department members only.
-    DS/Admin: may create cross-department teams, but members must belong to
-    departments represented by active Department/HOD branches on the document
-    whenever such branches exist.
-    """
+    """Create a coworking assignment on exactly one canonical HOD branch."""
     doc = get_document(db, doc_id)
-    if not doc or not check_concurrency(doc, request.expected_version):
+    # Branch operations are independent workstreams. Do not use the global
+    # document version as a concurrency lock for one branch.
+    if not doc:
         return None
-
-    if current_user.role not in (UserRole.HOD, UserRole.DS, UserRole.ADMIN):
-        raise ValueError("Only HOD or DS can create a team assignment.")
+    if current_user.role not in (UserRole.HOD, UserRole.DS):
+        raise ValueError("Only HOD, DS, or Admin can create a team assignment.")
 
     member_ids = list(dict.fromkeys(int(uid) for uid in request.member_user_ids if uid))
     if not member_ids:
         raise ValueError("At least one employee must be selected.")
 
-    branch = None
+    selected_context = _resolve_context_membership(db, current_user, context_id)
+    if current_user.role == UserRole.HOD:
+        if not selected_context or selected_context.context_type != WorkContextType.HOD:
+            raise ValueError("HOD operations require a selected HOD work context.")
+        selected_department_id = selected_context.department_id
+        if selected_department_id is None:
+            raise ValueError("The selected HOD context has no department.")
+    else:
+        selected_department_id = (
+            selected_context.department_id
+            if selected_context and selected_context.context_type == WorkContextType.HOD
+            else current_user.department_id
+        )
+
     if request.routing_id is not None:
         branch = db.query(models.DocumentDepartmentRouting).filter(
             models.DocumentDepartmentRouting.id == request.routing_id,
             models.DocumentDepartmentRouting.document_id == doc_id,
+            models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
             models.DocumentDepartmentRouting.is_active == True,
         ).first()
-        if not branch:
-            raise ValueError("The selected active routing branch was not found.")
-        if branch.branch_type != BranchType.DEPARTMENT_HOD:
-            raise ValueError("Team assignment is allowed only on a Department/HOD branch.")
-        if current_user.role == UserRole.HOD and branch.department_id != current_user.department_id:
-            raise ValueError("HOD can assign only within their own department branch.")
-    elif current_user.role == UserRole.HOD:
-        if not current_user.department_id:
-            raise ValueError("HOD must have a department context.")
-        branch = (
-            db.query(models.DocumentDepartmentRouting)
-            .filter(
-                models.DocumentDepartmentRouting.document_id == doc_id,
-                models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
-                models.DocumentDepartmentRouting.department_id == current_user.department_id,
-                models.DocumentDepartmentRouting.is_active == True,
-            )
-            .order_by(models.DocumentDepartmentRouting.routed_at.desc())
-            .first()
-        )
-        if not branch and doc.target_department_id != current_user.department_id:
-            raise ValueError("Document is not routed to this HOD's department.")
+    elif current_user.role == UserRole.HOD and selected_department_id:
+        branch = db.query(models.DocumentDepartmentRouting).filter(
+            models.DocumentDepartmentRouting.document_id == doc_id,
+            models.DocumentDepartmentRouting.department_id == selected_department_id,
+            models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
+            models.DocumentDepartmentRouting.is_active == True,
+        ).order_by(models.DocumentDepartmentRouting.routed_at.desc()).first()
+    else:
+        branch = None
+
+    if not branch:
+        raise ValueError("An active canonical Department/HOD routing branch is required.")
+    if current_user.role == UserRole.HOD and branch.department_id != selected_department_id:
+        raise ValueError("HOD can assign only within the selected HOD context's department branch.")
 
     employees = db.query(models.User).filter(
         models.User.id.in_(member_ids),
-        models.User.role == UserRole.EMPLOYEE,
         models.User.is_active == True,
     ).all()
-    employee_by_id = {u.id: u for u in employees}
-    if any(uid not in employee_by_id for uid in member_ids):
-        raise ValueError("Every selected member must be an active EMPLOYEE.")
+    by_id = {u.id: u for u in employees}
+    if any(uid not in by_id for uid in member_ids):
+        raise ValueError("Every selected member must be an active user.")
 
-    departments = {u.department_id for u in employees if u.department_id is not None}
-    if current_user.role == UserRole.HOD:
-        if any(u.department_id != current_user.department_id for u in employees):
-            raise ValueError("HOD can assign only employees from their own department.")
-    else:
-        active_dept_branch_depts = {
-            b.department_id
-            for b in db.query(models.DocumentDepartmentRouting).filter(
-                models.DocumentDepartmentRouting.document_id == doc_id,
-                models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
-                models.DocumentDepartmentRouting.is_active == True,
-            ).all()
-            if b.department_id is not None
-        }
-        if branch and branch.department_id is not None:
-            active_dept_branch_depts.add(branch.department_id)
-        if active_dept_branch_depts and not departments.issubset(active_dept_branch_depts):
-            raise ValueError("Team members must belong to departments currently routed on this document.")
+    # Membership, not base User.role, defines whether a person can work as
+    # an employee. This permits TSO + EMPLOYEE coexistence.
+    employee_contexts = {}
+    for uid in member_ids:
+        membership = _get_active_employee_context(db, uid, selected_department_id)
+        if not membership:
+            raise ValueError(
+                f"User {uid} does not have an active EMPLOYEE context"
+                + (f" for department {selected_department_id}." if selected_department_id else ".")
+            )
+        employee_contexts[uid] = membership
 
-    routing_id = branch.id if branch else None
-    old_assign = None
-    if routing_id is not None:
-        old_assign = db.query(models.WorkAssignment).filter(
-            models.WorkAssignment.routing_id == routing_id,
-            models.WorkAssignment.is_active == True,
-        ).first()
+    if current_user.role == UserRole.HOD and any(
+        employee_contexts[uid].department_id != selected_department_id for uid in member_ids
+    ):
+        raise ValueError("HOD can assign only employees from the selected HOD context's department.")
 
-    primary = employee_by_id[member_ids[0]]
+    old = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.routing_id == branch.id,
+        models.WorkAssignment.is_active == True,
+    ).first()
+    if old:
+        raise ValueError("This routing branch already has an active assignment. Reassignment is not allowed.")
+    primary = by_id[member_ids[0]]
     team_name = (request.team_name or "").strip() or None
+    now = datetime.now()
+
     assignment = models.WorkAssignment(
         document_id=doc_id,
-        routing_id=routing_id,
+        routing_id=branch.id,
         assigned_by_user_id=current_user.id,
         assigned_to_user_id=primary.id,
         requires_hod_validation=bool(request.requires_hod_validation),
         instructions=request.instructions,
         team_name=team_name,
+        is_team=len(member_ids) > 1 or bool(team_name),
         is_active=True,
-        assigned_at=datetime.now(),
+        assigned_at=now,
     )
     db.add(assignment)
     db.flush()
 
     for user_id in member_ids:
-        membership = db.query(models.WorkContextMembership).filter(
-            models.WorkContextMembership.user_id == user_id,
-            models.WorkContextMembership.context_type == WorkContextType.EMPLOYEE,
-            models.WorkContextMembership.is_active == True,
-        ).order_by(models.WorkContextMembership.id.asc()).first()
+        membership = employee_contexts[user_id]
         db.add(models.WorkAssignmentMember(
             work_assignment_id=assignment.id,
             user_id=user_id,
-            context_membership_id=membership.id if membership else None,
+            context_membership_id=membership.id,
             is_active=True,
-            assigned_at=datetime.now(),
+            assigned_at=now,
         ))
 
-    if old_assign:
-        old_assign.is_active = False
-        old_assign.completed_at = datetime.now()
-        old_assign.superseded_by_id = assignment.id
-
-    if branch:
-        branch.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-        branch.target_user_id = primary.id
-        branch.assigned_employee_id = primary.employee_id
-        branch.assigned_employee_name = primary.full_name
-        branch.version += 1
-
-    doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-    doc.current_stage = WorkflowStage.EMPLOYEE
-    doc.current_owner_id = primary.id
-    doc.updated_at = datetime.now()
+    branch.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
+    branch.target_user_id = primary.id
+    branch.version += 1
+    _refresh_document_overall_state(db, doc)
     doc.version += 1
-
-    if current_user.role in (UserRole.DS, UserRole.ADMIN):
-        action_name = "DS_TEAM_ASSIGNED"
-    else:
-        action_name = "HOD_TEAM_ASSIGNED" if len(member_ids) > 1 or team_name else "HOD_WORK_ASSIGNED"
-
-    _add_workflow_history(
-        db=db,
-        document_id=doc_id,
-        user_id=current_user.id,
-        action=action_name,
-        from_role=current_user.role.value,
-        to_role=WorkflowStage.EMPLOYEE.value,
-        details=(
-            f"Assigned {'team' if len(member_ids) > 1 or team_name else 'employee'} "
-            f"{team_name or ''} with members {member_ids}; departments={sorted(departments)}; "
-            f"routing_id={routing_id}"
-        ),
-    )
-
-    for user_id in member_ids:
-        _create_notification(
-            db=db,
-            user_id=user_id,
-            document_id=doc_id,
-            title=f"Work Assignment: {doc.reference_no}",
-            message=(
-                f"Document '{doc.title}' has been assigned to you"
-                + (f" as part of team '{team_name}'." if team_name else ".")
-            ),
-        )
-
-    db.commit()
-    db.refresh(assignment)
-    return assignment
-
-
-def assign_employee(db: Session, doc_id: int, assign_req: schemas.AssignmentRequest,
-                    current_user: models.User) -> Optional[models.WorkAssignment]:
-    doc = get_document(db, doc_id)
-    if not doc or not check_concurrency(doc, assign_req.expected_version):
-        return None
-
-    if current_user.role == UserRole.HOD:
-        if not current_user.department_id:
-            return None
-        if assign_req.routing_id:
-            branch = db.query(models.DocumentDepartmentRouting).filter(
-                models.DocumentDepartmentRouting.id == assign_req.routing_id,
-                models.DocumentDepartmentRouting.document_id == doc_id,
-                models.DocumentDepartmentRouting.is_active == True,
-            ).first()
-            if not branch or branch.branch_type != BranchType.DEPARTMENT_HOD:
-                return None
-            if branch.department_id != current_user.department_id:
-                return None
-        elif doc.target_department_id != current_user.department_id:
-            return None
-
-        target_check = db.query(models.User).filter(
-            models.User.id == assign_req.assigned_to_user_id,
-            models.User.role == UserRole.EMPLOYEE,
-            models.User.is_active == True,
-            models.User.department_id == current_user.department_id,
-        ).first()
-        if not target_check:
-            return None
-
-    # Supersede only an assignment on the same branch. Other branches continue independently.
-    if assign_req.routing_id is not None:
-        (
-            db.query(models.WorkAssignment)
-            .filter(
-                models.WorkAssignment.routing_id == assign_req.routing_id,
-                models.WorkAssignment.is_active == True,
-            )
-            .update({"is_active": False})
-        )
-    else:
-        (
-            db.query(models.WorkAssignment)
-            .filter(
-                models.WorkAssignment.document_id == doc_id,
-                models.WorkAssignment.assigned_by_user_id == current_user.id,
-                models.WorkAssignment.is_active == True,
-            )
-            .update({"is_active": False})
-        )
-
-    assignment = models.WorkAssignment(
-        document_id=doc_id,
-        assigned_by_user_id=current_user.id,
-        assigned_to_user_id=assign_req.assigned_to_user_id,
-        requires_hod_validation=assign_req.requires_hod_validation,
-        instructions=assign_req.instructions,
-        is_active=True,
-    )
-    db.add(assignment)
-
-    # Also record in document_assignments if not already present
-    doc_assign = models.DocumentAssignment(
-        document_id=doc_id,
-        department_id=current_user.department_id,
-        assigned_employee_id=assign_req.assigned_to_user_id,
-        assigned_by_user_id=current_user.id,
-        requires_hod_validation=assign_req.requires_hod_validation,
-        assignment_status=AssignmentStatus.IN_PROGRESS,
-        instructions=assign_req.instructions,
-        created_at=datetime.now()
-    )
-    db.add(doc_assign)
-
-    doc.current_stage = WorkflowStage.EMPLOYEE
-    doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-    doc.current_owner_id = assign_req.assigned_to_user_id
-    doc.updated_at = datetime.now()
-    doc.version += 1
-
-    db.commit()
-    db.refresh(assignment)
-
-    assignee_name = assignment.assigned_to.full_name if (assignment.assigned_to and assignment.assigned_to.full_name) else (doc.assigned_employee_name or "Staff")
-    val_note = " [HOD Validation Required]" if assign_req.requires_hod_validation else " [Direct to DS]"
-    assign_detail = f"Delegated to {assignee_name}: {assign_req.instructions or 'Standard departmental execution'}{val_note}"
 
     event = _add_workflow_history(
-        db=db,
-        document_id=doc_id,
-        user_id=current_user.id,
-        action="EMPLOYEE_ASSIGNED",
-        from_role="HOD",
-        to_role="EMPLOYEE",
-        details=assign_detail
+        db=db, document_id=doc_id, user_id=current_user.id,
+        action="HOD_TEAM_ASSIGNED" if len(member_ids) > 1 or team_name else "HOD_WORK_ASSIGNED",
+        from_role=current_user.role.value, to_role="EMPLOYEE",
+        details=f"Canonical HOD branch {branch.id}; team={team_name or 'Individual'}; members={member_ids}; work_assignment_id={assignment.id}"
     )
+    for user_id in member_ids:
+        _create_notification(
+            db=db, user_id=user_id, document_id=doc_id, workflow_event_id=event.id,
+            title=f"Work Assignment: {doc.reference_no}",
+            message=f"Document '{doc.title}' has been assigned to you" + (f" as part of team '{team_name}'." if team_name else ".")
+        )
+    db.commit()
+    db.refresh(assignment)
+    return assignment
 
-    _create_notification(
-        db=db,
-        user_id=assign_req.assigned_to_user_id,
-        document_id=doc_id,
-        workflow_event_id=event.id,
-        title=f"Task assigned: {doc.reference_no}",
-        message=f"You have been assigned to document '{doc.title}' by HOD."
-    )
-
+def complete_work_assignment(db: Session, doc_id: int, assignment_id: int, current_user: models.User, context_id: Optional[int] = None) -> Optional[models.WorkAssignment]:
+    assignment = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.id == assignment_id,
+        models.WorkAssignment.document_id == doc_id,
+        models.WorkAssignment.is_active == True,
+    ).first()
+    if not assignment:
+        return None
+    context = _resolve_context_membership(db, current_user, context_id)
+    if context is None or context.context_type not in (WorkContextType.EMPLOYEE, WorkContextType.TSO):
+        raise ValueError("Employee/TSO context required.")
+    member = db.query(models.WorkAssignmentMember).filter(
+        models.WorkAssignmentMember.work_assignment_id == assignment.id,
+        models.WorkAssignmentMember.user_id == current_user.id,
+        models.WorkAssignmentMember.context_membership_id == context.id,
+        models.WorkAssignmentMember.is_active == True,
+    ).first()
+    direct = assignment.assigned_to_user_id == current_user.id and assignment.assigned_to_context_membership_id == context.id
+    if not member and not direct:
+        raise ValueError("You are not a member of this assignment.")
+    now = datetime.now()
+    if member:
+        member.is_active = False
+        member.completed_at = now
+    # For an individual assignment, direct completion closes the assignment.
+    remaining = db.query(models.WorkAssignmentMember).filter(
+        models.WorkAssignmentMember.work_assignment_id == assignment.id,
+        models.WorkAssignmentMember.is_active == True,
+    ).count()
+    if not assignment.is_team or remaining == 0:
+        assignment.is_active = False
+        assignment.completed_at = now
+        if assignment.routing:
+            assignment.routing.status = DocumentStatus.COMPLETED
+            assignment.routing.is_active = False
+            assignment.routing.completed_at = now
+            assignment.routing.version += 1
+    else:
+        if assignment.routing:
+            assignment.routing.status = DocumentStatus.PROGRESS_UPDATED
+            assignment.routing.version += 1
+    doc = get_document(db, doc_id)
+    if doc:
+        _refresh_document_overall_state(db, doc)
+        doc.version += 1
+    _add_workflow_history(db=db, document_id=doc_id, user_id=current_user.id,
+                          action="ASSIGNMENT_COMPLETED", from_role=current_user.role.value,
+                          to_role="DS", details=f"Assignment {assignment.id} completed by user {current_user.id}.")
+    db.commit(); db.refresh(assignment)
     return assignment
 
 
-def create_progress_update(db: Session, doc_id: int, prog: schemas.ProgressCreate,
-                           current_user: models.User) -> Optional[models.ProgressUpdate]:
+def create_progress_update(
+    db: Session,
+    doc_id: int,
+    prog: schemas.ProgressCreate,
+    current_user: models.User,
+    context_id: Optional[int] = None,
+) -> Optional[models.ProgressUpdate]:
+    """Create progress against exactly one active WorkAssignment."""
     doc = get_document(db, doc_id)
     if not doc:
         return None
 
-    # Find the matching active WorkAssignment
-    active_assign = None
-    if getattr(prog, "work_assignment_id", None):
-        active_assign = db.query(models.WorkAssignment).filter(
-            models.WorkAssignment.id == prog.work_assignment_id,
-            models.WorkAssignment.is_active == True,
-            or_(
-                models.WorkAssignment.assigned_to_user_id == current_user.id,
-                models.WorkAssignment.members.any(
-                    and_(
-                        models.WorkAssignmentMember.user_id == current_user.id,
-                        models.WorkAssignmentMember.is_active == True,
-                    )
-                ),
-            ),
-        ).first()
+    selected_context = _resolve_context_membership(db, current_user, context_id)
+    if selected_context is None:
+        raise ValueError("No active work context is available for this user.")
+    if selected_context.context_type not in (WorkContextType.EMPLOYEE, WorkContextType.TSO):
+        raise ValueError("Progress can only be submitted from an EMPLOYEE or TSO work context.")
 
-    if not active_assign:
-        active_assign = db.query(models.WorkAssignment).filter(
-            models.WorkAssignment.document_id == doc_id,
-            models.WorkAssignment.is_active == True,
-            or_(
-                models.WorkAssignment.assigned_to_user_id == current_user.id,
-                models.WorkAssignment.members.any(
-                    and_(
-                        models.WorkAssignmentMember.user_id == current_user.id,
-                        models.WorkAssignmentMember.is_active == True,
-                    )
-                ),
-            ),
-        ).order_by(models.WorkAssignment.assigned_at.desc()).first()
-
-    requires_hod = False
-    if active_assign:
-        if active_assign.routing and active_assign.routing.branch_type == BranchType.TSO:
-            requires_hod = False
-        elif active_assign.routing and active_assign.routing.branch_type == BranchType.DIRECT_EMPLOYEE:
-            requires_hod = bool(active_assign.requires_hod_validation)
-        elif active_assign.routing and active_assign.routing.branch_type == BranchType.DEPARTMENT_HOD:
-            requires_hod = True
-        else:
-            requires_hod = bool(active_assign.requires_hod_validation)
-
-    val_status = ProgressValidationStatus.PENDING_HOD_REVIEW if requires_hod else ProgressValidationStatus.DIRECT_TO_DS
-
-    db_progress = models.ProgressUpdate(
-        document_id=doc_id,
-        submitted_by_user_id=current_user.id,
-        work_assignment_id=active_assign.id if active_assign else None,
-        description=prog.description,
-        hod_validation_required=requires_hod,
-        hod_validation_status=val_status
+    # Scope progress to the selected work-context membership. This prevents a
+    # multi-context user (for example TSO + EMPLOYEE) from writing progress to
+    # a workstream belonging to another active context.
+    q = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.document_id == doc_id,
+        models.WorkAssignment.is_active == True,
+        or_(
+            models.WorkAssignment.assigned_to_context_membership_id == selected_context.id,
+            models.WorkAssignment.members.any(and_(
+                models.WorkAssignmentMember.user_id == current_user.id,
+                models.WorkAssignmentMember.context_membership_id == selected_context.id,
+                models.WorkAssignmentMember.is_active == True,
+            )),
+        ),
     )
-    db.add(db_progress)
+    if getattr(prog, "work_assignment_id", None):
+        active_assign = q.filter(models.WorkAssignment.id == prog.work_assignment_id).first()
+        if not active_assign:
+            raise ValueError("The selected work assignment is not active or is not assigned to you.")
+    else:
+        candidates = q.order_by(models.WorkAssignment.assigned_at.desc()).all()
+        if not candidates:
+            raise ValueError("No active work assignment is available for this user on this document.")
+        if len(candidates) > 1:
+            raise ValueError("This document has multiple active workstreams. Select the specific work assignment before submitting progress.")
+        active_assign = candidates[0]
 
-    # If linked to a branch, update branch status
-    if active_assign and active_assign.routing:
-        active_assign.routing.status = DocumentStatus.PROGRESS_UPDATED
+    branch = active_assign.routing
+    requires_hod = bool(active_assign.requires_hod_validation)
+    if branch and branch.branch_type == BranchType.TSO:
+        requires_hod = False
+    elif branch and branch.branch_type == BranchType.DEPARTMENT_HOD:
+        requires_hod = bool(active_assign.requires_hod_validation)
 
-    # Note: Document does NOT auto-close. Advance status to PROGRESS_UPDATED.
-    doc.status = DocumentStatus.PROGRESS_UPDATED
-    doc.updated_at = datetime.now()
+    progress = models.ProgressUpdate(
+        document_id=doc_id, submitted_by_user_id=current_user.id,
+        work_assignment_id=active_assign.id, description=prog.description,
+        hod_validation_required=requires_hod,
+        hod_validation_status=(ProgressValidationStatus.PENDING_HOD_REVIEW if requires_hod else ProgressValidationStatus.DIRECT_TO_DS),
+    )
+    db.add(progress)
+    if branch:
+        branch.status = DocumentStatus.PROGRESS_UPDATED
+        branch.version += 1
+    _refresh_document_overall_state(db, doc)
     doc.version += 1
 
-    db.commit()
-    db.refresh(db_progress)
+    event = _add_workflow_history(
+        db=db, document_id=doc_id, user_id=current_user.id,
+        action="PROGRESS_SUBMITTED_FOR_HOD" if requires_hod else "PROGRESS_UPDATED",
+        from_role=current_user.role.value, to_role="HOD" if requires_hod else "DS",
+        details=f"Progress submitted on work_assignment_id={active_assign.id}, routing_id={branch.id if branch else None}: {prog.description}"
+    )
 
-    if requires_hod:
-        event = _add_workflow_history(
-            db=db,
-            document_id=doc_id,
-            user_id=current_user.id,
-            action="PROGRESS_SUBMITTED_FOR_HOD",
-            from_role="EMPLOYEE",
-            to_role="HOD",
-            details=f'Progress update submitted for HOD validation: "{prog.description}"'
-        )
-
-        # Notify HOD(s)
-        dept_id = current_user.department_id or doc.target_department_id
-        if dept_id:
-            hods = db.query(models.User).filter(
-                models.User.department_id == dept_id,
-                models.User.role == UserRole.HOD,
-                models.User.is_active == True
-            ).all()
-            for hod in hods:
-                _create_notification(
-                    db=db,
-                    user_id=hod.id,
-                    document_id=doc_id,
-                    workflow_event_id=event.id,
-                    title=f"Progress awaiting HOD review: {doc.reference_no}",
-                    message=f"{current_user.full_name} submitted progress on '{doc.title}' requiring your validation."
-                )
-    else:
-        event = _add_workflow_history(
-            db=db,
-            document_id=doc_id,
-            user_id=current_user.id,
-            action="PROGRESS_UPDATED",
-            from_role="EMPLOYEE",
-            to_role="DS",
-            details=f'Progress Report (Direct to DS): "{prog.description}"'
-        )
-
-        # Notify DS creator
-        if doc.created_by:
+    if requires_hod and branch and branch.department_id:
+        hods = db.query(models.User).filter(
+            models.User.department_id == branch.department_id,
+            models.User.role == UserRole.HOD, models.User.is_active == True,
+        ).all()
+        for hod in hods:
             _create_notification(
-                db=db,
-                user_id=doc.created_by,
-                document_id=doc_id,
-                workflow_event_id=event.id,
-                title=f"Progress update on {doc.reference_no}",
-                message=f"{current_user.full_name} updated progress on '{doc.title}'."
+                db=db, user_id=hod.id, document_id=doc_id, workflow_event_id=event.id,
+                title=f"Progress awaiting HOD review: {doc.reference_no}",
+                message=f"{current_user.full_name} submitted progress on '{doc.title}' for the HOD workstream."
             )
+    elif doc.created_by:
+        _create_notification(
+            db=db, user_id=doc.created_by, document_id=doc_id, workflow_event_id=event.id,
+            title=f"Progress update on {doc.reference_no}",
+            message=f"{current_user.full_name} updated progress on '{doc.title}'."
+        )
 
-    return db_progress
-
+    db.commit()
+    db.refresh(progress)
+    return progress
 
 def hod_validate_progress_update(
     db: Session,
@@ -1273,7 +1130,8 @@ def hod_validate_progress_update(
     progress_id: int,
     action: str,
     note: Optional[str],
-    current_user: models.User
+    current_user: models.User,
+    context_id: Optional[int] = None,
 ) -> Optional[models.ProgressUpdate]:
     progress = db.query(models.ProgressUpdate).filter(
         models.ProgressUpdate.id == progress_id,
@@ -1286,6 +1144,27 @@ def hod_validate_progress_update(
     if not doc:
         return None
 
+    selected_context = _resolve_context_membership(db, current_user, context_id)
+    if (
+        current_user.role != UserRole.HOD
+        or not selected_context
+        or selected_context.context_type != WorkContextType.HOD
+        or selected_context.department_id is None
+    ):
+        raise ValueError("Only an HOD in a selected departmental HOD context can validate departmental progress.")
+
+    selected_department_id = selected_context.department_id
+
+    if progress.work_assignment and progress.work_assignment.routing:
+        branch = progress.work_assignment.routing
+        if (
+            branch.branch_type != BranchType.DEPARTMENT_HOD
+            or branch.department_id != selected_department_id
+        ):
+            raise ValueError("This progress update does not belong to the selected HOD context's department workstream.")
+    else:
+        raise ValueError("Progress update is not linked to a canonical workstream.")
+
     action_lower = action.lower().strip()
     if action_lower == "approve":
         progress.hod_validation_status = ProgressValidationStatus.HOD_APPROVED
@@ -1293,8 +1172,10 @@ def hod_validate_progress_update(
         progress.hod_reviewed_by_user_id = current_user.id
         progress.hod_reviewed_at = datetime.now()
 
-        doc.status = DocumentStatus.PROGRESS_UPDATED
-        doc.updated_at = datetime.now()
+        if progress.work_assignment and progress.work_assignment.routing:
+            progress.work_assignment.routing.status = DocumentStatus.PROGRESS_UPDATED
+            progress.work_assignment.routing.version += 1
+        _refresh_document_overall_state(db, doc)
         doc.version += 1
 
         db.commit()
@@ -1336,6 +1217,11 @@ def hod_validate_progress_update(
         progress.hod_review_note = note
         progress.hod_reviewed_by_user_id = current_user.id
         progress.hod_reviewed_at = datetime.now()
+        if progress.work_assignment and progress.work_assignment.routing:
+            progress.work_assignment.routing.status = DocumentStatus.IN_PROGRESS
+            progress.work_assignment.routing.version += 1
+        _refresh_document_overall_state(db, doc)
+        doc.version += 1
 
         db.commit()
         db.refresh(progress)
@@ -1366,146 +1252,6 @@ def hod_validate_progress_update(
     return progress
 
 
-def create_document_assignments(
-    db: Session,
-    doc_id: int,
-    assignments_data: List[schemas.DocumentAssignmentCreate],
-    by_user: models.User
-) -> List[models.DocumentAssignment]:
-    doc = get_document(db, doc_id)
-    if not doc:
-        return []
-
-    created_assignments = []
-    first_dept_id = None
-
-    for item in assignments_data:
-        assign = models.DocumentAssignment(
-            document_id=doc_id,
-            department_id=item.department_id,
-            assigned_employee_id=item.assigned_employee_id,
-            assigned_by_user_id=by_user.id,
-            requires_hod_validation=item.requires_hod_validation,
-            assignment_status=AssignmentStatus.PENDING_EMPLOYEE if not item.assigned_employee_id else AssignmentStatus.IN_PROGRESS,
-            instructions=item.instructions,
-            created_at=datetime.now()
-        )
-        db.add(assign)
-        created_assignments.append(assign)
-        if item.department_id and not first_dept_id:
-            first_dept_id = item.department_id
-
-    # Update document primary department if not set
-    if first_dept_id and not doc.target_department_id:
-        doc.target_department_id = first_dept_id
-
-    doc.current_stage = WorkflowStage.HOD if any(a.department_id and not a.assigned_employee_id for a in assignments_data) else WorkflowStage.EMPLOYEE
-    doc.status = DocumentStatus.UNDER_HOD_PROCESSING if doc.current_stage == WorkflowStage.HOD else DocumentStatus.ASSIGNED_FOR_EXECUTION
-    doc.updated_at = datetime.now()
-    doc.version += 1
-
-    db.commit()
-    for a in created_assignments:
-        db.refresh(a)
-
-    summary = f"Multi-department/employee routing configured ({len(created_assignments)} assignments)"
-    event = _add_workflow_history(
-        db=db,
-        document_id=doc_id,
-        user_id=by_user.id,
-        action="MULTI_ASSIGNMENT_CREATED",
-        from_role="DS",
-        to_role="HOD",
-        details=summary
-    )
-
-    for assign in created_assignments:
-        if assign.assigned_employee_id:
-            _create_notification(
-                db=db,
-                user_id=assign.assigned_employee_id,
-                document_id=doc_id,
-                workflow_event_id=event.id,
-                title=f"New Assignment: {doc.reference_no}",
-                message=f"You have been assigned to document '{doc.title}'."
-            )
-        elif assign.department_id:
-            dept_hods = db.query(models.User).filter(
-                models.User.department_id == assign.department_id,
-                models.User.role == UserRole.HOD,
-                models.User.is_active == True
-            ).all()
-            for hod in dept_hods:
-                _create_notification(
-                    db=db,
-                    user_id=hod.id,
-                    document_id=doc_id,
-                    workflow_event_id=event.id,
-                    title=f"New Department Task: {doc.reference_no}",
-                    message=f"Document '{doc.title}' assigned to your department."
-                )
-
-    return created_assignments
-
-
-def get_document_assignments(db: Session, doc_id: int) -> List[models.DocumentAssignment]:
-    return (
-        db.query(models.DocumentAssignment)
-        .filter(models.DocumentAssignment.document_id == doc_id)
-        .order_by(models.DocumentAssignment.created_at)
-        .all()
-    )
-
-
-def update_document_assignment(
-    db: Session,
-    assignment_id: int,
-    assigned_employee_id: Optional[int],
-    instructions: Optional[str],
-    requires_hod_validation: Optional[bool],
-    user: models.User
-) -> Optional[models.DocumentAssignment]:
-    assign = db.query(models.DocumentAssignment).filter(
-        models.DocumentAssignment.id == assignment_id
-    ).first()
-    if not assign:
-        return None
-
-    if assigned_employee_id is not None:
-        assign.assigned_employee_id = assigned_employee_id
-        assign.assignment_status = AssignmentStatus.IN_PROGRESS
-    if instructions is not None:
-        assign.instructions = instructions
-    if requires_hod_validation is not None:
-        assign.requires_hod_validation = requires_hod_validation
-
-    db.commit()
-    db.refresh(assign)
-
-    if assign.assigned_employee_id:
-        doc = get_document(db, assign.document_id)
-        if doc:
-            event = _add_workflow_history(
-                db=db,
-                document_id=doc.doc_id,
-                user_id=user.id,
-                action="EMPLOYEE_ASSIGNED",
-                from_role="HOD",
-                to_role="EMPLOYEE",
-                details=f"Assigned staff {assign.employee_name or 'Staff'}"
-            )
-            _create_notification(
-                db=db,
-                user_id=assign.assigned_employee_id,
-                document_id=doc.doc_id,
-                workflow_event_id=event.id,
-                title=f"Task Assigned: {doc.reference_no}",
-                message=f"You have been assigned to document '{doc.title}'."
-            )
-
-    return assign
-
-
 def get_progress_updates(db: Session, doc_id: int) -> List[models.ProgressUpdate]:
     return db.query(models.ProgressUpdate).filter(models.ProgressUpdate.document_id == doc_id).order_by(models.ProgressUpdate.created_at).all()
 
@@ -1517,9 +1263,7 @@ def follow_up_to_director(db: Session, doc_id: int, director_user: models.User,
     if not doc or not check_concurrency(doc, expected_version):
         return None
 
-    doc.current_stage = WorkflowStage.DIRECTOR
-    doc.status = DocumentStatus.PROGRESS_UPDATED
-    doc.current_owner_id = director_user.id
+    doc.status = DocumentStatus.UNDER_DIRECTOR_REVIEW
     doc.updated_at = datetime.now()
     doc.version += 1
 
@@ -1569,13 +1313,24 @@ def close_document(
     if not doc or not check_concurrency(doc, expected_version):
         return None
 
-    # DS performs the final closure after reviewing the Director's
-    # returned remark/instruction. The Director's natural-language
-    # instruction is intentionally kept separate from the DS closure
-    # action; no machine-readable DirectorDecision.CLOSE is required here.
+    if current_user.role != UserRole.DS:
+        raise ValueError("Only DS can close a document.")
+    if doc.status == DocumentStatus.CLOSED:
+        raise ValueError("Document is already closed.")
+    # Final Director review is mandatory before closure.
+    has_return = db.query(models.DocumentRoute).filter(
+        models.DocumentRoute.document_id == doc_id,
+        models.DocumentRoute.route_type == RouteType.RETURN_TO_DS,
+    ).first() is not None
+    if not has_return:
+        raise ValueError("Document cannot be closed before final Director review is returned to DS.")
+    active_branches = db.query(models.DocumentDepartmentRouting).filter(
+        models.DocumentDepartmentRouting.document_id == doc_id, models.DocumentDepartmentRouting.is_active == True
+    ).all()
+    if any(b.status not in (DocumentStatus.COMPLETED, DocumentStatus.CLOSED) for b in active_branches):
+        raise ValueError("Document cannot be closed while any routed branch is still active.")
 
     doc.status = DocumentStatus.CLOSED
-    doc.current_stage = WorkflowStage.CLOSED
     doc.closed_at = datetime.now()
     doc.updated_at = datetime.now()
     doc.version += 1
@@ -1865,8 +1620,23 @@ def trigger_ocr_processing(
         else:
             ocr_error = "No attachments available for processing."
 
-    # ---- Record real OCR outcome ----
-    if not file_processed or not extracted_text.strip():
+    # ---- Record OCR outcome ----
+    # A document without an attachment is valid (for example, a direct-text
+    # manual record or a dispatched text-only message).  Do not label that as
+    # an OCR failure: there was simply no binary document to process.
+    no_attachment_to_process = (
+        not file_processed
+        and not extracted_text.strip()
+        and not attachment
+    )
+
+    if no_attachment_to_process:
+        extracted_text = ""
+        confidence = 0.0
+        engine_name = "PaddleOCR-v3"
+        ocr_status = OCRStatus.NONE
+        ocr_error = "No attachment available for OCR processing."
+    elif not file_processed or not extracted_text.strip():
         extracted_text = ""
         confidence = 0.0
         ocr_error = ocr_error or "OCR processing failed: could not extract text from document."
@@ -2021,7 +1791,7 @@ def generate_routing_suggestion(
         return None
 
     depts = get_departments(db)
-    suggested_dept_id: Optional[int] = preferred_dept_id or doc.target_department_id
+    suggested_dept_id: Optional[int] = preferred_dept_id or None
     suggested_emp_id: Optional[int] = preferred_emp_id
 
     ocr_record = db.query(models.DocumentOCR).filter(
@@ -2215,73 +1985,32 @@ def get_routing_suggestion(db: Session, doc_id: int) -> Optional[models.RoutingS
 # =========================================================
 
 def generate_reminders(db: Session) -> List[models.Reminder]:
-    """
-    Scans documents needing action and generates reminders using recipient escalation:
-    1. If active employee assigned -> Remind assigned employee
-    2. Elif target department exists -> Remind active HOD of target department
-    3. Else -> Remind DS creator
-    """
     today = date.today()
-    active_docs = db.query(models.Document).filter(
-        models.Document.status != DocumentStatus.CLOSED
-    ).all()
-
+    active_docs = db.query(models.Document).filter(models.Document.status != DocumentStatus.CLOSED).all()
     created_reminders = []
-
     for doc in active_docs:
-        # Determine reason based on deadline
-        reason = ReminderReason.ACTION_REQUIRED
-        if doc.deadline:
-            if doc.deadline < today:
-                reason = ReminderReason.OVERDUE
-            elif doc.deadline <= today + timedelta(days=2):
-                reason = ReminderReason.DUE_SOON
-
-        # Recipient Resolution:
-        recipient_id: Optional[int] = None
-
-        # 1. Check active work assignment for employee
-        active_assignment = db.query(models.WorkAssignment).filter(
-            models.WorkAssignment.document_id == doc.doc_id,
-            models.WorkAssignment.is_active == True
-        ).first()
-
-        if active_assignment:
-            recipient_id = active_assignment.assigned_to_user_id
-        elif doc.target_department_id:
-            # 2. Check active HOD of target department
-            hod = db.query(models.User).filter(
-                models.User.department_id == doc.target_department_id,
-                models.User.role == UserRole.HOD,
-                models.User.is_active == True
-            ).first()
-            if hod:
-                recipient_id = hod.id
-        elif doc.current_owner_id:
-            recipient_id = doc.current_owner_id
-        else:
-            recipient_id = doc.created_by
-
-        if recipient_id:
-            dedup_key = f"DOC_{doc.doc_id}_USER_{recipient_id}_{reason.value}_{today.isoformat()}"
-            existing = db.query(models.Reminder).filter(models.Reminder.deduplication_key == dedup_key).first()
-
-            if not existing:
-                reminder = models.Reminder(
-                    document_id=doc.doc_id,
-                    recipient_user_id=recipient_id,
-                    reason=reason,
-                    due_at=datetime.combine(doc.deadline, datetime.min.time()) if doc.deadline else None,
-                    sent_at=datetime.now(),
-                    is_read=False,
-                    deduplication_key=dedup_key
-                )
-                db.add(reminder)
-                created_reminders.append(reminder)
-
+        reason = ReminderReason.OVERDUE if doc.deadline and doc.deadline < today else (ReminderReason.DUE_SOON if doc.deadline and doc.deadline <= today + timedelta(days=2) else ReminderReason.ACTION_REQUIRED)
+        recipients = set()
+        assignments = db.query(models.WorkAssignment).filter(models.WorkAssignment.document_id == doc.doc_id, models.WorkAssignment.is_active == True).all()
+        for assignment in assignments:
+            recipients.add(assignment.assigned_to_user_id)
+            recipients.update(m.user_id for m in assignment.members if m.is_active)
+        if not recipients:
+            branches = db.query(models.DocumentDepartmentRouting).filter(models.DocumentDepartmentRouting.document_id == doc.doc_id, models.DocumentDepartmentRouting.is_active == True).all()
+            for branch in branches:
+                if branch.branch_type == BranchType.DEPARTMENT_HOD and branch.department_id:
+                    recipients.update(u.id for u in db.query(models.User).filter(models.User.department_id == branch.department_id, models.User.role == UserRole.HOD, models.User.is_active == True).all())
+                elif branch.target_user_id:
+                    recipients.add(branch.target_user_id)
+        if not recipients:
+            recipients.add(doc.created_by)
+        for uid in recipients:
+            key = f"DOC_{doc.doc_id}_USER_{uid}_{reason.value}_{today.isoformat()}"
+            if not db.query(models.Reminder).filter(models.Reminder.deduplication_key == key).first():
+                created_reminders.append(models.Reminder(document_id=doc.doc_id, recipient_user_id=uid, reason=reason, due_at=datetime.combine(doc.deadline, datetime.min.time()) if doc.deadline else None, sent_at=datetime.now(), is_read=False, deduplication_key=key))
     if created_reminders:
+        db.add_all(created_reminders)
         db.commit()
-
     return created_reminders
 
 
@@ -2326,37 +2055,21 @@ def send_document_reminder(
     if doc.status == DocumentStatus.CLOSED:
         return {"status": "error", "message": "Document is closed. Action reminders cannot be sent for closed documents."}
 
-    if doc.current_stage in (WorkflowStage.DS, WorkflowStage.DIRECTOR) or not doc.target_department_id:
-        return {"status": "error", "message": "Action reminders can only be sent after the document has completed Director review and is officially routed to a department or staff member."}
-
-    # Resolve responsible recipient
+    # Resolve the latest active canonical workstream recipient.
     recipient: Optional[models.User] = None
     role_label = "Responsible Staff"
-
-    active_assignment = db.query(models.WorkAssignment).filter(
-        models.WorkAssignment.document_id == doc.doc_id,
-        models.WorkAssignment.is_active == True
-    ).first()
-
-    if active_assignment and active_assignment.assigned_to:
+    active_assignment = db.query(models.WorkAssignment).filter(models.WorkAssignment.document_id == doc.doc_id, models.WorkAssignment.is_active == True).order_by(models.WorkAssignment.assigned_at.desc()).first()
+    if active_assignment:
         recipient = active_assignment.assigned_to
         role_label = "Assigned Employee"
-    elif doc.target_department_id:
-        hod = db.query(models.User).filter(
-            models.User.department_id == doc.target_department_id,
-            models.User.role == UserRole.HOD,
-            models.User.is_active == True
-        ).first()
-        if hod:
-            recipient = hod
-            role_label = f"HOD ({doc.target_department_name or 'Department'})"
-    elif doc.current_owner_id:
-        recipient = db.query(models.User).filter(models.User.id == doc.current_owner_id).first()
-        role_label = recipient.role.value if recipient else "Current Owner"
     else:
-        recipient = db.query(models.User).filter(models.User.id == doc.created_by).first()
-        role_label = "Creator (DS)"
-
+        branch = db.query(models.DocumentDepartmentRouting).filter(models.DocumentDepartmentRouting.document_id == doc.doc_id, models.DocumentDepartmentRouting.is_active == True).order_by(models.DocumentDepartmentRouting.routed_at.desc()).first()
+        if branch and branch.branch_type == BranchType.DEPARTMENT_HOD and branch.department_id:
+            recipient = db.query(models.User).filter(models.User.department_id == branch.department_id, models.User.role == UserRole.HOD, models.User.is_active == True).first()
+            role_label = "Department HOD"
+        elif branch and branch.target_user_id:
+            recipient = db.query(models.User).filter(models.User.id == branch.target_user_id, models.User.is_active == True).first()
+            role_label = recipient.role.value if recipient else "Responsible Staff"
     if not recipient:
         return {"status": "error", "message": "No active workflow recipient could be resolved for this document."}
 
@@ -2487,7 +2200,7 @@ def get_all_workflow_history(db: Session, current_user: models.User) -> List[mod
         return (
             db.query(models.WorkflowHistory)
             .join(models.Document, models.WorkflowHistory.document_id == models.Document.doc_id)
-            .filter(models.Document.target_department_id == current_user.department_id)
+            .filter(models.DocumentDepartmentRouting.department_id == current_user.department_id)
             .order_by(models.WorkflowHistory.created_at.desc())
             .all()
         )
@@ -2502,7 +2215,6 @@ def get_all_workflow_history(db: Session, current_user: models.User) -> List[mod
             .join(models.Document, models.WorkflowHistory.document_id == models.Document.doc_id)
             .filter(
                 (models.Document.doc_id.in_(assigned_doc_ids))
-                | (models.Document.current_owner_id == current_user.id)
             )
             .order_by(models.WorkflowHistory.created_at.desc())
             .all()
@@ -2633,25 +2345,25 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
 
         under_director = (
             db.query(func.count(models.Document.doc_id))
-            .filter(models.Document.created_by == user.id, models.Document.current_stage == WorkflowStage.DIRECTOR)
+            .filter(models.Document.created_by == user.id, models.Document.status == DocumentStatus.UNDER_DIRECTOR_REVIEW)
             .scalar()
         ) or 0
 
         under_hod = (
             db.query(func.count(models.Document.doc_id))
-            .filter(models.Document.created_by == user.id, models.Document.current_stage == WorkflowStage.HOD)
+            .filter(models.Document.created_by == user.id, models.Document.status == DocumentStatus.UNDER_HOD_PROCESSING)
             .scalar()
         ) or 0
 
         in_progress = (
             db.query(func.count(models.Document.doc_id))
-            .filter(models.Document.created_by == user.id, models.Document.current_stage == WorkflowStage.EMPLOYEE)
+            .filter(models.Document.created_by == user.id, models.Document.status.in_([DocumentStatus.ASSIGNED_FOR_EXECUTION, DocumentStatus.IN_PROGRESS, DocumentStatus.PROGRESS_UPDATED]))
             .scalar()
         ) or 0
 
         closed = (
             db.query(func.count(models.Document.doc_id))
-            .filter(models.Document.created_by == user.id, models.Document.current_stage == WorkflowStage.CLOSED)
+            .filter(models.Document.created_by == user.id, models.Document.status == DocumentStatus.CLOSED)
             .scalar()
         ) or 0
 
@@ -2679,7 +2391,7 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
     elif user.role == UserRole.DIRECTOR:
         for_review = (
             db.query(func.count(models.Document.doc_id))
-            .filter(models.Document.current_owner_id == user.id, models.Document.current_stage == WorkflowStage.DIRECTOR)
+            .filter(models.Document.status == DocumentStatus.UNDER_DIRECTOR_REVIEW)
             .scalar()
         ) or 0
 
@@ -2696,18 +2408,15 @@ def get_dashboard_stats(db: Session, user: models.User) -> dict:
         dept_docs = 0
         pending_assignment = 0
         if user.department_id:
-            dept_docs = (
-                db.query(func.count(models.Document.doc_id))
-                .filter(models.Document.target_department_id == user.department_id, models.Document.current_stage == WorkflowStage.HOD)
-                .scalar()
-            ) or 0
-
-            pending_assignment = (
-                db.query(func.count(models.Document.doc_id))
-                .filter(models.Document.target_department_id == user.department_id, models.Document.status == DocumentStatus.UNDER_HOD_PROCESSING)
-                .scalar()
-            ) or 0
-
+            q = db.query(models.DocumentDepartmentRouting).filter(
+                models.DocumentDepartmentRouting.department_id == user.department_id,
+                models.DocumentDepartmentRouting.branch_type == BranchType.DEPARTMENT_HOD,
+                models.DocumentDepartmentRouting.is_active == True,
+            )
+            dept_docs = q.count()
+            pending_assignment = q.filter(
+                models.DocumentDepartmentRouting.status == DocumentStatus.UNDER_HOD_PROCESSING
+            ).count()
         return {
             "role": user.role.value,
             "total_documents": dept_docs,
@@ -2943,7 +2652,6 @@ def seed_data(db: Session) -> None:
                 role=u["role"],
                 employee_code=u.get("employee_code"),
                 designation=u.get("designation"),
-                department_name=u.get("department"),
                 managed_depts=u.get("managed_depts"),
                 email=u["email"],
                 outlook_email=u["outlook_email"],
@@ -2959,7 +2667,8 @@ def seed_data(db: Session) -> None:
         else:
             existing.employee_code = u.get("employee_code") or existing.employee_code
             existing.designation = u.get("designation") or existing.designation
-            existing.department_name = u.get("department") or existing.department_name
+            if u.get("department_id") is not None:
+                existing.department_id = u["department_id"]
             existing.managed_depts = u.get("managed_depts") or existing.managed_depts
 
             if not existing.email:
@@ -2976,7 +2685,108 @@ def seed_data(db: Session) -> None:
                 db_emp.user_id = user_objs[u["username"]].id
                 db.commit()
 
-    print(f"[CDTRS SEED] Successfully verified {len(dept_map)} departments and {len(users_data)} system accounts.", flush=True)
+    # 4. Canonical work-context memberships
+    #
+    # Keep the existing user/role seed untouched.  Context membership is an
+    # additional authorization/workspace layer used by the frontend context
+    # selector.  Reuse an existing membership when present so running
+    # seed_data() repeatedly does not create duplicates.
+    #
+    # If seed_data.json explicitly provides "contexts" for a user, those
+    # definitions are authoritative.  Otherwise create the normal single
+    # context implied by the user's role and department.
+    default_contexts = {
+        UserRole.ADMIN: [{"context": "ADMIN", "department": None}],
+        UserRole.DS: [{"context": "DS", "department": None}],
+        UserRole.DIRECTOR: [{"context": "DIRECTOR", "department": None}],
+        UserRole.HOD: [{"context": "HOD", "department_from_user": True}],
+        UserRole.EMPLOYEE: [{"context": "EMPLOYEE", "department_from_user": True}],
+        UserRole.TSO: [{"context": "TSO", "department": None}],
+    }
+
+    def _context_type_from_value(value):
+        if isinstance(value, WorkContextType):
+            return value
+        try:
+            return WorkContextType(value)
+        except Exception:
+            try:
+                return WorkContextType[str(value).upper()]
+            except Exception:
+                return None
+
+    def _ensure_context_membership(user_obj, context_def):
+        context_value = context_def.get("context") or context_def.get("context_type")
+        context_type = _context_type_from_value(context_value)
+        if context_type is None:
+            return
+
+        department_id = None
+
+        # Accept both the current seed format (department_code) and the
+        # compact internal format used by the fallback definitions above.
+        department_code = context_def.get("department_code")
+        if department_code:
+            dept = db.query(models.Department).filter(
+                models.Department.code == department_code,
+                models.Department.is_active == True,
+            ).first()
+            if not dept:
+                raise ValueError(
+                    f"Department '{department_code}' not found while creating "
+                    f"{context_type.value} context for {user_obj.username}."
+                )
+            department_id = dept.id
+        elif context_def.get("department_from_user"):
+            department_id = user_obj.department_id
+
+        existing_mem = db.query(models.WorkContextMembership).filter(
+            models.WorkContextMembership.user_id == user_obj.id,
+            models.WorkContextMembership.context_type == context_type,
+            models.WorkContextMembership.department_id == department_id,
+        ).first()
+
+        if existing_mem:
+            if not existing_mem.is_active:
+                existing_mem.is_active = True
+            return existing_mem
+
+        # Do not create a second active TSO.  The canonical helper enforces
+        # that system-wide rule when a TSO context is explicitly seeded.
+        if context_type == WorkContextType.TSO:
+            return set_active_tso(db, user_obj.id)
+
+        membership = models.WorkContextMembership(
+            user_id=user_obj.id,
+            context_type=context_type,
+            department_id=department_id,
+            is_active=True,
+        )
+        db.add(membership)
+        db.flush()
+        return membership
+
+    # Seed definitions first, then also repair contexts for any already-existing
+    # active account that was created by an older seed run.
+    explicit_context_map = {}
+    for source_def in list(raw_system_users) + list(raw_employees):
+        if source_def.get("username") and source_def.get("contexts") is not None:
+            explicit_context_map[source_def["username"]] = source_def.get("contexts")
+
+    active_users = db.query(models.User).filter(models.User.is_active == True).all()
+    for user_obj in active_users:
+        explicit_contexts = explicit_context_map.get(user_obj.username)
+        context_defs = (
+            explicit_contexts
+            if explicit_contexts
+            else default_contexts.get(user_obj.role, [])
+        )
+        for context_def in context_defs:
+            _ensure_context_membership(user_obj, context_def)
+
+    db.commit()
+
+    print(f"[CDTRS SEED] Successfully verified {len(dept_map)} departments, {len(users_data)} accounts, and canonical work contexts.", flush=True)
 
 
 # =========================================================
@@ -3028,7 +2838,6 @@ def create_admin_user(db: Session, user_data: dict, performed_by_user_id: int = 
         role=role_val,
         employee_code=user_data.get("employee_code"),
         designation=user_data.get("designation"),
-        department_name=user_data.get("department_name") or user_data.get("department"),
         managed_depts=managed_depts,
         email=user_data.get("email"),
         outlook_email=user_data.get("outlook_email"),
@@ -3076,8 +2885,13 @@ def update_admin_user(db: Session, user_id: int, user_data: dict, performed_by_u
         user.employee_code = user_data["employee_code"]
     if "designation" in user_data:
         user.designation = user_data["designation"]
-    if "department_name" in user_data:
-        user.department_name = user_data["department_name"]
+    if "department_name" in user_data and user_data["department_name"]:
+        dept = db.query(models.Department).filter(
+            models.Department.name == user_data["department_name"]
+        ).first()
+        if not dept:
+            raise ValueError(f"Department '{user_data['department_name']}' not found.")
+        user.department_id = dept.id
     if "department_id" in user_data:
         user.department_id = user_data["department_id"]
     if "managed_depts" in user_data:
@@ -3199,65 +3013,6 @@ def get_admin_audit_logs(db: Session, limit: int = 100, offset: int = 0):
         .all()
     )
 
-
-def multi_route_document(
-    db: Session,
-    document_id: int,
-    target_department_ids: List[int],
-    instructions: Optional[str],
-    current_user: models.User
-) -> List[models.DocumentDepartmentRouting]:
-    """Routes a single document to multiple departments concurrently."""
-    doc = db.query(models.Document).filter(models.Document.doc_id == document_id).first()
-    if not doc:
-        return []
-
-    created_routings = []
-    for d_id in target_department_ids:
-        dept = db.query(models.Department).filter(models.Department.id == d_id).first()
-        if not dept:
-            continue
-
-        existing = db.query(models.DocumentDepartmentRouting).filter(
-            models.DocumentDepartmentRouting.document_id == document_id,
-            models.DocumentDepartmentRouting.department_id == d_id
-        ).first()
-
-        if not existing:
-            routing = models.DocumentDepartmentRouting(
-                document_id=document_id,
-                department_id=d_id,
-                department_name=dept.name,
-                status=DocumentStatus.UNDER_HOD_PROCESSING,
-                hod_instructions=instructions,
-                routed_at=datetime.now()
-            )
-            db.add(routing)
-            created_routings.append(routing)
-
-    # Update primary document status and stage
-    doc.status = DocumentStatus.UNDER_HOD_PROCESSING
-    doc.current_stage = WorkflowStage.HOD
-    if target_department_ids:
-        doc.target_department_id = target_department_ids[0]
-    if instructions:
-        doc.hod_remark = instructions
-
-    db.commit()
-    log_audit_event(
-        db,
-        user_id=current_user.id,
-        action="MULTI_DEPT_ROUTED",
-        entity_type="Document",
-        entity_id=document_id,
-        description=f"Document {doc.reference_no} routed to {len(created_routings)} department(s)"
-    )
-    return created_routings
-
-
-# =========================================================
-# WORK CONTEXT MEMBERSHIPS (Canonical Context CRUD)
-# =========================================================
 
 def get_user_context_memberships(db: Session, user_id: int) -> List[models.WorkContextMembership]:
     """Retrieve all active work context memberships for a given user."""
@@ -3413,19 +3168,23 @@ def create_canonical_branches(
             if existing:
                 raise ValueError(f"An active DEPARTMENT_HOD branch already exists for department ID {b.department_id}.")
 
-            dept = db.query(models.Department).filter(models.Department.id == b.department_id).first()
-            dept_name = dept.name if dept else None
+            dept = db.query(models.Department).filter(models.Department.id == b.department_id, models.Department.is_active == True).first()
+            if not dept:
+                raise ValueError(f"Active department {b.department_id} not found.")
+            has_hod = db.query(models.User).filter(models.User.department_id == b.department_id, models.User.role == UserRole.HOD, models.User.is_active == True).first()
+            if not has_hod:
+                raise ValueError(f"No active HOD is configured for department {b.department_id}.")
+            dept_name = dept.name
 
             branch = models.DocumentDepartmentRouting(
                 document_id=document_id,
                 branch_type=BranchType.DEPARTMENT_HOD,
                 department_id=b.department_id,
-                department_name=dept_name,
                 routed_by_user_id=current_user.id,
                 routed_by_context_membership_id=context_id,
                 requires_hod_validation=False,
                 status=DocumentStatus.UNDER_HOD_PROCESSING,
-                hod_instructions=b.instructions,
+                instructions=b.instructions,
                 is_active=True,
                 routed_at=datetime.now()
             )
@@ -3471,21 +3230,27 @@ def create_canonical_branches(
             if existing:
                 raise ValueError(f"An active DIRECT_EMPLOYEE branch already exists for user ID {b.target_user_id}.")
 
-            target_emp = db.query(models.User).filter(models.User.id == b.target_user_id).first()
+            target_emp = db.query(models.User).filter(
+                models.User.id == b.target_user_id,
+                models.User.is_active == True,
+            ).first()
             if not target_emp:
-                raise ValueError(f"Target staff member with ID {b.target_user_id} not found.")
+                raise ValueError("Target staff member must be active.")
+
+            employee_context = _get_active_employee_context(db, target_emp.id, target_emp.department_id)
+            if not employee_context:
+                raise ValueError("Target staff member must have an active EMPLOYEE work context.")
 
             branch = models.DocumentDepartmentRouting(
                 document_id=document_id,
                 branch_type=BranchType.DIRECT_EMPLOYEE,
                 department_id=target_emp.department_id,
-                department_name=target_emp.department,
                 target_user_id=b.target_user_id,
                 routed_by_user_id=current_user.id,
                 routed_by_context_membership_id=context_id,
                 requires_hod_validation=bool(b.requires_hod_validation),
                 status=DocumentStatus.ASSIGNED_FOR_EXECUTION,
-                hod_instructions=b.instructions,
+                instructions=b.instructions,
                 is_active=True,
                 routed_at=datetime.now()
             )
@@ -3493,12 +3258,15 @@ def create_canonical_branches(
             db.flush()
             created_branches.append(branch)
 
-            # Create initial WorkAssignment for the direct employee
+            # Create initial WorkAssignment for the direct employee.
+            # Store the employee's canonical EMPLOYEE context so context-aware
+            # inbox/authorization can distinguish this workstream correctly.
             assign_entry = models.WorkAssignment(
                 document_id=document_id,
                 routing_id=branch.id,
                 assigned_by_user_id=current_user.id,
                 assigned_to_user_id=b.target_user_id,
+                assigned_to_context_membership_id=employee_context.id if employee_context else None,
                 requires_hod_validation=bool(b.requires_hod_validation),
                 instructions=b.instructions,
                 is_active=True,
@@ -3539,6 +3307,12 @@ def create_canonical_branches(
                 raise ValueError("No active TSO found in the system. Changing/activating TSO is required.")
 
             tso_user_id = tso_membership.user_id
+            tso_user = db.query(models.User).filter(
+                models.User.id == tso_user_id,
+                models.User.is_active == True,
+            ).first()
+            if not tso_user:
+                raise ValueError("The active TSO context points to an inactive or missing user.")
 
             branch = models.DocumentDepartmentRouting(
                 document_id=document_id,
@@ -3549,7 +3323,7 @@ def create_canonical_branches(
                 routed_by_context_membership_id=context_id,
                 requires_hod_validation=False,
                 status=DocumentStatus.ASSIGNED_FOR_EXECUTION,
-                hod_instructions=b.instructions,
+                instructions=b.instructions,
                 is_active=True,
                 routed_at=datetime.now()
             )
@@ -3590,19 +3364,14 @@ def create_canonical_branches(
                 message=f"Document '{doc.title}' has been routed to TSO."
             )
 
-    has_dept_hod = any(b.branch_type == BranchType.DEPARTMENT_HOD for b in created_branches)
-    doc.status = DocumentStatus.UNDER_HOD_PROCESSING if has_dept_hod else DocumentStatus.ASSIGNED_FOR_EXECUTION
-    doc.current_stage = WorkflowStage.HOD if has_dept_hod else WorkflowStage.EMPLOYEE
-    doc.updated_at = datetime.now()
+    # The branches are authoritative. There is intentionally no single operational owner.
+    _refresh_document_overall_state(db, doc)
     doc.version += 1
 
     _add_workflow_history(
-        db=db,
-        document_id=document_id,
-        user_id=current_user.id,
+        db=db, document_id=document_id, user_id=current_user.id,
         action="CANONICAL_MULTI_BRANCH_ROUTED",
-        from_role=current_user.role.value,
-        to_role=doc.current_stage.value,
+        from_role=current_user.role.value, to_role="MULTI_BRANCH",
         details=f"DS created {len(created_branches)} canonical branch(es): {[b.branch_type.value for b in created_branches]}"
     )
 
@@ -3623,91 +3392,113 @@ def assign_branch_employee(
     current_user: models.User,
     context_id: Optional[int] = None
 ) -> models.WorkAssignment:
-    """
-    Assign operational responsibility for a canonical branch to a specific staff member.
-    If superseding a previous assignment, creates a new WorkAssignment and preserves history.
-    """
+    """Assign one canonical branch. Other branches and document owner are untouched."""
     doc = get_document(db, document_id)
-    if not doc or not check_concurrency(doc, assign_req.expected_version):
-        raise ValueError("Document not found or optimistic concurrency conflict.")
+    # Do NOT lock branch assignment on Document.version. Multiple active
+    # branches are intentionally allowed to progress independently.
+    if not doc:
+        raise ValueError("Document not found.")
 
     branch = db.query(models.DocumentDepartmentRouting).filter(
         models.DocumentDepartmentRouting.id == routing_id,
         models.DocumentDepartmentRouting.document_id == document_id,
-        models.DocumentDepartmentRouting.is_active == True
+        models.DocumentDepartmentRouting.is_active == True,
     ).first()
     if not branch:
         raise ValueError(f"Active branch with ID {routing_id} not found on document {document_id}.")
 
-    target_user = db.query(models.User).filter(models.User.id == assign_req.assigned_to_user_id).first()
-    if not target_user:
-        raise ValueError(f"Assignee user {assign_req.assigned_to_user_id} not found.")
+    if current_user.role == UserRole.HOD:
+        selected_context = _resolve_context_membership(db, current_user, context_id)
+        selected_department_id = (
+            selected_context.department_id
+            if selected_context and selected_context.context_type == WorkContextType.HOD
+            else current_user.department_id
+        )
+        if branch.branch_type != BranchType.DEPARTMENT_HOD:
+            raise ValueError("HOD may assign staff only on a Department/HOD branch.")
+        if branch.department_id != selected_department_id:
+            raise ValueError("HOD may assign only within the selected HOD context's department branch.")
 
-    old_assign = db.query(models.WorkAssignment).filter(
-        models.WorkAssignment.routing_id == routing_id,
-        models.WorkAssignment.is_active == True
+    target = db.query(models.User).filter(
+        models.User.id == assign_req.assigned_to_user_id,
+        models.User.is_active == True,
     ).first()
+    if not target:
+        raise ValueError(f"Assignee user {assign_req.assigned_to_user_id} not found or inactive.")
 
-    req_val = branch.requires_hod_validation if branch.branch_type == BranchType.DIRECT_EMPLOYEE else False
+    target_context_id = branch.target_context_membership_id
+    if branch.branch_type == BranchType.DEPARTMENT_HOD:
+        if target.department_id != branch.department_id:
+            raise ValueError("A Department/HOD branch can only be assigned to an employee in that department.")
+        target_context = _get_active_employee_context(db, target.id, branch.department_id)
+        if not target_context:
+            raise ValueError("The selected assignee does not have an active EMPLOYEE context for this department.")
+        target_context_id = target_context.id
+    elif branch.branch_type == BranchType.DIRECT_EMPLOYEE:
+        if target.id != branch.target_user_id:
+            raise ValueError("The direct-employee branch can only be assigned to its routed employee.")
+        target_context = _get_active_employee_context(db, target.id, target.department_id)
+        if not target_context:
+            raise ValueError("The routed employee does not have an active EMPLOYEE work context.")
+        target_context_id = target_context.id
+    elif branch.branch_type == BranchType.TSO:
+        if target.id != branch.target_user_id:
+            raise ValueError("A TSO branch can only be assigned to the routed TSO user.")
+        tso_context = db.query(models.WorkContextMembership).filter(
+            models.WorkContextMembership.id == branch.target_context_membership_id,
+            models.WorkContextMembership.user_id == target.id,
+            models.WorkContextMembership.context_type == WorkContextType.TSO,
+            models.WorkContextMembership.is_active == True,
+        ).first()
+        if not tso_context:
+            raise ValueError("The routed TSO does not have an active TSO work context.")
+        target_context_id = tso_context.id
+
+    old = db.query(models.WorkAssignment).filter(
+        models.WorkAssignment.routing_id == routing_id,
+        models.WorkAssignment.is_active == True,
+    ).first()
+    now = datetime.now()
+    req_val = branch.branch_type == BranchType.DEPARTMENT_HOD or (
+        branch.branch_type == BranchType.DIRECT_EMPLOYEE and branch.requires_hod_validation
+    )
 
     new_assign = models.WorkAssignment(
-        document_id=document_id,
-        routing_id=routing_id,
-        assigned_by_user_id=current_user.id,
-        assigned_to_user_id=assign_req.assigned_to_user_id,
-        requires_hod_validation=req_val,
-        instructions=assign_req.instructions,
-        change_reason=assign_req.change_reason,
-        is_active=True,
-        assigned_at=datetime.now()
+        document_id=document_id, routing_id=routing_id,
+        assigned_by_user_id=current_user.id, assigned_to_user_id=target.id,
+        assigned_to_context_membership_id=target_context_id,
+        requires_hod_validation=bool(req_val),
+        instructions=assign_req.instructions or branch.instructions,
+        change_reason=assign_req.change_reason, team_name=None, is_team=False, is_active=True, assigned_at=now,
     )
     db.add(new_assign)
     db.flush()
 
-    if old_assign:
-        old_assign.is_active = False
-        old_assign.completed_at = datetime.now()
-        old_assign.superseded_by_id = new_assign.id
+    if old:
+        old.is_active = False
+        old.completed_at = now
+        old.superseded_by_id = new_assign.id
 
     branch.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-    branch.target_user_id = assign_req.assigned_to_user_id
-    branch.assigned_employee_id = target_user.employee_id
-    branch.assigned_employee_name = target_user.full_name
     branch.version += 1
 
-    doc.status = DocumentStatus.ASSIGNED_FOR_EXECUTION
-    doc.current_stage = WorkflowStage.EMPLOYEE
-    doc.current_owner_id = assign_req.assigned_to_user_id
-    doc.updated_at = datetime.now()
+    _refresh_document_overall_state(db, doc)
     doc.version += 1
 
-    action_name = "BRANCH_EMPLOYEE_REASSIGNED" if old_assign else "BRANCH_EMPLOYEE_ASSIGNED"
-    _add_workflow_history(
-        db=db,
-        document_id=document_id,
-        user_id=current_user.id,
-        action=action_name,
-        from_role=current_user.role.value,
-        to_role="EMPLOYEE",
-        details=f"Assigned to {target_user.full_name} on branch {branch.id} ({branch.branch_type.value}): {assign_req.instructions or 'Standard departmental execution'}"
+    event = _add_workflow_history(
+        db=db, document_id=document_id, user_id=current_user.id,
+        action="BRANCH_EMPLOYEE_REASSIGNED" if old else "BRANCH_EMPLOYEE_ASSIGNED",
+        from_role=current_user.role.value, to_role=target.role.value,
+        details=f"Assigned {target.full_name} to routing branch {branch.id} ({branch.branch_type.value}); work_assignment_id={new_assign.id}"
     )
-
     _create_notification(
-        db=db,
-        user_id=assign_req.assigned_to_user_id,
-        document_id=document_id,
+        db=db, user_id=target.id, document_id=document_id, workflow_event_id=event.id,
         title=f"Task Assigned: {doc.reference_no}",
-        message=f"You have been assigned work on '{doc.title}'."
+        message=f"You have been assigned workstream '{branch.branch_type.value}' on '{doc.title}'."
     )
-
     db.commit()
     db.refresh(new_assign)
     return new_assign
-
-
-# =========================================================
-# DIRECTOR REVIEWS (Explicit CONTINUE / CLOSE Decisions)
-# =========================================================
 
 def submit_director_review(
     db: Session,
@@ -3762,8 +3553,7 @@ def submit_director_review(
             )
             db.add(target)
 
-    doc.current_stage = WorkflowStage.DS
-    doc.status = DocumentStatus.DIRECTOR_REVIEW_COMPLETED
+        doc.status = DocumentStatus.DIRECTOR_REVIEW_COMPLETED
     if review_req.remark_text:
         doc.director_remark = f"[{review_req.decision.value}] {review_req.remark_text}"
     doc.updated_at = datetime.now()

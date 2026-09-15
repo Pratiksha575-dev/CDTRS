@@ -8,10 +8,10 @@ _api_repo_instance: Optional[APIRepository] = None
 def get_repository() -> BaseRepository:
     """
     Central repository provider for the CDTRS client.
-    Returns either APIRepository or MockRepository based on centralized configuration (CDTRS_DATA_SOURCE).
+    Always returns the real APIRepository. Offline/mock repository support is intentionally removed.
     Services and UI never manually check 'if data_source == mock'.
     """
-    global _mock_repo_instance, _api_repo_instance
+    global _api_repo_instance
 
     if _api_repo_instance is None:
         _api_repo_instance = APIRepository()

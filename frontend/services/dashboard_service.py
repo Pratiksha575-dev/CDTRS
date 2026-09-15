@@ -4,18 +4,15 @@ from repositories.provider import get_repository
 
 
 class DashboardService:
-    """
-    Client service providing role-specific dashboard metrics and priority document summaries.
-    """
+    """Client service for dashboard metrics in the active work context."""
 
     def __init__(self):
         pass
 
     def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
-        """Retrieves dashboard summary statistics and queue metrics."""
-        repo = get_repository()
-        return repo.get_dashboard_summary(role=role)
+        # Do not synthesize or filter dashboard data locally. The backend
+        # derives the permitted scope from X-Work-Context-Id.
+        return get_repository().get_dashboard_summary(role=role)
 
 
-# Global singleton service instance
 dashboard_service = DashboardService()

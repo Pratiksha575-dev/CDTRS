@@ -1,6 +1,5 @@
 import os
-import shutil
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
@@ -11,177 +10,123 @@ from repositories.provider import get_repository
 
 
 class AttachmentService:
-    """
-    Client domain service managing attachment lifecycle, metadata resolution,
-    secure role-based access, preview invocation, and local downloads.
-    """
+    """Client attachment service backed by the real repository/API only."""
 
     def __init__(self):
         pass
 
     def get_document_attachments(
-        self,
-        document_id: int,
-        category: Optional[str] = None
+        self, document_id: int, category: Optional[str] = None
     ) -> List[AttachmentModel]:
-        """
-        Retrieves all attachments associated with a document.
-        Optionally filters by category ('ORIGINAL' or 'WORKFLOW').
-        """
-        repo = get_repository()
-        return repo.get_attachments(document_id=document_id, category=category)
+        return get_repository().get_attachments(document_id=document_id, category=category)
 
-    def get_progress_attachments(
-        self,
-        progress_update_id: int
-    ) -> List[AttachmentModel]:
-        """Retrieves supporting attachments uploaded for a specific progress update."""
+    def get_progress_attachments(self, progress_update_id: int) -> List[AttachmentModel]:
+        # Attachment retrieval by progress update should be exposed by the
+        # backend repository. Never inspect private/mock repository state.
         repo = get_repository()
-        # Mock repository attachment query
-        if hasattr(repo, "_attachments"):
-            return [a for a in repo._attachments if a.progress_update_id == progress_update_id]
-        return []
+        method = getattr(repo, 'get_progress_attachments', None)
+        if not callable(method):
+            return []
+        return method(progress_update_id) or []
 
     def upload_attachment(
         self,
         document_id: int,
         file_path: str,
         progress_update_id: Optional[int] = None,
-        category: str = "WORKFLOW",
-        source: Optional[str] = None
+        category: str = 'WORKFLOW',
+        source: Optional[str] = None,
     ) -> AttachmentModel:
-        """Uploads and associates an attachment with a document or progress update."""
-        repo = get_repository()
-        return repo.upload_attachment(
+        if not file_path or not os.path.isfile(file_path):
+            raise ValueError('A valid attachment file is required.')
+        return get_repository().upload_attachment(
             document_id=document_id,
             file_path=file_path,
             progress_update_id=progress_update_id,
             category=category,
-            source=source
+            source=source,
         )
 
-    def _ensure_local_copy(self, attachment: AttachmentModel, parent: Optional[QWidget] = None) -> Optional[str]:
-        """
-        Ensures a valid local file exists for viewing or opening.
-        In API mode, streams the file from the backend download endpoint to a local cache folder.
-        In Mock mode, resolves the local path or creates a dummy preview file if missing.
-        """
-        from config.settings import settings
-
-        cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "cache", "attachments"))
-        os.makedirs(cache_dir, exist_ok=True)
-        sanitized_filename = "".join(c for c in (attachment.file_name or "attachment.pdf") if c.isalnum() or c in "._- ")
-        cache_path = os.path.join(cache_dir, f"{attachment.id or 0}_{sanitized_filename}")
-
-        if settings.is_api_mode and attachment.id:
-            # Check if already cached
-            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-                return cache_path
-
-            from api.client import api_client
-            from api.endpoints import Endpoints
-            try:
-                endpoint = Endpoints.ATTACHMENT_DOWNLOAD(attachment.id)
-                api_client.download(endpoint, cache_path)
-                return cache_path
-            except Exception as ex:
-                if parent:
-                    QMessageBox.warning(parent, "Download Error", f"Could not retrieve attachment from server: {str(ex)}")
-                return None
-        else:
-            # Mock mode or local path resolution
-            if attachment.file_path and os.path.exists(attachment.file_path):
-                return os.path.abspath(attachment.file_path)
-
-            # Generate mock preview file if not on disk
-            if not os.path.exists(cache_path):
-                with open(cache_path, "w", encoding="utf-8") as f:
-                    f.write(f"=== CDTRS ATTACHMENT PREVIEW ===\n\nFile Name: {attachment.file_name}\nCategory: {attachment.category}\nUploader ID: {attachment.uploaded_by}\nDocument ID: {attachment.document_id}\n\n[Content stream preview]")
-            return cache_path
-
-    def open_attachment(self, attachment: AttachmentModel, parent: Optional[QWidget] = None) -> bool:
-        """
-        Launches the attachment in the default system viewer (PDF viewer, Image viewer, etc.).
-        """
-        if not attachment:
-            if parent:
-                QMessageBox.warning(parent, "Attachment Error", "Attachment reference is invalid or missing.")
-            return False
-
-        path = self._ensure_local_copy(attachment, parent=parent)
-        if not path or not os.path.exists(path):
-            return False
-
-        # Use QDesktopServices to open with default application
-        url = QUrl.fromLocalFile(path)
-        success = QDesktopServices.openUrl(url)
-        return success
-
-    def download_attachment(
-        self,
-        attachment: AttachmentModel,
-        parent: Optional[QWidget] = None,
-        target_path: Optional[str] = None
+    def _ensure_local_copy(
+        self, attachment: AttachmentModel, parent: Optional[QWidget] = None
     ) -> Optional[str]:
-        """
-        Saves a copy of the attachment to a user-chosen destination folder.
-        """
-        if not attachment:
+        if not attachment or not attachment.id:
             if parent:
-                QMessageBox.warning(parent, "Download Error", "Attachment reference is invalid.")
+                QMessageBox.warning(parent, 'Attachment Error', 'Attachment reference is invalid or missing.')
             return None
 
-        # Determine target file destination
+        from config.settings import settings
+        if not settings.is_api_mode:
+            # The final application uses the real backend/API path. A local
+            # file is accepted only when the model explicitly points to one.
+            path = getattr(attachment, 'file_path', None)
+            return os.path.abspath(path) if path and os.path.isfile(path) else None
+
+        cache_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'data', 'cache', 'attachments')
+        )
+        os.makedirs(cache_dir, exist_ok=True)
+        filename = getattr(attachment, 'file_name', None) or 'attachment'
+        safe = ''.join(c for c in filename if c.isalnum() or c in '._- ') or 'attachment'
+        cache_path = os.path.join(cache_dir, f'{attachment.id}_{safe}')
+
+        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
+            return cache_path
+
+        from api.client import api_client
+        from api.endpoints import Endpoints
+        try:
+            api_client.download(Endpoints.ATTACHMENT_DOWNLOAD(attachment.id), cache_path)
+            return cache_path if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0 else None
+        except Exception as exc:
+            if parent:
+                QMessageBox.warning(parent, 'Download Error', f'Could not retrieve attachment from server: {exc}')
+            return None
+
+    def open_attachment(self, attachment: AttachmentModel, parent: Optional[QWidget] = None) -> bool:
+        path = self._ensure_local_copy(attachment, parent=parent)
+        if not path:
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def download_attachment(
+        self, attachment: AttachmentModel, parent: Optional[QWidget] = None, target_path: Optional[str] = None
+    ) -> Optional[str]:
+        if not attachment:
+            return None
         if not target_path:
-            dest_dir = QFileDialog.getExistingDirectory(
-                parent,
-                "Select Download Folder",
-                os.path.expanduser("~")
-            )
-            if not dest_dir:
+            directory = QFileDialog.getExistingDirectory(parent, 'Select Download Folder', os.path.expanduser('~'))
+            if not directory:
                 return None
-            target_path = os.path.join(dest_dir, attachment.file_name or "attachment")
+            target_path = os.path.join(directory, getattr(attachment, 'file_name', None) or 'attachment')
 
         from config.settings import settings
         if settings.is_api_mode and attachment.id:
             from api.client import api_client
             from api.endpoints import Endpoints
             try:
-                endpoint = Endpoints.ATTACHMENT_DOWNLOAD(attachment.id)
-                api_client.download(endpoint, target_path)
+                api_client.download(Endpoints.ATTACHMENT_DOWNLOAD(attachment.id), target_path)
+            except Exception as exc:
                 if parent:
-                    QMessageBox.information(
-                        parent,
-                        "Download Complete",
-                        f"Attachment saved successfully:\n{target_path}"
-                    )
-                return target_path
-            except Exception as ex:
-                if parent:
-                    QMessageBox.critical(parent, "Download Failed", f"Could not download attachment: {str(ex)}")
+                    QMessageBox.critical(parent, 'Download Failed', f'Could not download attachment: {exc}')
                 return None
         else:
-            # Mock mode local file copy
-            src_path = self._ensure_local_copy(attachment, parent=parent)
-            if not src_path or not os.path.exists(src_path):
+            source = getattr(attachment, 'file_path', None)
+            if not source or not os.path.isfile(source):
                 if parent:
-                    QMessageBox.warning(parent, "File Error", "Could not locate attachment data to save.")
+                    QMessageBox.warning(parent, 'File Error', 'Attachment is not available locally.')
                 return None
-
+            import shutil
             try:
-                shutil.copy2(src_path, target_path)
+                shutil.copy2(source, target_path)
+            except Exception as exc:
                 if parent:
-                    QMessageBox.information(
-                        parent,
-                        "Download Complete",
-                        f"Attachment saved successfully:\n{target_path}"
-                    )
-                return target_path
-            except Exception as ex:
-                if parent:
-                    QMessageBox.critical(parent, "Download Failed", f"Could not save file: {str(ex)}")
+                    QMessageBox.critical(parent, 'Download Failed', str(exc))
                 return None
 
+        if parent:
+            QMessageBox.information(parent, 'Download Complete', f'Attachment saved successfully:\n{target_path}')
+        return target_path
 
-# Global singleton service
+
 attachment_service = AttachmentService()

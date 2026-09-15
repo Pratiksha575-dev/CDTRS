@@ -162,7 +162,7 @@ class OCRService:
         }
 
     def extract_text(self, file_path: str) -> Dict[str, Any]:
-        """Legacy text extraction adapter."""
+        """Return extracted text/confidence for callers that only need OCR text."""
         data = self.process_incoming_document(file_path)
         return {"text": data["extracted_text"], "confidence": data["confidence"]}
 

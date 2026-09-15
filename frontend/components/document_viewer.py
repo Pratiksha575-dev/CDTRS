@@ -1,13 +1,17 @@
 from typing import Any, Dict, List, Optional, Union
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSplitter,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -21,18 +25,17 @@ from components.routing_dialogs import (
     HODAssignTeamDialog,
     DSTeamAssignmentDialog,
     UniversalRoutingDialog,
-    SendReminderDialog,
 )
 from models.attachment import AttachmentModel
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, RoleEnum, WorkflowStageEnum
-from services.assignment_service import assignment_service
+from models.enums import DocumentStatusEnum, RoleEnum
 from services.attachment_service import attachment_service
 from services.document_service import document_service
 from services.progress_service import progress_service
 from services.routing_service import routing_service
 from repositories.provider import get_repository
 from components.ocr_splash_dialog import OCRSplashDialog
+from core.context.context_manager import context_manager
 import os
 
 class DocumentViewer(QWidget):
@@ -55,8 +58,19 @@ class DocumentViewer(QWidget):
         else:
             self.document = document
 
+        # The active WorkContext is the UI authority. The role argument is kept
+        # only as a compatibility fallback for callers that have not yet supplied
+        # an active context through ContextManager.
         self.role = RoleEnum.normalize(role)
+        self._active_context_id: Optional[int] = None
+        self._active_context_type: str = ""
+        self._active_department_id: Optional[int] = None
+        self._active_department_name: str = ""
+        self._sync_context_from_manager(fallback_role=role)
+
         self.selected_progress_attachment: Optional[str] = None
+        self._active_work_assignments: List[Any] = []
+        self._selected_work_assignment_id: Optional[int] = None
         self._is_updating = False
 
         self.setup_ui()
@@ -64,12 +78,111 @@ class DocumentViewer(QWidget):
 
         from services.event_bus import event_bus
         event_bus.document_updated.connect(self._on_live_document_updated)
+        try:
+            context_manager.active_context_changed.connect(self._on_active_context_changed)
+        except Exception:
+            pass
+
+    def _sync_context_from_manager(self, fallback_role: Optional[str] = None) -> None:
+        """Synchronize viewer scope with the globally active WorkContext."""
+        try:
+            ctx = context_manager.active_context()
+            context_type = str(context_manager.active_context_type() or "").strip().upper()
+            context_id = context_manager.active_membership_id()
+            department_id = context_manager.active_department_id()
+            department_name = str(context_manager.active_department_name() or "").strip()
+
+            if context_type:
+                self._active_context_type = context_type
+                self._active_context_id = context_id
+                self._active_department_id = department_id
+                self._active_department_name = department_name
+                self.role = RoleEnum.normalize(context_type)
+                return
+        except Exception:
+            pass
+
+        # Fallback is deliberately role-only; it must never invent a department.
+        self._active_context_type = str(fallback_role or self.role or "").strip().upper()
+        self._active_context_id = None
+        self._active_department_id = None
+        self._active_department_name = ""
+        self.role = RoleEnum.normalize(fallback_role or self.role)
+
+    def _on_active_context_changed(self, context: Any) -> None:
+        """Refresh the viewer when the user switches WorkContext."""
+        if getattr(self, "_action_in_progress", False):
+            return
+        previous_context = self._active_context_id
+        self._sync_context_from_manager()
+        if previous_context == self._active_context_id:
+            return
+        try:
+            fresh = document_service.get_document(self.document.id) if getattr(self.document, "id", None) else None
+            if fresh:
+                self.document = fresh
+        except Exception:
+            pass
+        self.update_view_data(self.document)
+
+    def _context_is(self, *context_types: str) -> bool:
+        current = str(self._active_context_type or "").upper()
+        return current in {str(v).upper() for v in context_types}
+
+    def _assignment_department_id(self, assignment: Any) -> Optional[int]:
+        value = assignment.get("department_id") if isinstance(assignment, dict) else getattr(assignment, "department_id", None)
+        if value is None:
+            dept = assignment.get("department") if isinstance(assignment, dict) else getattr(assignment, "department", None)
+            if isinstance(dept, dict):
+                value = dept.get("id")
+            elif dept is not None:
+                value = getattr(dept, "id", None)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _branch_is_visible_in_context(self, branch: Any) -> bool:
+        if not isinstance(branch, dict) or branch.get("is_active", True) is False:
+            return False
+        if self._context_is("DS", "DIRECTOR", "ADMIN", "MASTER"):
+            return True
+        branch_type = str(branch.get("branch_type") or branch.get("route_type") or "").upper()
+        if self._context_is("TSO"):
+            return branch_type == "TSO"
+        if self._context_is("HOD", "EMPLOYEE") and self._active_department_id is not None:
+            value = branch.get("department_id")
+            try:
+                return int(value) == int(self._active_department_id)
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _assignment_is_visible_in_context(self, assignment: Any) -> bool:
+        if getattr(assignment, "is_active", True) is False or (isinstance(assignment, dict) and assignment.get("is_active", True) is False):
+            return False
+        if self._context_is("DS", "DIRECTOR", "ADMIN", "MASTER"):
+            return True
+        if self._context_is("TSO"):
+            routing_id = self._assignment_routing_id(assignment)
+            for branch in getattr(self, "_confirmed_branches", None) or []:
+                if self._routing_id(branch) == routing_id and str(branch.get("branch_type") or "").upper() == "TSO":
+                    return True
+            return False
+        if self._context_is("HOD", "EMPLOYEE") and self._active_department_id is not None:
+            dept_id = self._assignment_department_id(assignment)
+            return dept_id == int(self._active_department_id) if dept_id is not None else True
+        return True
 
     def cleanup(self):
         """Safely disconnects from event_bus upon unmounting."""
         try:
             from services.event_bus import event_bus
             event_bus.document_updated.disconnect(self._on_live_document_updated)
+        except Exception:
+            pass
+        try:
+            context_manager.active_context_changed.disconnect(self._on_active_context_changed)
         except Exception:
             pass
 
@@ -88,7 +201,7 @@ class DocumentViewer(QWidget):
 
     def setup_ui(self):
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(30, 20, 30, 20)
+        root_layout.setContentsMargins(18, 14, 18, 14)
         root_layout.setSpacing(12)
 
         # --------------------------------
@@ -138,18 +251,22 @@ class DocumentViewer(QWidget):
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 5, 0, 10)
-        self.content_layout.setSpacing(16)
+        self.content_layout.setSpacing(12)
 
         # Top Row (Preview + Info)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(16)
+        self.top_splitter = QSplitter(Qt.Horizontal)
+        self.top_splitter.setChildrenCollapsible(False)
+        self.top_splitter.setHandleWidth(8)
 
         self.preview = DocumentPreview(self.document)
         self.info = DocumentInfo(self.document)
-
-        top_row.addWidget(self.preview, 1)
-        top_row.addWidget(self.info, 1)
-        self.content_layout.addLayout(top_row)
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.top_splitter.addWidget(self.preview)
+        self.top_splitter.addWidget(self.info)
+        self.top_splitter.setStretchFactor(0, 1)
+        self.top_splitter.setStretchFactor(1, 1)
+        self.content_layout.addWidget(self.top_splitter)
 
         # A. DIRECTOR ROUTING SUGGESTION CARD (Built Once - Clean Neutral Theme)
         self.suggestion_card = QFrame()
@@ -440,6 +557,17 @@ class DocumentViewer(QWidget):
         form_title = QLabel("Report Progress Update")
         form_title.setObjectName("sectionTitle")
 
+        self.workstream_label = QLabel("Work Assignment / Workstream:")
+        self.workstream_label.setStyleSheet("font-weight: 600; color: #334155; font-size: 11px;")
+
+        self.workstream_combo = QComboBox()
+        self.workstream_combo.setMinimumHeight(30)
+        self.workstream_combo.setStyleSheet(
+            "QComboBox { background: #FFFFFF; border: 1px solid #CBD5E1; "
+            "border-radius: 4px; padding: 5px 8px; color: #0F172A; }"
+        )
+        self.workstream_combo.currentIndexChanged.connect(self._on_workstream_changed)
+
         self._emp_progress_text_edit = QTextEdit()
         self._emp_progress_text_edit.setPlaceholderText("Describe the work completed, current findings, challenges, or next execution steps...")
         self._emp_progress_text_edit.setMaximumHeight(85)
@@ -471,6 +599,8 @@ class DocumentViewer(QWidget):
         att_row.addWidget(submit_btn)
 
         emp_form_layout.addWidget(form_title)
+        emp_form_layout.addWidget(self.workstream_label)
+        emp_form_layout.addWidget(self.workstream_combo)
         emp_form_layout.addWidget(self._emp_progress_text_edit)
         emp_form_layout.addLayout(att_row)
 
@@ -489,6 +619,17 @@ class DocumentViewer(QWidget):
 
         root_layout.addWidget(self.action_bar_widget)
 
+    def resizeEvent(self, event):
+        """Adapt the preview/info arrangement to available width."""
+        try:
+            width = self.width()
+            self.top_splitter.setOrientation(Qt.Horizontal if width >= 1050 else Qt.Vertical)
+            if width >= 1050:
+                self.top_splitter.setSizes([max(1, width // 2), max(1, width // 2)])
+        except Exception:
+            pass
+        super().resizeEvent(event)
+
     def _clear_item_layout(self, layout):
         if layout is None:
             return
@@ -500,6 +641,227 @@ class DocumentViewer(QWidget):
                 w.deleteLater()
             elif item.layout() is not None:
                 self._clear_item_layout(item.layout())
+
+    def _status(self) -> str:
+        return str(getattr(self.document, "status", None) or "Received").strip()
+
+    def _is_status(self, *values: str) -> bool:
+        current = self._status().lower()
+        return any(current == str(value).lower() for value in values)
+
+    def _workflow_stage_label(self) -> str:
+        status = self._status().lower()
+        if status in {"received"}:
+            return "DS Intake"
+        if status in {"under director review", "pending director review", "under_director_review"}:
+            return "Director Review"
+        if status in {"director review completed", "director_review_completed"}:
+            return "DS Routing"
+        if status in {"under hod processing", "under_hod_processing"}:
+            return "HOD Processing"
+        if status in {"assigned for execution", "assigned_for_execution", "in progress", "in_progress", "progress updated", "progress_updated"}:
+            return "Execution"
+        if status in {"closed"}:
+            return "Closed"
+        return status or "Unknown"
+
+    def _active_branches(self) -> list:
+        branches = getattr(self, "_confirmed_branches", None) or []
+        return [b for b in branches if self._branch_is_visible_in_context(b)]
+
+    def _branch_department_name(self, branch: dict) -> str:
+        """Return the confirmed department name for a canonical branch.
+
+        The canonical branch stores department_id/department_name. Never use
+        OCR suggestions as an operational department fallback.
+        """
+        name = branch.get("department_name") if isinstance(branch, dict) else None
+        if name:
+            return str(name)
+
+        dept_id = branch.get("department_id") if isinstance(branch, dict) else None
+        if dept_id:
+            try:
+                for dept in (get_repository().get_departments() or []):
+                    if getattr(dept, "id", None) == dept_id:
+                        return str(getattr(dept, "name", None) or "")
+            except Exception:
+                pass
+        return "Not Specified"
+
+    def _confirmed_department_names(self) -> list:
+        names = []
+        for branch in self._active_branches():
+            if not isinstance(branch, dict):
+                continue
+            if branch.get("branch_type") != "DEPARTMENT_HOD":
+                continue
+            name = branch.get("department_name")
+            department = branch.get("department")
+            if not name and isinstance(department, dict):
+                name = department.get("name")
+            if name and str(name) not in names:
+                names.append(str(name))
+
+        for assignment in getattr(self.document, "work_assignments", None) or []:
+            if getattr(assignment, "is_active", True) is False:
+                continue
+            name = getattr(assignment, "department_name", None)
+            if not name:
+                dept = getattr(assignment, "department", None)
+                name = getattr(dept, "name", None) if dept else None
+            if name and str(name) not in names:
+                names.append(str(name))
+        return names
+
+    def _has_confirmed_operational_routing(self) -> bool:
+        if self._active_branches():
+            return True
+        return any(
+            getattr(a, "is_active", True) is not False
+            for a in (getattr(self.document, "work_assignments", None) or [])
+        )
+
+    def _branch_type_label(self, branch: Dict[str, Any]) -> str:
+        branch_type = str(branch.get("branch_type") or branch.get("route_type") or "ROUTING")
+        labels = {
+            "DEPARTMENT_HOD": "Department / HOD",
+            "DIRECT_EMPLOYEE": "Direct Employee",
+            "TSO": "TSO",
+        }
+        return labels.get(branch_type, branch_type.replace("_", " ").title())
+
+    def _routing_id(self, branch: Any) -> Optional[int]:
+        if isinstance(branch, dict):
+            value = branch.get("id") or branch.get("routing_id")
+        else:
+            value = getattr(branch, "id", None) or getattr(branch, "routing_id", None)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _assignment_id(self, assignment: Any) -> Optional[int]:
+        value = getattr(assignment, "id", None)
+        if value is None and isinstance(assignment, dict):
+            value = assignment.get("id") or assignment.get("work_assignment_id")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _assignment_routing_id(self, assignment: Any) -> Optional[int]:
+        if isinstance(assignment, dict):
+            value = assignment.get("routing_id") or assignment.get("document_department_routing_id")
+        else:
+            value = (getattr(assignment, "routing_id", None)
+                     or getattr(assignment, "document_department_routing_id", None))
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _assignment_department_name(self, assignment: Any) -> str:
+        if isinstance(assignment, dict):
+            name = assignment.get("department_name")
+            if not name and isinstance(assignment.get("department"), dict):
+                name = assignment["department"].get("name")
+        else:
+            name = getattr(assignment, "department_name", None)
+            if not name:
+                dept = getattr(assignment, "department", None)
+                name = getattr(dept, "name", None) if dept else None
+        return str(name) if name else "General / Cross-Department"
+
+    def _assignment_member_names(self, assignment: Any) -> List[str]:
+        members = assignment.get("members") if isinstance(assignment, dict) else getattr(assignment, "members", None)
+        names: List[str] = []
+        for member in members or []:
+            if isinstance(member, dict):
+                name = (member.get("user_name") or member.get("full_name")
+                        or member.get("name") or member.get("assigned_to_name"))
+            else:
+                name = (getattr(member, "user_name", None) or getattr(member, "full_name", None)
+                        or getattr(member, "name", None))
+            if name and str(name) not in names:
+                names.append(str(name))
+        if not names:
+            if isinstance(assignment, dict):
+                primary = assignment.get("assigned_to_name") or assignment.get("employee_name")
+            else:
+                primary = getattr(assignment, "assigned_to_name", None)
+            if primary:
+                names.append(str(primary))
+        return names
+
+    def _assignment_team_name(self, assignment: Any) -> str:
+        if isinstance(assignment, dict):
+            return str(assignment.get("team_name") or "Individual Work Assignment")
+        return str(getattr(assignment, "team_name", None) or "Individual Work Assignment")
+
+    def _assignment_status(self, assignment: Any) -> str:
+        value = assignment.get("status") if isinstance(assignment, dict) else getattr(assignment, "status", None)
+        if not value:
+            completed = assignment.get("completed_at") if isinstance(assignment, dict) else getattr(assignment, "completed_at", None)
+            value = "Completed" if completed else "Assigned for Execution"
+        return str(value).replace("_", " ").title()
+
+    def _branch_status(self, branch: Dict[str, Any], assignments: List[Any]) -> str:
+        raw = branch.get("status") or branch.get("state")
+        if raw:
+            return str(raw).replace("_", " ").title()
+        if assignments:
+            statuses = {self._assignment_status(a).lower() for a in assignments}
+            if statuses and all("completed" in st for st in statuses):
+                return "Completed"
+            if any("progress" in st or "execution" in st or "in progress" in st for st in statuses):
+                return "In Progress"
+            return "Assigned"
+        return "Awaiting Assignment" if branch.get("branch_type") == "DEPARTMENT_HOD" else "Active Route"
+
+    def _branch_assignments(self, branch: Dict[str, Any], assignments: List[Any]) -> List[Any]:
+        rid = self._routing_id(branch)
+        if rid is None:
+            return []
+        return [a for a in assignments if self._assignment_routing_id(a) == rid]
+
+    def _populate_workstream_selector(self, assignments: List[Any]) -> None:
+        self.workstream_combo.blockSignals(True)
+        self.workstream_combo.clear()
+        self._active_work_assignments = list(assignments)
+
+        for assignment in assignments:
+            aid = self._assignment_id(assignment)
+            if aid is None:
+                continue
+            routing_id = self._assignment_routing_id(assignment)
+            members = self._assignment_member_names(assignment)
+            team = self._assignment_team_name(assignment)
+            dept = self._assignment_department_name(assignment)
+            member_text = ", ".join(members) if members else "No members listed"
+            route_text = f" • Branch {routing_id}" if routing_id is not None else ""
+            label = f"{dept} • {team} • {member_text}{route_text}"
+            self.workstream_combo.addItem(label, aid)
+
+        if self.workstream_combo.count() == 1:
+            self.workstream_combo.setCurrentIndex(0)
+            self._selected_work_assignment_id = self.workstream_combo.currentData()
+        elif self.workstream_combo.count() > 1:
+            self._selected_work_assignment_id = self.workstream_combo.currentData()
+        else:
+            self._selected_work_assignment_id = None
+
+        self.workstream_combo.blockSignals(False)
+        multiple = self.workstream_combo.count() > 1
+        self.workstream_label.setVisible(self.workstream_combo.count() > 0)
+        self.workstream_combo.setVisible(self.workstream_combo.count() > 0)
+        if multiple:
+            self.workstream_label.setText("Select Work Assignment / Workstream (required):")
+        else:
+            self.workstream_label.setText("Work Assignment / Workstream:")
+
+    def _on_workstream_changed(self, index: int):
+        self._selected_work_assignment_id = self.workstream_combo.itemData(index) if index >= 0 else None
 
     def update_view_data(self, doc: DocumentModel):
         """Updates all viewer sections in-place cleanly without stacking or glitching."""
@@ -517,6 +879,14 @@ class DocumentViewer(QWidget):
                     pass
             self.document = doc
 
+            # Canonical operational routing is stored in DocumentDepartmentRouting.
+            # Suggestions must never be treated as confirmed routing.
+            self._confirmed_branches = []
+            if getattr(self.document, "id", None):
+                try:
+                    self._confirmed_branches = get_repository().get_document_branches(self.document.id) or []
+                except Exception:
+                    self._confirmed_branches = []
 
             # 1. Update Header
             title_text = self.document.title or "Document Information"
@@ -526,29 +896,17 @@ class DocumentViewer(QWidget):
             self.ref_label.setText(f"Reference No: {ref_text}  •  Source: {self.document.source or 'External'}  •  Received: {self.document.date or 'N/A'}")
 
             self.status_lbl.setText(f"Status: {self.document.status or 'Received'}")
-            self.stage_lbl.setText(f"Stage: {self.document.current_stage or 'DS'}")
+            self.stage_lbl.setText(f"Stage: {self._workflow_stage_label()}")
 
             # 2. Update Preview & Info Components
             self.preview.set_document(self.document)
             self.info.set_document(self.document)
 
             # 3. Update Routing Suggestion Card (Director instruction OR OCR intelligence)
-            sugg_dept = (
-                getattr(self.document, "suggested_department_name", None)
-                or getattr(self.document, "target_department_name", None)
-            )
-            sugg_dept_id = (
-                getattr(self.document, "suggested_department_id", None)
-                or getattr(self.document, "target_department_id", None)
-            )
-            sugg_emp = (
-                getattr(self.document, "suggested_employee_name", None)
-                or getattr(self.document, "assigned_employee_name", None)
-            )
-            sugg_emp_id = (
-                getattr(self.document, "suggested_employee_id", None)
-                or getattr(self.document, "assigned_employee_id", None)
-            )
+            sugg_dept = getattr(self.document, "suggested_department_name", None)
+            sugg_dept_id = getattr(self.document, "suggested_department_id", None)
+            sugg_emp = getattr(self.document, "suggested_employee_name", None)
+            sugg_emp_id = getattr(self.document, "suggested_employee_id", None)
             conf = getattr(self.document, "routing_instruction_confidence", 0) or getattr(self.document, "routing_confidence", 0) or 0
             if isinstance(conf, (int, float)) and 0 < float(conf) <= 1.0:
                 conf = round(float(conf) * 100)
@@ -602,17 +960,17 @@ class DocumentViewer(QWidget):
                     self.document.has_director_routing_instruction = True
                     self.document.routing_instruction_confidence = 95
 
-            is_ds = self.role in (RoleEnum.DIRECTOR_SECRETARY.value, "Master", "DS", "Director Secretary")
-            is_director = self.role in (RoleEnum.DIRECTOR.value, "Director", "DIRECTOR")
-            is_closed = (self.document.status == DocumentStatusEnum.CLOSED.value or self.document.current_stage == WorkflowStageEnum.CLOSED.value)
+            is_ds = self._context_is("DS", "DIRECTOR SECRETARY")
+            is_director = self._context_is("DIRECTOR")
+            is_closed = self._is_status(DocumentStatusEnum.CLOSED.value, "Closed")
 
             # Advisory suggestion is strictly applicable BEFORE final department routing is performed
             is_pre_routing = (
-                self.document.current_stage in (WorkflowStageEnum.DS.value, WorkflowStageEnum.DIRECTOR.value, "DS", "DIRECTOR", "Director")
+                not self._has_confirmed_operational_routing()
                 and self.document.status in (
                     DocumentStatusEnum.RECEIVED.value,
                     DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value,
-                    DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                    DocumentStatusEnum.RETURNED_TO_DS.value,
                     "Received",
                     "Under Director Review",
                     "Director Review Completed"
@@ -636,14 +994,13 @@ class DocumentViewer(QWidget):
 
                 is_returned_from_director = (
                     self.document.status in (
-                        DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                        DocumentStatusEnum.RETURNED_TO_DS.value,
                         "Director Review Completed",
                         "DIRECTOR_REVIEW_COMPLETED",
                     )
                 )
                 is_under_director_review = bool(
-                    self.document.current_stage == WorkflowStageEnum.DIRECTOR.value
-                    or self.document.status in (DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value, "Under Director Review", "UNDER_DIRECTOR_REVIEW", "Pending Director Review")
+                    self.document.status in (DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value, "Under Director Review", "UNDER_DIRECTOR_REVIEW", "Pending Director Review")
                 )
 
                 # Toggle role-specific action buttons on the suggestion card
@@ -688,7 +1045,7 @@ class DocumentViewer(QWidget):
 
 
             # 4. Update Remarks Card
-            is_closed = (self.document.status == DocumentStatusEnum.CLOSED.value or self.document.current_stage == WorkflowStageEnum.CLOSED.value)
+            is_closed = self._is_status(DocumentStatusEnum.CLOSED.value, "Closed")
             
             # Director Remark binding
             if self.role == RoleEnum.DIRECTOR.value and not is_closed:
@@ -703,7 +1060,8 @@ class DocumentViewer(QWidget):
                 self.dir_view_lbl.setStyleSheet("color: #334155; font-size: 12px;" if self.document.director_remark else "color: #94A3B8; font-style: italic; font-size: 12px;")
 
             # HOD Remark binding
-            dept_name = self.document.target_department_name or "Department"
+            dept_names = self._confirmed_department_names()
+            dept_name = " | ".join(dept_names) if dept_names else "Department"
             if self.role in (RoleEnum.HOD.value, "HOD") and not is_closed:
                 self.hod_edit_frame.setVisible(True)
                 self.hod_view_frame.setVisible(False)
@@ -863,7 +1221,7 @@ class DocumentViewer(QWidget):
                         norm_conf = conf_val if conf_val <= 1.0 else conf_val / 100.0
                         conf_str = f"{conf_pct}% ({norm_conf:.4f})"
                     else:
-                        conf_str = "98% (0.9800)"
+                        conf_str = "—"
 
                     f_lines = [
                         f"• Target File        : {target_file}",
@@ -880,102 +1238,153 @@ class DocumentViewer(QWidget):
             else:
                 self.ocr_intel_card.setVisible(False)
 
-            # 6b. Update Multi-Department Assignments Card
+            # 6b. Update canonical routing/work-assignment view.
+            # DocumentDepartmentRouting is the source of truth. Every branch is
+            # rendered independently and WorkAssignments are nested under their
+            # routing branch, so multiple departments, direct employees, TSO, and
+            # team assignments can coexist without collapsing into one target.
             self._clear_item_layout(self.multi_assign_items_layout)
-            doc_assignments_list = []
+
+            canonical_branches: List[Dict[str, Any]] = []
             if doc_id:
                 try:
-                    doc_assignments_list = assignment_service.get_document_assignments(doc_id) or []
+                    canonical_branches = get_repository().get_document_branches(doc_id) or []
                 except Exception:
-                    doc_assignments_list = []
+                    canonical_branches = []
 
-            # Canonical WorkAssignment records (including team/member assignments)
-            team_assignments = []
-            for assignment in (getattr(self.document, "work_assignments", None) or []):
-                if getattr(assignment, "is_active", True):
-                    members = list(getattr(assignment, "members", None) or [])
-                    if members:
-                        team_assignments.append(assignment)
+            active_branches = [
+                b for b in canonical_branches
+                if self._branch_is_visible_in_context(b)
+            ]
+            canonical_assignments = [
+                a for a in (getattr(self.document, "work_assignments", None) or [])
+                if self._assignment_is_visible_in_context(a)
+            ]
+            self._active_work_assignments = canonical_assignments
 
-            has_multi_assign = bool(doc_assignments_list or team_assignments)
-            self.multi_assignments_card.setVisible(has_multi_assign)
+            has_operational_routing = bool(active_branches or canonical_assignments)
+            self.multi_assignments_card.setVisible(has_operational_routing)
+            self.assignment_card.setVisible(False)
 
-            # 6. Update Single Assignment Status Card (hidden when multi-assignment card is visible)
-            has_assign = bool(self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned") and not has_multi_assign
-            self.assignment_card.setVisible(has_assign)
-            if has_assign:
-                self.assignment_lbl.setText(f"👤 Assigned Staff: <b>{self.document.assigned_employee_name}</b>  •  Department: <b>{self.document.target_department_name or 'General'}</b>")
+            if has_operational_routing:
+                self.multi_assign_title.setText(
+                    f"Canonical Routing & Workstreams ({len(active_branches)} route(s), "
+                    f"{len(canonical_assignments)} work assignment(s))"
+                )
 
-            if has_multi_assign:
-                for da in doc_assignments_list:
-                    da_frame = QFrame()
-                    da_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px;")
-                    da_layout = QVBoxLayout(da_frame)
-                    da_layout.setContentsMargins(8, 6, 8, 6)
-                    da_layout.setSpacing(4)
+                rendered_assignment_ids = set()
 
-                    top_row = QHBoxLayout()
-                    dept_lbl = QLabel(f"🏢 <b>{da.get('department_name') or 'General'}</b>")
-                    dept_lbl.setStyleSheet("color: #0F172A; font-size: 12px;")
+                for index, branch in enumerate(active_branches, start=1):
+                    routing_id = self._routing_id(branch)
+                    branch_type = branch.get("branch_type") or branch.get("route_type") or "ROUTING"
+                    branch_label = self._branch_type_label(branch)
+                    department_name = self._branch_department_name(branch)
+                    target_name = (
+                        branch.get("target_user_name")
+                        or branch.get("assigned_to_name")
+                        or branch.get("employee_name")
+                    )
+                    branch_assignments = self._branch_assignments(branch, canonical_assignments)
+                    for a in branch_assignments:
+                        aid = self._assignment_id(a)
+                        if aid is not None:
+                            rendered_assignment_ids.add(aid)
 
-                    emp_name = da.get("employee_name") or "Staff Not Assigned (Open)"
-                    emp_lbl = QLabel(f"👤 {emp_name}")
-                    emp_lbl.setStyleSheet("color: #334155; font-size: 12px;")
+                    frame = QFrame()
+                    frame.setStyleSheet(
+                        "QFrame { background-color: #F8FAFC; border: 1px solid #CBD5E1; "
+                        "border-radius: 7px; }"
+                    )
+                    layout = QVBoxLayout(frame)
+                    layout.setContentsMargins(12, 9, 12, 9)
+                    layout.setSpacing(6)
 
-                    val_badge = QLabel("⏳ HOD Validation Required" if da.get("requires_hod_validation") else "⚡ Direct to DS")
-                    val_badge.setStyleSheet("background-color: #FEF3C7; color: #92400E; font-weight: 600; font-size: 10px; padding: 2px 6px; border-radius: 3px;" if da.get("requires_hod_validation") else "background-color: #F1F5F9; color: #475569; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+                    hdr = QHBoxLayout()
+                    title = QLabel(
+                        f"<b>Route {index}</b>  •  {branch_label}  •  <b>{department_name}</b>"
+                    )
+                    title.setStyleSheet("color: #0F172A; font-size: 12px;")
+                    hdr.addWidget(title, 1)
 
-                    top_row.addWidget(dept_lbl)
-                    top_row.addWidget(emp_lbl)
-                    top_row.addStretch()
-                    top_row.addWidget(val_badge)
-                    da_layout.addLayout(top_row)
+                    status_lbl = QLabel(self._branch_status(branch, branch_assignments))
+                    status_lbl.setStyleSheet(
+                        "background-color: #E0F2FE; color: #0369A1; font-weight: 700; "
+                        "font-size: 10px; padding: 3px 7px; border-radius: 4px;"
+                    )
+                    hdr.addWidget(status_lbl)
+                    layout.addLayout(hdr)
 
-                    if da.get("instructions"):
-                        instr_lbl = QLabel(f"Directives: {da.get('instructions')}")
-                        instr_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic;")
-                        da_layout.addWidget(instr_lbl)
+                    if routing_id is not None:
+                        meta = QLabel(f"Routing Branch ID: {routing_id}")
+                        meta.setStyleSheet("color: #94A3B8; font-size: 10px;")
+                        layout.addWidget(meta)
 
-                    self.multi_assign_items_layout.addWidget(da_frame)
+                    if branch_type == "DIRECT_EMPLOYEE":
+                        who = target_name or "Target employee not specified"
+                        who_lbl = QLabel(f"👤 Direct employee: <b>{who}</b>")
+                        who_lbl.setStyleSheet("color: #334155; font-size: 11px;")
+                        layout.addWidget(who_lbl)
+                    elif branch_type == "TSO":
+                        tso_lbl = QLabel("👤 TSO workstream")
+                        tso_lbl.setStyleSheet("color: #334155; font-size: 11px;")
+                        layout.addWidget(tso_lbl)
+                    else:
+                        hod_lbl = QLabel(
+                            "👥 HOD branch — " +
+                            ("work assigned below" if branch_assignments else "awaiting HOD staff/team assignment")
+                        )
+                        hod_lbl.setStyleSheet("color: #334155; font-size: 11px;")
+                        layout.addWidget(hod_lbl)
 
-                for assignment in team_assignments:
-                    team_frame = QFrame()
-                    team_frame.setStyleSheet("background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px;")
-                    team_layout = QVBoxLayout(team_frame)
-                    team_layout.setContentsMargins(8, 6, 8, 6)
-                    team_layout.setSpacing(4)
+                    if branch.get("instructions"):
+                        instr = QLabel(f"Directives: {branch.get('instructions')}")
+                        instr.setWordWrap(True)
+                        instr.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic;")
+                        layout.addWidget(instr)
 
-                    team_name = getattr(assignment, "team_name", None) or "Team Assignment"
-                    title_lbl = QLabel(f"👥 <b>{team_name}</b>")
-                    title_lbl.setStyleSheet("color: #0F172A; font-size: 12px;")
-                    team_layout.addWidget(title_lbl)
+                    for assignment in branch_assignments:
+                        member_names = self._assignment_member_names(assignment)
+                        team_name = self._assignment_team_name(assignment)
+                        member_text = ", ".join(member_names) if member_names else "No members listed"
+                        assignment_lbl = QLabel(
+                            f"↳ <b>{team_name}</b>  •  "
+                            f"{'👥 ' if len(member_names) > 1 else '👤 '}"
+                            f"{member_text}  •  {self._assignment_status(assignment)}"
+                        )
+                        assignment_lbl.setWordWrap(True)
+                        assignment_lbl.setStyleSheet(
+                            "background-color: #FFFFFF; border: 1px solid #E2E8F0; "
+                            "border-radius: 5px; padding: 6px; color: #334155; font-size: 11px;"
+                        )
+                        layout.addWidget(assignment_lbl)
 
-                    member_names = []
-                    for member in (getattr(assignment, "members", None) or []):
-                        name = getattr(member, "user_name", None) or getattr(member, "full_name", None) or getattr(member, "name", None)
-                        if name:
-                            member_names.append(str(name))
-                    if not member_names:
-                        primary = getattr(assignment, "assigned_to_name", None)
-                        if primary:
-                            member_names.append(str(primary))
+                    self.multi_assign_items_layout.addWidget(frame)
 
-                    members_lbl = QLabel("Members: " + (", ".join(member_names) if member_names else "No members listed"))
-                    members_lbl.setWordWrap(True)
-                    members_lbl.setStyleSheet("color: #334155; font-size: 11px;")
-                    team_layout.addWidget(members_lbl)
+                # Keep any active assignment visible even if the backend did not
+                # return its routing relation in the branch payload. It is still
+                # a canonical WorkAssignment and must never disappear from the UI.
+                for assignment in canonical_assignments:
+                    aid = self._assignment_id(assignment)
+                    if aid is not None and aid in rendered_assignment_ids:
+                        continue
+                    members = self._assignment_member_names(assignment)
+                    team = self._assignment_team_name(assignment)
+                    orphan = QLabel(
+                        f"↳ <b>Unlinked Work Assignment</b>  •  {team}  •  "
+                        f"{', '.join(members) if members else 'No members listed'}"
+                    )
+                    orphan.setWordWrap(True)
+                    orphan.setStyleSheet(
+                        "background-color: #FFF7ED; border: 1px solid #FED7AA; "
+                        "border-radius: 5px; padding: 6px; color: #9A3412; font-size: 11px;"
+                    )
+                    self.multi_assign_items_layout.addWidget(orphan)
 
-                    if getattr(assignment, "instructions", None):
-                        instr_lbl = QLabel(f"Directives: {assignment.instructions}")
-                        instr_lbl.setWordWrap(True)
-                        instr_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic;")
-                        team_layout.addWidget(instr_lbl)
-
-                    validation = getattr(assignment, "requires_hod_validation", False)
-                    val_lbl = QLabel("⏳ HOD Validation Required" if validation else "⚡ Direct to DS")
-                    val_lbl.setStyleSheet("color: #92400E; font-weight: 600; font-size: 10px;" if validation else "color: #475569; font-size: 10px;")
-                    team_layout.addWidget(val_lbl)
-                    self.multi_assign_items_layout.addWidget(team_frame)
+            # Employee progress must identify the exact WorkAssignment.
+            # If there are multiple active workstreams, the employee must choose
+            # one instead of silently posting progress at document level.
+            is_emp = self._context_is("EMPLOYEE")
+            self._populate_workstream_selector(canonical_assignments if is_emp else [])
 
             # 7. Update Progress History
             self._clear_item_layout(self.progress_items_layout)
@@ -990,7 +1399,7 @@ class DocumentViewer(QWidget):
                     p_vbox.setSpacing(6)
 
                     p_time = str(p.created_at or "").replace("T", " ")[:16] or "Recent"
-                    p_author = p.user_name or (self.document.assigned_employee_name if (self.document.assigned_employee_name and self.document.assigned_employee_name != "Not Assigned") else "Assigned Staff")
+                    p_author = p.user_name or ("Assigned Staff")
 
                     hdr_row = QHBoxLayout()
                     p_hdr = QLabel(f"Submitted by {p_author} • {p_time}")
@@ -1033,7 +1442,7 @@ class DocumentViewer(QWidget):
                         p_vbox.addWidget(note_frame)
 
                     # HOD Action buttons on pending update
-                    is_hod = self.role in (RoleEnum.HOD.value, "HOD")
+                    is_hod = self._context_is("HOD")
                     if is_hod and val_status == "PENDING_HOD_REVIEW" and not is_closed:
                         action_btn_row = QHBoxLayout()
                         action_btn_row.addStretch()
@@ -1095,7 +1504,7 @@ class DocumentViewer(QWidget):
                     self.progress_items_layout.addWidget(p_box)
 
             # 8. Update Progress Submission Form Visibility
-            is_emp = self.role in (RoleEnum.EMPLOYEE.value, "Employee")
+            is_emp = self._context_is("EMPLOYEE")
             show_prog_form = is_emp and not is_closed
             self.progress_form_card.setVisible(show_prog_form)
             if show_prog_form:
@@ -1125,7 +1534,7 @@ class DocumentViewer(QWidget):
 
         self.action_bar.addStretch()
 
-        if self.role in (RoleEnum.DIRECTOR_SECRETARY.value, "Master", "DS", "Director Secretary"):
+        if self.role in (RoleEnum.DS.value, "Master", "DS", "Director Secretary"):
             self._render_ds_actions()
         elif self.role == RoleEnum.DIRECTOR.value:
             self._render_director_actions()
@@ -1136,68 +1545,60 @@ class DocumentViewer(QWidget):
 
     def _render_ds_actions(self):
         doc = self.document
-        stage = doc.current_stage
+        status = self._status().lower()
 
-        if doc.status == DocumentStatusEnum.CLOSED.value or stage == WorkflowStageEnum.CLOSED.value:
+        if status == "closed":
             closed_label = QLabel("✓ Document Lifecycle Finalized and Closed")
             closed_label.setStyleSheet("color: #059669; font-weight: 600; font-size: 13px;")
             self.action_bar.addWidget(closed_label)
             return
 
-        if stage in (WorkflowStageEnum.DS.value, "DS", "ds_user"):
-            is_returned_from_director = (
-                doc.status in (
-                    DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
-                    "Director Review Completed",
-                    "DIRECTOR_REVIEW_COMPLETED",
-                )
-            )
+        if status in {"received"}:
+            pending_note = QLabel("⏳ Initial Intake: Send to Director for executive review before department assignment.")
+            pending_note.setStyleSheet("color: #0284C7; font-weight: 600; font-size: 12px;")
+            self.action_bar.addWidget(pending_note)
+            route_dir_btn = QPushButton("Route to Director for Review")
+            route_dir_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
+            route_dir_btn.clicked.connect(self._ds_route_to_director)
+            self.action_bar.addWidget(route_dir_btn)
+            return
 
-            if is_returned_from_director:
-                # Director review is complete! DS can now execute department routing:
-                route_btn = QPushButton("Route")
-                route_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 700; padding: 7px 22px; border-radius: 5px;")
-                route_btn.setToolTip("Choose one or more departments, employees, or TSO routes")
-                route_btn.clicked.connect(self._ds_route)
-                self.action_bar.addWidget(route_btn)
+        if status in {"under director review", "pending director review", "under_director_review"}:
+            note = QLabel("📌 Document is currently with Director for Executive Review (Department routing disabled until Director completes review)")
+            note.setStyleSheet("color: #64748B; font-style: italic; font-size: 12px; font-weight: 600;")
+            self.action_bar.addWidget(note)
+            return
 
-                team_btn = QPushButton("Create Team Assignment")
-                team_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 700; padding: 7px 18px; border-radius: 5px;")
-                team_btn.setToolTip("Assign one work item to multiple employees")
-                team_btn.clicked.connect(self._ds_assign_team)
-                self.action_bar.addWidget(team_btn)
+        if status in {"director review completed", "director_review_completed"} and not self._has_confirmed_operational_routing():
+            route_btn = QPushButton("Route")
+            route_btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: 700; padding: 7px 22px; border-radius: 5px;")
+            route_btn.setToolTip("Choose one or more departments, employees, or TSO routes")
+            route_btn.clicked.connect(self._ds_route)
+            self.action_bar.addWidget(route_btn)
 
-                close_btn = QPushButton("Close Document")
-                close_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                close_btn.clicked.connect(self._ds_close_document)
-                self.action_bar.addWidget(close_btn)
-            else:
-                # Before Director review: DS must send for Director Review first
-                pending_note = QLabel("⏳ Initial Intake: Send to Director for executive review before department assignment.")
-                pending_note.setStyleSheet("color: #0284C7; font-weight: 600; font-size: 12px;")
-                self.action_bar.addWidget(pending_note)
+            team_btn = QPushButton("Create Team Assignment")
+            team_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 700; padding: 7px 18px; border-radius: 5px;")
+            team_btn.clicked.connect(self._ds_assign_team)
+            self.action_bar.addWidget(team_btn)
 
-                route_dir_btn = QPushButton("Route to Director for Review")
-                route_dir_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 16px; border-radius: 5px;")
-                route_dir_btn.clicked.connect(self._ds_route_to_director)
-                self.action_bar.addWidget(route_dir_btn)
+            close_btn = QPushButton("Close Document")
+            close_btn.setStyleSheet("background-color: #059669; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
+            close_btn.clicked.connect(self._ds_close_document)
+            self.action_bar.addWidget(close_btn)
+            return
 
-        elif stage in (WorkflowStageEnum.HOD.value, WorkflowStageEnum.EMPLOYEE.value):
-            if doc.status == DocumentStatusEnum.PROGRESS_UPDATED.value:
+        if self._has_confirmed_operational_routing():
+            dept_names = self._confirmed_department_names()
+            dept_label = " | ".join(dept_names) if dept_names else "routed branch(es)"
+            if status in {"progress updated", "progress_updated"}:
                 fwd_btn = QPushButton("Forward Progress Follow-up to Director")
                 fwd_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
                 fwd_btn.clicked.connect(self._ds_forward_followup)
                 self.action_bar.addWidget(fwd_btn)
             else:
-                dept_label = doc.target_department_name or "Department"
                 status_note = QLabel(f"📌 Active in {dept_label} — Awaiting Staff Completion")
                 status_note.setStyleSheet("color: #0284C7; font-weight: 600; font-size: 12px;")
                 self.action_bar.addWidget(status_note)
-
-                re_route_btn = QPushButton("Re-Route Department")
-                re_route_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-                re_route_btn.clicked.connect(self._ds_route)
-                self.action_bar.addWidget(re_route_btn)
 
             reminder_btn = QPushButton("⏰ Send Action Reminder")
             reminder_btn.setStyleSheet("background-color: #F59E0B; color: white; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
@@ -1209,66 +1610,48 @@ class DocumentViewer(QWidget):
             close_btn.clicked.connect(self._ds_close_document)
             self.action_bar.addWidget(close_btn)
 
-        elif stage == WorkflowStageEnum.DIRECTOR.value or doc.status in (DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value, "Under Director Review", "UNDER_DIRECTOR_REVIEW"):
-            note = QLabel("📌 Document is currently with Director for Executive Review (Department routing disabled until Director completes review)")
-            note.setStyleSheet("color: #64748B; font-style: italic; font-size: 12px; font-weight: 600;")
-            self.action_bar.addWidget(note)
-
     def _render_director_actions(self):
         doc = self.document
-        stage = doc.current_stage
+        status = self._status().lower()
 
-        if doc.status == DocumentStatusEnum.CLOSED.value or stage == WorkflowStageEnum.CLOSED.value:
+        if status == "closed":
             closed_label = QLabel("✓ Document Lifecycle Finalized and Closed (Read-Only)")
             closed_label.setStyleSheet("color: #059669; font-weight: 600; font-size: 13px;")
             self.action_bar.addWidget(closed_label)
             return
 
-        if stage == WorkflowStageEnum.DIRECTOR.value or doc.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value:
+        if status in {"under director review", "pending director review", "under_director_review"}:
             return_ds_btn = QPushButton("Return to Director Secretary")
             return_ds_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 20px; border-radius: 5px;")
             return_ds_btn.clicked.connect(self._director_return_to_ds)
             self.action_bar.addWidget(return_ds_btn)
         else:
-            status_note = QLabel(f"Document under {stage} stage (Read-Only Review)")
+            status_note = QLabel("Document is not currently awaiting Executive Director review (Read-Only)")
             status_note.setStyleSheet("color: #64748B; font-style: italic; font-size: 12px;")
             self.action_bar.addWidget(status_note)
 
     def _render_hod_actions(self):
         doc = self.document
-        stage = doc.current_stage
+        status = self._status().lower()
 
-        if doc.status == DocumentStatusEnum.CLOSED.value or stage == WorkflowStageEnum.CLOSED.value:
+        if status == "closed":
             closed_label = QLabel("✓ Document Lifecycle Finalized and Closed")
             closed_label.setStyleSheet("color: #059669; font-weight: 600; font-size: 13px;")
             self.action_bar.addWidget(closed_label)
             return
 
-        assign_btn_text = "Reassign Staff" if (doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned") else "Assign Staff"
-        assign_btn = QPushButton(assign_btn_text)
+        assign_btn = QPushButton("Assign Staff")
         assign_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 20px; border-radius: 5px;")
         assign_btn.clicked.connect(self._hod_assign_employee)
         self.action_bar.addWidget(assign_btn)
 
         team_btn = QPushButton("Assign Team")
         team_btn.setStyleSheet("background-color: #475569; color: white; font-weight: 600; padding: 8px 18px; border-radius: 5px;")
-        team_btn.setToolTip("Assign one work item to multiple employees in this department")
         team_btn.clicked.connect(self._hod_assign_team)
         self.action_bar.addWidget(team_btn)
 
-        # HOD can also dispatch a reminder to assigned employee
-        if doc.assigned_employee_name and doc.assigned_employee_name != "Not Assigned":
-            rem_btn = QPushButton("⏰ Send Action Reminder")
-            rem_btn.setStyleSheet("background-color: #F59E0B; color: white; font-weight: 600; padding: 8px 16px; border-radius: 5px;")
-            rem_btn.clicked.connect(self._ds_send_reminder)
-            self.action_bar.addWidget(rem_btn)
-
-
     def _render_employee_actions(self):
-        doc = self.document
-        stage = doc.current_stage
-
-        if doc.status == DocumentStatusEnum.CLOSED.value or stage == WorkflowStageEnum.CLOSED.value:
+        if self._is_status("Closed", "closed"):
             closed_label = QLabel("✓ Document Lifecycle Finalized and Closed (Read-Only Archive)")
             closed_label.setStyleSheet("color: #059669; font-weight: 600; font-size: 13px;")
             self.action_bar.addWidget(closed_label)
@@ -1303,7 +1686,7 @@ class DocumentViewer(QWidget):
                 return
 
             doc_id = self.document.id or 0
-            updated_doc = routing_service.save_director_remark(doc_id, remark=remark_text)
+            updated_doc = routing_service.save_director_remark(doc_id, remark=remark_text, expected_version=getattr(self.document, "version", None))
             self.document = updated_doc
             self.update_view_data(updated_doc)
             QMessageBox.information(self, "Remark Saved", "Director remark saved successfully.")
@@ -1319,11 +1702,27 @@ class DocumentViewer(QWidget):
         self._action_in_progress = True
         try:
             remark_text = self.dir_remark_edit.toPlainText().strip() or (self.document.director_remark or "")
-            if remark_text:
-                routing_service.save_director_remark(self.document.id or 0, remark=remark_text)
-
             doc_id = self.document.id or 0
-            updated_doc = routing_service.return_to_ds(doc_id, remarks=remark_text or None)
+
+            # Saving the remark is a separate versioned mutation.  It increments
+            # document.version, so Return-to-DS must use the version returned by
+            # that save instead of the stale version held by the viewer.
+            current_version = getattr(self.document, "version", None)
+            if remark_text:
+                saved_doc = routing_service.save_director_remark(
+                    doc_id,
+                    remark=remark_text,
+                    expected_version=current_version,
+                )
+                self.document = saved_doc
+                self.update_view_data(saved_doc)
+                current_version = getattr(saved_doc, "version", None)
+
+            updated_doc = routing_service.return_to_ds(
+                doc_id,
+                remarks=remark_text or None,
+                expected_version=current_version,
+            )
             QMessageBox.information(
                 self,
                 "Returned to DS",
@@ -1347,7 +1746,7 @@ class DocumentViewer(QWidget):
                 return
 
             doc_id = self.document.id or 0
-            updated_doc = routing_service.save_hod_remark(doc_id, remark=remark_text)
+            updated_doc = routing_service.save_hod_remark(doc_id, remark=remark_text, expected_version=getattr(self.document, "version", None))
             self.document = updated_doc
             self.update_view_data(updated_doc)
             QMessageBox.information(self, "Remark Saved", "HOD remark saved successfully.")
@@ -1366,19 +1765,37 @@ class DocumentViewer(QWidget):
             if dialog.exec():
                 data = dialog.get_data()
                 doc_id = self.document.id or 0
-                assignment = assignment_service.assign_employee(
+                routing_id = self._resolve_hod_routing_id()
+                if not routing_id:
+                    raise RuntimeError(
+                        "No active canonical HOD routing branch was found for this document."
+                    )
+
+                assignment = get_repository().assign_branch_employee(
                     document_id=doc_id,
-                    assigned_to_id=data["assigned_to_id"],
-                    instructions=data["instructions"],
-                    requires_hod_validation=data.get("requires_hod_validation", False)
+                    routing_id=int(routing_id),
+                    assigned_to_user_id=int(data["assigned_to_id"]),
+                    instructions=data.get("instructions"),
+                    change_reason=data.get("change_reason"),
+                    expected_version=getattr(self.document, "version", None),
                 )
                 updated_doc = document_service.get_document(doc_id)
                 self.document = updated_doc
                 self.update_view_data(updated_doc)
+                assigned_name = (
+                    assignment.get("assigned_to_name")
+                    or assignment.get("employee_name")
+                    or data.get("employee_name")
+                    or "the selected employee"
+                    if isinstance(assignment, dict)
+                    else getattr(assignment, "assigned_to_name", None)
+                    or data.get("employee_name")
+                    or "the selected employee"
+                )
                 QMessageBox.information(
                     self,
                     "Task Assigned",
-                    f"Document assigned to {assignment.assigned_to_name} successfully."
+                    f"Document assigned to {assigned_name} successfully."
                 )
                 self.document_updated.emit(updated_doc)
         except Exception as ex:
@@ -1396,23 +1813,45 @@ class DocumentViewer(QWidget):
         self._ds_route()
 
     def _resolve_hod_routing_id(self) -> Optional[int]:
-        """Resolve the active canonical department branch for HOD team assignment."""
+        """Resolve the HOD branch; ask which branch when multiple departments are routed."""
         doc_id = self.document.id or 0
         if not doc_id:
             return None
         try:
-            branches = get_repository().get_document_branches(doc_id) or []
-            target_department_id = getattr(self.document, "target_department_id", None)
-            for branch in branches:
-                if not branch or branch.get("is_active") is False:
-                    continue
-                if branch.get("branch_type") != "DEPARTMENT_HOD":
-                    continue
-                if target_department_id is None or branch.get("department_id") == target_department_id:
-                    return branch.get("id") or branch.get("routing_id")
+            branches = [
+                b for b in (get_repository().get_document_branches(doc_id) or [])
+                if self._branch_is_visible_in_context(b)
+                and str(b.get("branch_type") or "").upper() == "DEPARTMENT_HOD"
+            ]
         except Exception:
-            pass
-        return None
+            branches = []
+
+        if not branches:
+            return None
+        if len(branches) == 1:
+            return self._routing_id(branches[0])
+
+        from PySide6.QtWidgets import QInputDialog
+        items = []
+        by_label = {}
+        for branch in branches:
+            rid = self._routing_id(branch)
+            dept = self._branch_department_name(branch)
+            label = f"{dept} (Routing Branch {rid})" if rid is not None else dept
+            items.append(label)
+            by_label[label] = rid
+
+        selected, ok = QInputDialog.getItem(
+            self,
+            "Select HOD Routing Branch",
+            "This document has multiple HOD department branches. Select the branch to manage:",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        return by_label.get(selected)
 
     def _hod_assign_team(self):
         if getattr(self, "_action_in_progress", False):
@@ -1455,11 +1894,11 @@ class DocumentViewer(QWidget):
             return
 
         is_returned = self.document.status in (
-            DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+            DocumentStatusEnum.RETURNED_TO_DS.value,
             "Director Review Completed",
             "DIRECTOR_REVIEW_COMPLETED",
         )
-        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
+        if not is_returned:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
@@ -1573,13 +2012,13 @@ class DocumentViewer(QWidget):
 
         is_returned = (
             self.document.status in (
-                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                DocumentStatusEnum.RETURNED_TO_DS.value,
                 "Director Review Completed",
                 "DIRECTOR_REVIEW_COMPLETED",
             )
         )
 
-        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
+        if not is_returned:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
@@ -1656,13 +2095,13 @@ class DocumentViewer(QWidget):
 
         is_returned = (
             self.document.status in (
-                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                DocumentStatusEnum.RETURNED_TO_DS.value,
                 "Director Review Completed",
                 "DIRECTOR_REVIEW_COMPLETED",
             )
         )
 
-        if self.document.current_stage == WorkflowStageEnum.DIRECTOR.value or not is_returned:
+        if not is_returned:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
@@ -1702,7 +2141,7 @@ class DocumentViewer(QWidget):
     def _ds_send_reminder(self):
         if getattr(self, "_action_in_progress", False):
             return
-        if self.document.current_stage in (WorkflowStageEnum.DS.value, WorkflowStageEnum.DIRECTOR.value, "DS", "DIRECTOR") or not self.document.target_department_id:
+        if not self._has_confirmed_operational_routing():
             QMessageBox.warning(
                 self,
                 "Routing Required",
@@ -1748,18 +2187,13 @@ class DocumentViewer(QWidget):
             return
         is_reviewed = (
             self.document.status in (
-                DocumentStatusEnum.DIRECTOR_REVIEW_COMPLETED.value,
+                DocumentStatusEnum.RETURNED_TO_DS.value,
                 "Director Review Completed",
                 "DIRECTOR_REVIEW_COMPLETED",
             )
-            or self.document.current_stage in (
-                WorkflowStageEnum.HOD.value,
-                WorkflowStageEnum.EMPLOYEE.value,
-                "HOD",
-                "EMPLOYEE",
-            )
+            or self._has_confirmed_operational_routing()
         )
-        if not is_reviewed and self.document.current_stage in (WorkflowStageEnum.DS.value, "DS"):
+        if not is_reviewed:
             QMessageBox.warning(
                 self,
                 "Director Review Required",
@@ -1817,10 +2251,21 @@ class DocumentViewer(QWidget):
                 return
 
             doc_id = self.document.id or 0
+            work_assignment_id = self._selected_work_assignment_id
+            if not work_assignment_id:
+                QMessageBox.warning(
+                    self,
+                    "Work Assignment Required",
+                    "This employee view requires a specific active Work Assignment before progress can be submitted."
+                )
+                return
+
             update = progress_service.submit_progress(
                 document_id=doc_id,
                 description=description,
-                attachment_file_path=self.selected_progress_attachment
+                work_assignment_id=work_assignment_id,
+                attachment_file_path=self.selected_progress_attachment,
+                expected_version=getattr(self.document, "version", None),
             )
             QMessageBox.information(
                 self,
@@ -1831,9 +2276,10 @@ class DocumentViewer(QWidget):
             self._clear_progress_attachment()
 
             updated_doc = document_service.get_document(doc_id)
-            self.document = updated_doc
-            self.document_updated.emit(updated_doc)
-            self.close_requested.emit()
+            if updated_doc:
+                self.document = updated_doc
+            self.update_view_data(self.document)
+            self.document_updated.emit(self.document)
         except Exception as ex:
             QMessageBox.critical(self, "Submission Error", f"Failed to submit progress update: {str(ex)}")
         finally:

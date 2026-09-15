@@ -25,17 +25,35 @@ class AssignmentService:
         assigned_to_id: int,
         instructions: Optional[str] = None,
         requires_hod_validation: bool = False,
+        routing_id: Optional[int] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> WorkAssignmentModel:
-        """HOD delegates work to one employee."""
+        """
+        HOD delegates work to one employee on a canonical routing branch.
+
+        routing_id identifies the DocumentDepartmentRouting branch.
+        The repository/backend remains authoritative for role,
+        department, branch, and concurrency validation.
+        """
         if not assigned_to_id:
             raise ValueError("An employee must be selected.")
 
+        if routing_id is None:
+            raise ValueError(
+                "routing_id is required for canonical employee assignment."
+            )
+
         repo = get_repository()
+
         return repo.assign_employee(
             document_id=document_id,
             assigned_to_id=assigned_to_id,
             instructions=instructions,
             requires_hod_validation=requires_hod_validation,
+            routing_id=int(routing_id),
+            change_reason=change_reason,
+            expected_version=expected_version,
         )
 
     # =========================================================
@@ -62,6 +80,7 @@ class AssignmentService:
             raise ValueError("At least one team member must be selected.")
 
         repo = get_repository()
+
         return repo.hod_assign_team(
             document_id=document_id,
             member_user_ids=member_user_ids,
@@ -92,6 +111,7 @@ class AssignmentService:
             raise ValueError("At least one team member must be selected.")
 
         repo = get_repository()
+
         return repo.ds_assign_team(
             document_id=document_id,
             member_user_ids=member_user_ids,
@@ -103,22 +123,55 @@ class AssignmentService:
         )
 
     # =========================================================
-    # LEGACY MULTI-ASSIGNMENT COMPATIBILITY
+    # CANONICAL BRANCH ASSIGNMENT
     # =========================================================
 
-    def assign_multi(
+    def assign_branch_employee(
         self,
         document_id: int,
-        assignments_list: List[dict],
-    ) -> List[dict]:
+        routing_id: int,
+        assigned_to_user_id: int,
+        instructions: Optional[str] = None,
+        change_reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
-        Legacy multi-assignment wrapper.
+        Assign an employee directly to a canonical routing branch.
 
-        New DS routing should prefer canonical branches via
-        RoutingService.route_canonical_branches().
+        This is the preferred assignment method for new workflow code.
+        The backend validates whether the current user is allowed to
+        assign staff on the specified branch.
+        """
+        if not routing_id:
+            raise ValueError("A routing branch must be selected.")
+
+        if not assigned_to_user_id:
+            raise ValueError("An employee must be selected.")
+
+        repo = get_repository()
+
+        return repo.assign_branch_employee(
+            document_id=document_id,
+            routing_id=int(routing_id),
+            assigned_to_user_id=int(assigned_to_user_id),
+            instructions=instructions,
+            change_reason=change_reason,
+            expected_version=expected_version,
+        )
+
+    # =========================================================
+    # BRANCH RETRIEVAL
+    # =========================================================
+
+    def get_document_branches(
+        self,
+        document_id: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve the canonical routing branches for a document.
         """
         repo = get_repository()
-        return repo.assign_multi(document_id, assignments_list)
+        return repo.get_document_branches(document_id)
 
     # =========================================================
     # ASSIGNMENT RETRIEVAL / UPDATE
@@ -128,7 +181,9 @@ class AssignmentService:
         self,
         document_id: int,
     ) -> List[dict]:
-        """Retrieve assignment records for a document."""
+        """
+        Retrieve assignment records for a document.
+        """
         repo = get_repository()
         return repo.get_document_assignments(document_id)
 
@@ -138,21 +193,20 @@ class AssignmentService:
         assignment_id: int,
         update_dict: Dict[str, Any],
     ) -> dict:
-        """Update an existing assignment through the backend."""
+        """
+        Update an existing assignment through the backend.
+
+        New workflow code should prefer immutable assignment history and
+        canonical branch-specific operations where applicable.
+        """
         repo = get_repository()
+
         return repo.update_document_assignment(
             document_id,
             assignment_id,
             update_dict,
         )
 
-    def get_assignments(
-        self,
-        document_id: int,
-    ) -> List[WorkAssignmentModel]:
-        """Retrieve assignment history for a document."""
-        repo = get_repository()
-        return repo.get_assignments(document_id)
 
 
 # Global singleton service instance

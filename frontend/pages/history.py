@@ -78,10 +78,10 @@ class DocumentAuditCard(QFrame):
         title_lbl = QLabel(self.doc.title or "Untitled")
         title_lbl.setStyleSheet("color: #334155; font-size: 13px;")
 
-        dept_lbl = QLabel(f"• {self.doc.department or self.doc.target_department_name or 'General'}")
+        dept_lbl = QLabel(f"• {self.doc.suggested_department_name or 'General'}")
         dept_lbl.setStyleSheet("color: #64748B; font-size: 12px;")
 
-        stage_lbl = QLabel(f"[{self.doc.current_stage or 'DS'}]")
+        stage_lbl = QLabel(f"[{self.doc.status or 'Unknown'}]")
         stage_lbl.setStyleSheet("color: #2563EB; font-weight: 600; font-size: 11px;")
 
         header.addWidget(ref_lbl)

@@ -43,6 +43,7 @@ class DocumentPreview(QFrame):
         self.setObjectName("contentCard")
         self._current_resolved_path: Optional[str] = None
         self._pdf_doc: Optional[Any] = None
+        self._image_pixmap: Optional[QPixmap] = None
 
         if HAS_QT_PDF:
             self._pdf_doc = QPdfDocument(self)
@@ -146,7 +147,7 @@ class DocumentPreview(QFrame):
 
         self.stack.addWidget(self.fallback_frame)
 
-        self.stack.setMinimumHeight(240)
+        self.stack.setMinimumHeight(220)
         root_layout.addWidget(self.stack, 1)
 
     def _resolve_document_file_path(self) -> Optional[str]:
@@ -178,6 +179,21 @@ class DocumentPreview(QFrame):
 
         return None
 
+    def _rescale_image(self):
+        if self._image_pixmap is None or self._image_pixmap.isNull():
+            return
+        viewport = self.image_scroll.viewport().size()
+        target = viewport - self.image_scroll.contentsMargins().topLeft() - self.image_scroll.contentsMargins().bottomRight()
+        width = max(120, target.width() - 12)
+        height = max(120, target.height() - 12)
+        self.image_label.setPixmap(
+            self._image_pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale_image()
+
     def update_preview(self):
         """Updates the preview area according to the current document."""
         file_path = self._resolve_document_file_path()
@@ -205,8 +221,8 @@ class DocumentPreview(QFrame):
                 self.pdf_toolbar.setVisible(False)
                 self.stack.setCurrentIndex(1)
                 pixmap = QPixmap(file_path)
-                scaled = pixmap.scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.image_label.setPixmap(scaled)
+                self._image_pixmap = pixmap
+                self._rescale_image()
                 return
 
             elif ext in (".txt", ".log", ".csv", ".json"):

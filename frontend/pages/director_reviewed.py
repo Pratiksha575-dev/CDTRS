@@ -116,8 +116,7 @@ class DirectorReviewedPage(QWidget):
         all_docs = document_service.get_documents()
         self.documents = [
             d for d in all_docs
-            if (bool(d.director_remark) or d.status == "Director Review Completed")
-            and d.current_stage != "DIRECTOR"
+            if bool(d.director_remark) or d.status == "Director Review Completed"
         ]
         self._apply_search()
 
@@ -132,7 +131,7 @@ class DirectorReviewedPage(QWidget):
                 if query in (d.reference or "").lower()
                 or query in (d.title or "").lower()
                 or query in (d.source or "").lower()
-                or query in (d.target_department_name or "").lower()
+                or query in (d.suggested_department_name or "").lower()
                 or query in (d.director_remark or "").lower()
             ]
 

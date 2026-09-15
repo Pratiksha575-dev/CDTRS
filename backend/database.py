@@ -53,3 +53,12 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def ensure_enum_compatibility(engine):
+    try:
+        if engine.dialect.name != "postgresql": return
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'priority_enum') THEN ALTER TYPE priority_enum ADD VALUE IF NOT EXISTS 'CRITICAL'; END IF; END $$;"))
+    except Exception:
+        pass

@@ -87,6 +87,7 @@ class WorkflowStage(str, enum.Enum):
 
 
 class Priority(str, enum.Enum):
+    CRITICAL = "CRITICAL"
     HIGH   = "HIGH"
     MEDIUM = "MEDIUM"
     LOW    = "LOW"
@@ -205,7 +206,6 @@ class User(Base):
     role = Column(SAEnum(UserRole, name="user_role"), nullable=False)
     employee_code = Column(String(50), nullable=True)
     designation = Column(String(100), nullable=True)
-    department_name = Column(String(100), nullable=True)
     managed_depts = Column(Text, nullable=True)
 
     email = Column(String(255), unique=True, nullable=True, index=True)
@@ -232,8 +232,7 @@ class User(Base):
 
     @property
     def department(self) -> Optional[str]:
-        if self.department_name:
-            return self.department_name
+        """Return the user's department name from the canonical Department relationship."""
         if self.department_rel:
             return self.department_rel.name
         return None
@@ -304,9 +303,6 @@ class Document(Base):
     mode = Column(String(50), nullable=False)
     priority = Column(SAEnum(Priority, name="priority_enum"), default=Priority.MEDIUM, nullable=False)
     status = Column(SAEnum(DocumentStatus, name="document_status"), default=DocumentStatus.RECEIVED, nullable=False)
-    current_stage = Column(SAEnum(WorkflowStage, name="workflow_stage"), default=WorkflowStage.DS, nullable=False)
-    current_owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    target_department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     # Source & OCR linkages
@@ -316,7 +312,6 @@ class Document(Base):
     # Optimistic Concurrency Control
     version = Column(Integer, default=1, nullable=False)
 
-    # Latest remarks for fast UI lookup (legacy compatibility)
     director_remark = Column(Text, nullable=True)
     hod_remark = Column(Text, nullable=True)
 
@@ -326,12 +321,9 @@ class Document(Base):
 
     # Relationships
     creator             = relationship("User", foreign_keys=[created_by])
-    current_owner       = relationship("User", foreign_keys=[current_owner_id])
-    target_department   = relationship("Department", foreign_keys=[target_department_id])
     source_message      = relationship("IncomingMessage", back_populates="documents")
     routes              = relationship("DocumentRoute", back_populates="document", cascade="all, delete-orphan")
     assignments         = relationship("WorkAssignment", back_populates="document", cascade="all, delete-orphan")
-    doc_assignments     = relationship("DocumentAssignment", back_populates="document", cascade="all, delete-orphan")
     progress_updates    = relationship("ProgressUpdate", back_populates="document", cascade="all, delete-orphan")
     attachments         = relationship("Attachment", back_populates="document", cascade="all, delete-orphan")
     workflow_history    = relationship("WorkflowHistory", back_populates="document", cascade="all, delete-orphan")
@@ -349,34 +341,9 @@ class Document(Base):
         return self.department_routings
 
     @property
-    def target_department_name(self) -> Optional[str]:
-        if self.target_department:
-            return self.target_department.name
-        return None
+    def work_assignments(self):
+        return self.assignments
 
-    @property
-    def assigned_employee_name(self) -> Optional[str]:
-        for a in self.assignments:
-            if a.is_active and a.assigned_to:
-                return a.assigned_to.full_name
-        for da in self.doc_assignments:
-            if da.assigned_employee:
-                return da.assigned_employee.full_name
-        if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner:
-            return self.current_owner.full_name
-        return None
-
-    @property
-    def assigned_employee_id(self) -> Optional[int]:
-        for a in self.assignments:
-            if a.is_active and a.assigned_to_user_id:
-                return a.assigned_to_user_id
-        for da in self.doc_assignments:
-            if da.assigned_employee_id:
-                return da.assigned_employee_id
-        if self.current_stage == WorkflowStage.EMPLOYEE and self.current_owner_id:
-            return self.current_owner_id
-        return None
 
     @property
     def suggested_department_name(self) -> Optional[str]:
@@ -454,11 +421,8 @@ class DocumentDepartmentRouting(Base):
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False, index=True)
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
-    department_name = Column(String(100), nullable=True)  # Legacy read compatibility
     status = Column(SAEnum(DocumentStatus, name="doc_dept_status"), default=DocumentStatus.UNDER_HOD_PROCESSING, nullable=False)
-    assigned_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)  # Legacy read
-    assigned_employee_name = Column(String(150), nullable=True)                        # Legacy read
-    hod_instructions = Column(Text, nullable=True)                                     # Legacy read
+    instructions = Column(Text, nullable=True)
     routed_at = Column(DateTime, default=datetime.now)
     completed_at = Column(DateTime, nullable=True)
 
@@ -501,10 +465,12 @@ class WorkAssignment(Base):
     completed_at = Column(DateTime, nullable=True)
 
     # Canonical Evolved Fields
-    routing_id = Column(Integer, ForeignKey("document_department_routings.id"), nullable=True)
+    routing_id = Column(Integer, ForeignKey("document_department_routings.id"), nullable=False)
     assigned_to_context_membership_id = Column(Integer, ForeignKey("work_context_memberships.id"), nullable=True)
     superseded_by_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=True)
     change_reason = Column(Text, nullable=True)
+    team_name = Column(String(150), nullable=True)
+    is_team = Column(Boolean, default=False, nullable=False)
 
     # Relationships
     document             = relationship("Document", back_populates="assignments")
@@ -540,38 +506,9 @@ class WorkAssignmentMember(Base):
     user = relationship("User", foreign_keys=[user_id])
     context_membership = relationship("WorkContextMembership", foreign_keys=[context_membership_id])
 
-
-# =========================================================
-# DOCUMENT ASSIGNMENTS (Legacy Multi-Dept / Read Compatibility Only)
-# =========================================================
-
-class DocumentAssignment(Base):
-    __tablename__ = "document_assignments"
-
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.doc_id"), nullable=False)
-    department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)
-    assigned_employee_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    assigned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    requires_hod_validation = Column(Boolean, default=False)
-    assignment_status = Column(SAEnum(AssignmentStatus, name="assign_status_enum"), default=AssignmentStatus.PENDING_EMPLOYEE, nullable=False)
-    instructions = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
-    completed_at = Column(DateTime, nullable=True)
-
-    # Relationships
-    document          = relationship("Document", back_populates="doc_assignments")
-    department        = relationship("Department", foreign_keys=[department_id])
-    assigned_employee = relationship("User", foreign_keys=[assigned_employee_id])
-    assigned_by       = relationship("User", foreign_keys=[assigned_by_user_id])
-
     @property
-    def department_name(self) -> Optional[str]:
-        return self.department.name if self.department else None
-
-    @property
-    def employee_name(self) -> Optional[str]:
-        return self.assigned_employee.full_name if self.assigned_employee else None
+    def user_name(self) -> Optional[str]:
+        return self.user.full_name if self.user else None
 
 
 # =========================================================
@@ -593,7 +530,7 @@ class ProgressUpdate(Base):
     created_at = Column(DateTime, default=datetime.now)
 
     # Canonical Evolved Link to WorkAssignment
-    work_assignment_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=True)
+    work_assignment_id = Column(Integer, ForeignKey("work_assignments.id"), nullable=False)
 
     # Relationships
     document        = relationship("Document", back_populates="progress_updates")

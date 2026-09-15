@@ -16,6 +16,7 @@
     { "name": "ACCT", "code": "ACCT" },
     { "name": "MISC", "code": "MISC" }
   ],
+
   "system_users": [
     {
       "username": "admin",
@@ -28,8 +29,15 @@
       "department": "ADMIN",
       "managed_depts": ["*"],
       "designation": "System & Network Administrator",
-      "default_password": "cdtrs@admin"
+      "default_password": "cdtrs@admin",
+      "contexts": [
+        {
+          "context": "ADMIN",
+          "department_code": "ADMIN"
+        }
+      ]
     },
+
     {
       "username": "director",
       "employee_code": "DIR-001",
@@ -41,8 +49,15 @@
       "department": "DS",
       "managed_depts": ["*"],
       "designation": "Executive Director / Outstanding Scientist",
-      "default_password": "cdtrs@director"
+      "default_password": "cdtrs@director",
+      "contexts": [
+        {
+          "context": "DIRECTOR",
+          "department_code": "DS"
+        }
+      ]
     },
+
     {
       "username": "ds_user",
       "employee_code": "DS-001",
@@ -54,8 +69,15 @@
       "department": "DS",
       "managed_depts": ["DS"],
       "designation": "Principal Private Secretary (PPS) to Director",
-      "default_password": "cdtrs@ds"
+      "default_password": "cdtrs@ds",
+      "contexts": [
+        {
+          "context": "DS",
+          "department_code": "DS"
+        }
+      ]
     },
+
     {
       "username": "tso_user",
       "employee_code": "TSO-FCTD-001",
@@ -67,8 +89,19 @@
       "department": "FCTD",
       "managed_depts": ["DS", "FCTD"],
       "designation": "TSO to Director / Scientist 'E' (FCTD)",
-      "default_password": "cdtrs@tso"
+      "default_password": "cdtrs@tso",
+      "contexts": [
+        {
+          "context": "TSO",
+          "department_code": "DS"
+        },
+        {
+          "context": "EMPLOYEE",
+          "department_code": "FCTD"
+        }
+      ]
     },
+
     {
       "username": "hod_pstd",
       "employee_code": "HOD-PSTD-001",
@@ -80,8 +113,19 @@
       "department": "PSTD",
       "managed_depts": ["PSTD", "ESFS"],
       "designation": "Scientist 'G' / Head of Division (PSTD & ESFS)",
-      "default_password": "cdtrs@hod"
+      "default_password": "cdtrs@hod",
+      "contexts": [
+        {
+          "context": "HOD",
+          "department_code": "PSTD"
+        },
+        {
+          "context": "HOD",
+          "department_code": "ESFS"
+        }
+      ]
     },
+
     {
       "username": "hod_fctd",
       "employee_code": "HOD-FCTD-001",
@@ -93,8 +137,19 @@
       "department": "FCTD",
       "managed_depts": ["FCTD", "CEC"],
       "designation": "Scientist 'G' / Head of Division (FCTD & CEC)",
-      "default_password": "cdtrs@hod"
+      "default_password": "cdtrs@hod",
+      "contexts": [
+        {
+          "context": "HOD",
+          "department_code": "FCTD"
+        },
+        {
+          "context": "HOD",
+          "department_code": "CEC"
+        }
+      ]
     },
+
     {
       "username": "hod_cit",
       "employee_code": "HOD-CIT-001",
@@ -106,8 +161,19 @@
       "department": "C&IT",
       "managed_depts": ["C&IT", "TM"],
       "designation": "Scientist 'F' / Head C&IT & Technology Management",
-      "default_password": "cdtrs@hod"
+      "default_password": "cdtrs@hod",
+      "contexts": [
+        {
+          "context": "HOD",
+          "department_code": "CIT"
+        },
+        {
+          "context": "HOD",
+          "department_code": "TM"
+        }
+      ]
     },
+
     {
       "username": "hod_admin",
       "employee_code": "HOD-ADM-001",
@@ -119,8 +185,27 @@
       "department": "ADMIN",
       "managed_depts": ["ADMIN", "ACCT", "MISC", "MMG_STORES"],
       "designation": "Senior Administrative Officer / Head Admin",
-      "default_password": "cdtrs@hod"
+      "default_password": "cdtrs@hod",
+      "contexts": [
+        {
+          "context": "HOD",
+          "department_code": "ADMIN"
+        },
+        {
+          "context": "HOD",
+          "department_code": "ACCT"
+        },
+        {
+          "context": "HOD",
+          "department_code": "MISC"
+        },
+        {
+          "context": "HOD",
+          "department_code": "MMG_STORES"
+        }
+      ]
     },
+
     {
       "username": "hod_ptc",
       "employee_code": "HOD-PTC-001",
@@ -132,9 +217,28 @@
       "department": "P&TC",
       "managed_depts": ["P&TC", "PC", "CER", "MBT"],
       "designation": "Scientist 'G' / Head P&TC, PC & Research",
-      "default_password": "cdtrs@hod"
+      "default_password": "cdtrs@hod",
+      "contexts": [
+        {
+          "context": "HOD",
+          "department_code": "PTC"
+        },
+        {
+          "context": "HOD",
+          "department_code": "PC"
+        },
+        {
+          "context": "HOD",
+          "department_code": "CER"
+        },
+        {
+          "context": "HOD",
+          "department_code": "MBT"
+        }
+      ]
     }
   ],
+
   "employees": [
     {
       "employee_code": "EMP-PSTD-001",
@@ -146,68 +250,130 @@
       "email": "anil.kumar@cdtrs.gov.in",
       "outlook_email": "anil.kumar@outlook.com",
       "gov_email": "anil.kumar@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "PSTD"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-PSTD-002",
       "username": "emp_vikram",
       "full_name": "Vikram Malhotra",
       "department": "PSTD",
-      "managed_depts": [],
+      "managed_depts": ["ESFS"],
       "designation": "Technical Officer / Power Electronics",
       "email": "vikram.malhotra@cdtrs.gov.in",
       "outlook_email": "vikram.malhotra@outlook.com",
       "gov_email": "vikram.malhotra@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "PSTD"
+        },
+        {
+          "context": "HOD",
+          "department_code": "ESFS"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-FCTD-002",
       "username": "emp_sneha",
       "full_name": "Sneha Deshmukh",
       "department": "FCTD",
-      "managed_depts": [],
+      "managed_depts": ["CEC"],
       "designation": "Scientist 'D' (Electrochemical Systems)",
       "email": "sneha.deshmukh@cdtrs.gov.in",
       "outlook_email": "sneha.deshmukh@outlook.com",
       "gov_email": "sneha.deshmukh@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "FCTD"
+        },
+        {
+          "context": "HOD",
+          "department_code": "CEC"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-FCTD-003",
       "username": "emp_rahul",
       "full_name": "Rahul Sharma",
       "department": "FCTD",
-      "managed_depts": [],
+      "managed_depts": ["PSTD"],
       "designation": "Scientist 'C' (Fuel Cells)",
       "email": "rahul.sharma@cdtrs.gov.in",
       "outlook_email": "rahul.sharma@outlook.com",
       "gov_email": "rahul.sharma@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "FCTD"
+        },
+        {
+          "context": "HOD",
+          "department_code": "PSTD"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-CIT-001",
       "username": "emp_sunil",
       "full_name": "Sunil Gupta",
       "department": "C&IT",
-      "managed_depts": [],
+      "managed_depts": ["TM"],
       "designation": "Network & Systems Engineer",
       "email": "sunil.gupta@cdtrs.gov.in",
       "outlook_email": "sunil.gupta@outlook.com",
       "gov_email": "sunil.gupta@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "CIT"
+        },
+        {
+          "context": "HOD",
+          "department_code": "TM"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-ADM-001",
       "username": "emp_pooja",
       "full_name": "Pooja Nair",
       "department": "ADMIN",
-      "managed_depts": [],
+      "managed_depts": ["ACCT"],
       "designation": "Assistant Administrative Officer",
       "email": "pooja.nair@cdtrs.gov.in",
       "outlook_email": "pooja.nair@outlook.com",
       "gov_email": "pooja.nair@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "ADMIN"
+        },
+        {
+          "context": "HOD",
+          "department_code": "ACCT"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-ACCT-001",
       "username": "emp_kamble",
@@ -218,19 +384,36 @@
       "email": "kamble.mm@cdtrs.gov.in",
       "outlook_email": "kamble.mm@outlook.com",
       "gov_email": "kamble.mm@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "ACCT"
+        }
+      ]
     },
+
     {
       "employee_code": "EMP-MMG-001",
       "username": "emp_rajesh",
       "full_name": "Rajesh Varma",
       "department": "MMG_STORES",
-      "managed_depts": [],
+      "managed_depts": ["MISC"],
       "designation": "Stores & Material Management Officer",
       "email": "rajesh.varma@cdtrs.gov.in",
       "outlook_email": "rajesh.varma@outlook.com",
       "gov_email": "rajesh.varma@nic.in",
-      "default_password": "cdtrs@emp"
+      "default_password": "cdtrs@emp",
+      "contexts": [
+        {
+          "context": "EMPLOYEE",
+          "department_code": "MMG_STORES"
+        },
+        {
+          "context": "HOD",
+          "department_code": "MISC"
+        }
+      ]
     }
   ]
 }
