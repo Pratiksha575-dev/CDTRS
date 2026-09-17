@@ -1,1039 +1,530 @@
-from datetime import datetime
+"""Live API repository.
+
+The only place in the frontend that knows about HTTP.  Method names follow the
+workflow vocabulary, so a reader can map any call straight onto a rule in the
+spec: route_document opens branches, assign_work creates one work item per
+person, close_document is DS-only, and so on.
+"""
+
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional
 
-from api.client import api_client
+from api.client import APIClient, api_client
 from api.endpoints import Endpoints
-from api.exceptions import UnauthorizedError
 from models import (
     AttachmentModel,
+    BranchModel,
+    DepartmentModel,
+    DirectorReviewModel,
     DocumentModel,
     NotificationModel,
-    ProgressUpdateModel,
+    ProgressModel,
+    RemarkModel,
     UserModel,
-    WorkAssignmentModel,
+    WorkItemModel,
     WorkflowEventModel,
 )
-from models.department import DepartmentModel
-from models.enums import PriorityEnum, RoleEnum, RouteTypeEnum
+from models.user import ContextMembershipModel
 from repositories.base import BaseRepository
 
 
 class APIRepository(BaseRepository):
-    """
-    Production repository implementation communicating with the live FastAPI backend via APIClient.
-    Translates service calls into REST API requests against centralized Endpoints.
-    """
-
-    # Canonical routing types.
-    #
-    # Operational routing is represented by DocumentDepartmentRouting
-    # branches. Director review/return/follow-up are separate workflow
-    # actions and use their dedicated endpoints below.
-    ROUTE_TYPE_MAP = {
-        RouteTypeEnum.DEPARTMENT_HOD.value: RouteTypeEnum.DEPARTMENT_HOD.value,
-        RouteTypeEnum.DIRECT_EMPLOYEE.value: RouteTypeEnum.DIRECT_EMPLOYEE.value,
-        RouteTypeEnum.TSO.value: RouteTypeEnum.TSO.value,
-        "DS_TO_DIRECTOR": "INITIAL_DIRECTOR_REVIEW",
-        "DIRECTOR_TO_DS": "RETURN_TO_DS",
-        "DS_TO_HOD": "POST_REVIEW_TO_HOD",
-        "DS_TO_EMPLOYEE": "POST_REVIEW_TO_EMPLOYEE",
-        "DS_TO_DIRECTOR_FOLLOWUP": "FOLLOW_UP_TO_DIRECTOR",
-    }
-
-    def __init__(self):
+    def __init__(self, client: Optional[APIClient] = None):
+        # Share the module-level client: auth token and active work context are
+        # session state, and AuthService sets them on that same instance.  A
+        # private client here would silently send requests without the
+        # X-Work-Context-Id header.
+        self.client = client or api_client
         self._current_user: Optional[UserModel] = None
+        self._contexts: List[ContextMembershipModel] = []
 
     # =========================================================
-    # AUTHENTICATION & USER SESSION
+    # AUTHENTICATION & CONTEXT
     # =========================================================
 
     def authenticate(self, username: str, password: str) -> Optional[UserModel]:
-        """
-        Authenticate against the real backend and preserve the complete
-        context membership collection returned by the backend.
-
-        This is important because ContextManager/AuthService use the
-        authenticated UserModel as the source for the workspace selector.
-        A profile-only /auth/me response must not discard the memberships
-        returned by /auth/login or /auth/contexts.
-        """
-        payload = {"username": username.strip(), "password": password}
-
-        try:
-            response = api_client.post(Endpoints.AUTH_LOGIN, json=payload) or {}
-        except UnauthorizedError:
+        data = self.client.post(Endpoints.AUTH_LOGIN, json={"username": username, "password": password})
+        if not data:
             return None
-        except Exception:
-            raise
-
-        token = response.get("access_token")
-        if token:
-            api_client.set_auth_token(token)
-
-        user_data = response.get("user")
-        if not user_data:
-            user_data = api_client.get(Endpoints.AUTH_ME)
-
-        if not user_data:
-            return None
-
-        # The backend may provide memberships directly in the login response,
-        # or under /auth/me as context_memberships.
-        active_context_id = (
-            response.get("active_context_id")
-            or response.get("active_context_membership_id")
-            or user_data.get("active_context_id")
-            or user_data.get("active_context_membership_id")
-        )
-
-        contexts = (
-            response.get("contexts")
-            or response.get("context_memberships")
-            or user_data.get("contexts")
-            or user_data.get("context_memberships")
-            or []
-        )
-
-        # If login did not include memberships, explicitly retrieve the real
-        # backend context collection. Never manufacture contexts locally.
-        if not contexts and token:
-            try:
-                contexts = self.get_user_contexts()
-            except Exception:
-                contexts = []
-
-        if contexts:
-            user_data["context_memberships"] = contexts
-
-        if active_context_id is None and contexts:
-            active = next(
-                (
-                    c for c in contexts
-                    if c.get("is_active") is True
-                    or c.get("active") is True
-                ),
-                None,
-            )
-            if active:
-                active_context_id = active.get("id")
-
-        if active_context_id is not None:
-            user_data["active_context_id"] = active_context_id
-            user_data["active_context_membership_id"] = active_context_id
-            api_client.set_active_context_id(int(active_context_id))
-
-        self._current_user = UserModel.from_dict(user_data)
+        self.client.set_auth_token(data.get("access_token"))
+        self._current_user = UserModel.from_dict(data.get("user") or {})
+        self._contexts = [ContextMembershipModel.from_dict(c) for c in (data.get("contexts") or [])]
+        active = data.get("active_context")
+        if active:
+            self.client.set_active_context_id(active.get("id"))
         return self._current_user
 
     def get_current_user(self) -> Optional[UserModel]:
-        """
-        Return the authenticated user while preserving the complete context
-        membership state used by the workspace selector.
-        """
-        if not self._current_user and api_client._auth_token:
-            try:
-                user_data = api_client.get(Endpoints.AUTH_ME)
-                if not user_data:
-                    return None
-
-                contexts = (
-                    user_data.get("context_memberships")
-                    or user_data.get("contexts")
-                    or []
-                )
-
-                # /auth/me may return no memberships in some backend versions.
-                if not contexts:
-                    try:
-                        contexts = api_client.get(Endpoints.AUTH_CONTEXTS) or []
-                    except Exception:
-                        contexts = []
-
-                if contexts:
-                    user_data["context_memberships"] = contexts
-
-                active_id = (
-                    user_data.get("active_context_id")
-                    or user_data.get("active_context_membership_id")
-                    or api_client.get_active_context_id()
-                )
-
-                if active_id is None and contexts:
-                    # Prefer the backend-marked active membership; otherwise
-                    # leave selection to ContextManager.
-                    active = next(
-                        (
-                            c for c in contexts
-                            if c.get("is_active") is True
-                            or c.get("active") is True
-                        ),
-                        None,
-                    )
-                    if active:
-                        active_id = active.get("id")
-
-                if active_id is not None:
-                    user_data["active_context_id"] = active_id
-                    user_data["active_context_membership_id"] = active_id
-                    api_client.set_active_context_id(int(active_id))
-
-                self._current_user = UserModel.from_dict(user_data)
-            except Exception:
-                return None
+        if self._current_user is None:
+            data = self.client.get(Endpoints.AUTH_ME)
+            if data:
+                self._current_user = UserModel.from_dict(data)
         return self._current_user
 
     def logout(self) -> None:
-        """Terminates active session and clears auth token."""
-        try:
-            api_client.post(Endpoints.AUTH_LOGOUT)
-        except Exception:
-            pass
-        finally:
-            api_client.clear_auth_token()
-            self._current_user = None
-
-    def get_user_contexts(self) -> List[Dict[str, Any]]:
-        """Retrieves all active work context memberships for the current user."""
-        try:
-            contexts = api_client.get(Endpoints.AUTH_CONTEXTS) or []
-            if self._current_user is not None:
-                self._current_user.set_contexts(contexts)
-            return contexts
-        except Exception:
-            return []
-
-    def switch_context(self, context_membership_id: int) -> Dict[str, Any]:
-        """
-        Switches the active operational context.
-
-        The backend validates the membership. The client then places the
-        selected membership ID in X-Work-Context-Id for subsequent requests.
-        """
-        payload = {"context_membership_id": int(context_membership_id)}
-        result = api_client.post(Endpoints.AUTH_SWITCH_CONTEXT, json=payload) or {}
-
-        selected_id = result.get("id") or context_membership_id
-        api_client.set_active_context_id(int(selected_id))
-
-        if self._current_user is not None:
-            self._current_user.set_active_context(int(selected_id))
-            contexts = self._current_user.get_contexts()
-            for context in contexts:
-                context.is_active = (context.id == int(selected_id))
-
-        return result
-
-    def get_active_context_id(self) -> Optional[int]:
-        """Return the membership ID currently attached to API requests."""
-        return api_client.get_active_context_id()
-
-    def clear_active_context(self) -> None:
-        """Clear only the client-side active context."""
-        api_client.set_active_context_id(None)
+        self.client.clear_auth_token()
+        self.client.set_active_context_id(None)
+        self._current_user = None
+        self._contexts = []
 
     def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
-        """Resets user password via backend reset endpoint requiring current password."""
-        payload = {
-            "username": username.strip(),
-            "old_password": old_password,
-            "new_password": new_password.strip()
-        }
-        response = api_client.post(Endpoints.AUTH_RESET_PASSWORD, json=payload)
-        return bool(response)
+        result = self.client.post(
+            Endpoints.AUTH_CHANGE_PASSWORD,
+            json={"current_password": old_password, "new_password": new_password},
+        )
+        return bool(result)
 
-    def get_departments(self) -> List[DepartmentModel]:
-        """Retrieves list of all institutional departments from backend."""
-        try:
-            data = api_client.get(Endpoints.DEPARTMENTS_LIST)
-            return [DepartmentModel.from_dict(d) for d in data]
-        except Exception:
-            # Return empty list — callers must handle gracefully.
-            # Do NOT return hardcoded departments with fake IDs as they would
-            # cause documents to be routed to wrong departments.
-            return []
+    def get_user_contexts(self) -> List[ContextMembershipModel]:
+        """Every hat this user can wear."""
+        data = self.client.get(Endpoints.AUTH_CONTEXTS) or []
+        self._contexts = [ContextMembershipModel.from_dict(c) for c in data]
+        return self._contexts
+
+    def switch_context(self, context_membership_id: int) -> Optional[ContextMembershipModel]:
+        """Switching context changes what the whole application shows and
+        allows; every later request carries the new context header."""
+        data = self.client.post(
+            Endpoints.AUTH_SWITCH_CONTEXT, json={"context_membership_id": context_membership_id}
+        )
+        if not data:
+            return None
+        self.client.set_active_context_id(data.get("id"))
+        return ContextMembershipModel.from_dict(data)
+
+    # =========================================================
+    # REFERENCE DATA
+    # =========================================================
 
     def get_users(
         self,
-        role: Optional[str] = None,
-        department_id: Optional[int] = None
+        context_type: Optional[str] = None,
+        department_id: Optional[int] = None,
     ) -> List[UserModel]:
-        """
-        Retrieve users from the backend.
-
-        `role` is treated as a compatibility filter for callers that still use
-        the repository's role argument. When context memberships are present,
-        their context types are also considered so a person such as a TSO who
-        additionally has an EMPLOYEE context is not incorrectly excluded.
-
-        Department filtering remains a user/employee lookup filter; operational
-        document authorization is always enforced by the backend.
-        """
-        users: List[UserModel] = []
-        raw_users: List[Dict[str, Any]] = []
-
-        try:
-            data = api_client.get(Endpoints.USERS_LIST) or []
-            raw_users = data if isinstance(data, list) else []
-            users = [UserModel.from_dict(u) for u in raw_users]
-        except Exception:
-            target_dept = department_id
-            if target_dept is None and self._current_user is not None:
-                target_dept = getattr(self._current_user, "department_id", None)
-
-            if target_dept is not None:
-                try:
-                    data = api_client.get(
-                        Endpoints.DEPARTMENT_EMPLOYEES(target_dept)
-                    ) or []
-                    raw_users = data if isinstance(data, list) else []
-                    users = [
-                        UserModel(
-                            id=emp.get("user_id") or emp.get("id"),
-                            username=emp.get(
-                                "employee_code",
-                                f"emp_{emp.get('id')}"
-                            ),
-                            full_name=emp.get("full_name", ""),
-                            role="Employee",
-                            department_id=emp.get("department_id"),
-                            department_name=emp.get("department_name"),
-                            is_active=emp.get("is_active", True),
-                        )
-                        for emp in raw_users
-                    ]
-                except Exception:
-                    users = []
-                    raw_users = []
-
-        # Fill department names from the authoritative department endpoint
-        # only when the user payload did not already contain one.
-        try:
-            depts = {
-                d.id: d.name
-                for d in self.get_departments()
-            }
-            for u in users:
-                uid = getattr(u, "department_id", None)
-                if uid and not getattr(u, "department_name", None):
-                    u.department_name = depts.get(uid, "General")
-        except Exception:
-            pass
-
-        if role:
-            normalized_target = RoleEnum.normalize(role).lower()
-
-            filtered: List[UserModel] = []
-            for index, user in enumerate(users):
-                base_role = str(
-                    getattr(user, "role", "") or ""
-                ).lower()
-
-                matches = base_role == normalized_target
-
-                # Context membership data can establish an operational role
-                # independently of the persisted base User.role.
-                raw = raw_users[index] if index < len(raw_users) else {}
-                memberships = (
-                    raw.get("context_memberships")
-                    or raw.get("contexts")
-                    or []
-                )
-
-                if not matches:
-                    for membership in memberships:
-                        context_type = str(
-                            membership.get("context_type")
-                            or membership.get("type")
-                            or membership.get("role")
-                            or ""
-                        ).lower()
-                        if RoleEnum.normalize(context_type).lower() == normalized_target:
-                            matches = True
-                            break
-
-                if matches:
-                    filtered.append(user)
-
-            users = filtered
-
+        """Filter by context_type ('EMPLOYEE', 'HOD', 'TSO', 'DIRECTOR') to get
+        the people who can actually receive that kind of work."""
+        params: Dict[str, Any] = {}
+        if context_type:
+            params["context_type"] = context_type
         if department_id is not None:
-            users = [
-                u for u in users
-                if getattr(u, "department_id", None) == department_id
-            ]
+            params["department_id"] = department_id
+        data = self.client.get(Endpoints.USERS_LIST, params=params or None) or []
+        return [UserModel.from_dict(u) for u in data]
 
-        return users
+    def get_department_employees(self, department_id: int) -> List[UserModel]:
+        data = self.client.get(Endpoints.DEPARTMENT_EMPLOYEES(department_id)) or []
+        return [UserModel.from_dict(u) for u in data]
+
+    def get_departments(self) -> List[DepartmentModel]:
+        data = self.client.get(Endpoints.DEPARTMENTS_LIST) or []
+        return [DepartmentModel.from_dict(d) for d in data]
+
+    def get_workflow_vocabulary(self) -> Dict[str, Any]:
+        """Stage names and labels, so the UI never hardcodes them."""
+        return self.client.get(Endpoints.WORKFLOW_VOCABULARY) or {}
 
     # =========================================================
-    # DOCUMENT LIFECYCLE & INBOX
+    # INTAKE
     # =========================================================
-
-    def get_inbox(self) -> List[DocumentModel]:
-        """
-        Retrieve the document inbox for the active operational context.
-
-        DS intake items are intentionally not mixed into the generic document
-        inbox. Call get_intake_items() for the Outlook/intake queue.
-        """
-        data = api_client.get(Endpoints.DOCUMENTS_INBOX) or []
-        return [DocumentModel.from_dict(d) for d in data]
 
     def get_intake_items(self) -> List[Dict[str, Any]]:
-        """Retrieves raw incoming intake items from /intake."""
-        try:
-            return api_client.get(Endpoints.INTAKE_LIST) or []
-        except Exception:
-            return []
+        return self.client.get(Endpoints.INTAKE_LIST) or []
 
-    def add_inbox_item(self, document: DocumentModel) -> DocumentModel:
-        """
-        Adds a new incoming dispatch to the repository via the manual intake pipeline.
-        Satisfies BaseRepository abstract method contract.
-        """
-        return self.create_document(document, file_path=document.file_path)
+    # Legacy alias used by the inbox page.
+    def get_incoming_messages(self) -> List[Dict[str, Any]]:
+        return self.get_intake_items()
 
-    def remove_inbox_item(self, item_id: int) -> bool:
-        """
-        Safely acknowledges intake item transition without raising errors.
-        Backend transitions inbox status through document processing and routing.
-        """
-        return True
+    def sync_outlook(self) -> Dict[str, Any]:
+        return self.client.post(Endpoints.INTAKE_SYNC_OUTLOOK) or {}
 
-    def get_documents(
-        self,
-        status: Optional[str] = None,
-        department: Optional[str] = None,
-        source: Optional[str] = None,
-        search: Optional[str] = None
-    ) -> List[DocumentModel]:
-        """
-        Retrieves accessible documents list using /documents endpoint.
-        Applies client-side filters for multi-criteria search.
-        """
-        try:
-            data = api_client.get(Endpoints.DOCUMENTS_LIST)
-        except Exception:
-            data = api_client.get(Endpoints.DOCUMENTS_INBOX)
-
-        docs = [DocumentModel.from_dict(d) for d in data]
-
-        # Apply filtering
-        if status and status != "All Status":
-            docs = [
-                d for d in docs
-                if (getattr(d, "status", None) or "").lower() == status.lower()
-            ]
-        def _document_department_text(doc: DocumentModel) -> str:
-            # Document-level department is no longer an operational routing
-            # source of truth. These advisory fields are safe for display/filter
-            # when supplied by the backend.
-            suggested = getattr(doc, "suggested_department_name", None)
-            if suggested:
-                return str(suggested)
-
-            routings = (
-                getattr(doc, "department_routings", None)
-                or getattr(doc, "routing_branches", None)
-                or getattr(doc, "branches", None)
-                or []
-            )
-            names: List[str] = []
-            for branch in routings:
-                if isinstance(branch, dict):
-                    name = (
-                        branch.get("target_department_name")
-                        or branch.get("department_name")
-                    )
-                else:
-                    name = (
-                        getattr(branch, "target_department_name", None)
-                        or getattr(branch, "department_name", None)
-                    )
-                if name and str(name) not in names:
-                    names.append(str(name))
-            return ", ".join(names)
-
-        if department and department != "All Departments":
-            target = department.lower()
-            docs = [
-                d for d in docs
-                if target in _document_department_text(d).lower()
-            ]
-
-        if source and source != "All Sources":
-            docs = [
-                d for d in docs
-                if (getattr(d, "source", None) or "").lower()
-                == source.lower()
-            ]
-
-        if search:
-            q = search.lower().strip()
-            docs = [
-                d for d in docs
-                if q in (getattr(d, "title", None) or "").lower()
-                or q in (getattr(d, "reference", None) or "").lower()
-                or q in (getattr(d, "source", None) or "").lower()
-                or q in _document_department_text(d).lower()
-                or q in (getattr(d, "suggested_employee_name", None) or "").lower()
-            ]
-
-        return docs
-
-    def get_document(self, document_id: int) -> Optional[DocumentModel]:
-        """Retrieves single canonical document by ID."""
-        data = api_client.get(Endpoints.DOCUMENT_DETAIL(document_id))
+    def process_intake(self, intake_id: int, payload: Dict[str, Any]) -> Optional[DocumentModel]:
+        data = self.client.post(Endpoints.INTAKE_PROCESS(intake_id), json=payload)
         return DocumentModel.from_dict(data) if data else None
 
-    def create_document(
-        self,
-        document: DocumentModel,
-        file_path: Optional[str] = None
-    ) -> DocumentModel:
-        """
-        Create a canonical document through the live backend.
+    def manual_upload(self, fields: Dict[str, Any], file_path: str) -> Optional[DocumentModel]:
+        data = self.client.upload(Endpoints.INTAKE_MANUAL_UPLOAD, file_path=file_path, extra_data=fields)
+        return DocumentModel.from_dict(data) if data else None
 
-        If file_path is supplied, use the DS manual-intake multipart endpoint.
-        Otherwise use the canonical JSON /documents endpoint.
+    # =========================================================
+    # DOCUMENTS
+    # =========================================================
 
-        Routing fields here are advisory suggestions only. Operational routing
-        is created separately through the canonical branch endpoints.
-        """
-        raw_date = (
-            str(getattr(document, "date", "")).split()[0]
-            if getattr(document, "date", None)
-            else datetime.now().strftime("%Y-%m-%d")
+    def get_documents(self, **_filters: Any) -> List[DocumentModel]:
+        """Everything the active context is allowed to see."""
+        data = self.client.get(Endpoints.DOCUMENTS_LIST) or []
+        return [DocumentModel.from_dict(d) for d in data]
+
+    def get_inbox(self) -> List[DocumentModel]:
+        """Only what the active context has to act on now."""
+        data = self.client.get(Endpoints.DOCUMENTS_INBOX) or []
+        return [DocumentModel.from_dict(d) for d in data]
+
+    def get_document(self, doc_id: int) -> Optional[DocumentModel]:
+        data = self.client.get(Endpoints.DOCUMENT_DETAIL(doc_id))
+        return DocumentModel.from_dict(data) if data else None
+
+    def create_document(self, payload: Dict[str, Any]) -> Optional[DocumentModel]:
+        data = self.client.post(Endpoints.DOCUMENT_CREATE, json=payload)
+        return DocumentModel.from_dict(data) if data else None
+
+    def update_document(self, doc_id: int, payload: Dict[str, Any]) -> Optional[DocumentModel]:
+        """DS corrects document details, including anything OCR mis-read."""
+        data = self.client.patch(Endpoints.DOCUMENT_UPDATE(doc_id), json=payload)
+        return DocumentModel.from_dict(data) if data else None
+
+    def register_document(self, doc_id: int) -> Optional[DocumentModel]:
+        data = self.client.post(Endpoints.DOCUMENT_REGISTER(doc_id))
+        return DocumentModel.from_dict(data) if data else None
+
+    def close_document(
+        self, doc_id: int, remark: Optional[str] = None,
+        force: bool = False, expected_version: Optional[int] = None,
+    ) -> Optional[DocumentModel]:
+        """DS closure - the only way a document closes."""
+        data = self.client.post(
+            Endpoints.DOCUMENT_CLOSE(doc_id),
+            json={"remark": remark, "force": force, "expected_version": expected_version},
         )
-        priority_val = PriorityEnum.normalize(
-            getattr(document, "priority", None)
-        ).upper()
+        return DocumentModel.from_dict(data) if data else None
 
-        if file_path:
-            form_data = {
-                "title": getattr(document, "title", "") or "Untitled document",
-                "received_date": raw_date,
-                "mode": getattr(document, "mode", None) or "Manual Upload",
-                "priority": priority_val,
-                "source": getattr(document, "source", None) or "Manual Intake",
-                "description": (
-                    getattr(document, "remarks", None)
-                    or getattr(document, "description", None)
-                    or getattr(document, "title", None)
-                    or "Uploaded document"
-                ),
-                "ocr_text": getattr(document, "ocr_text", None) or "",
-                "suggested_department_id": (
-                    str(document.suggested_department_id)
-                    if getattr(document, "suggested_department_id", None)
-                    else ""
-                ),
-                "suggested_department_name": (
-                    getattr(document, "suggested_department_name", None) or ""
-                ),
-                "suggested_employee_id": (
-                    str(document.suggested_employee_id)
-                    if getattr(document, "suggested_employee_id", None)
-                    else ""
-                ),
-                "suggested_employee_name": (
-                    getattr(document, "suggested_employee_name", None) or ""
-                ),
-            }
-
-            data = api_client.upload(
-                Endpoints.INTAKE_MANUAL_UPLOAD,
-                file_path_or_tuple=file_path,
-                field_name="file",
-                extra_data=form_data,
-            )
-        else:
-            payload = {
-                "title": getattr(document, "title", "") or "Untitled document",
-                "received_date": raw_date,
-                "mode": getattr(document, "mode", None) or "External",
-                "source": getattr(document, "source", None) or "External",
-                "deadline": (
-                    str(getattr(document, "deadline", "")).split()[0]
-                    if getattr(document, "deadline", None)
-                    else None
-                ),
-                "description": (
-                    getattr(document, "remarks", None)
-                    or getattr(document, "description", None)
-                    or getattr(document, "title", None)
-                    or "Document"
-                ),
-                "priority": priority_val,
-                "suggested_department_id": getattr(
-                    document, "suggested_department_id", None
-                ),
-                "suggested_department_name": getattr(
-                    document, "suggested_department_name", None
-                ),
-                "suggested_employee_id": getattr(
-                    document, "suggested_employee_id", None
-                ),
-                "suggested_employee_name": getattr(
-                    document, "suggested_employee_name", None
-                ),
-                "ocr_text": getattr(document, "ocr_text", None),
-                "confidence": getattr(document, "confidence", None),
-            }
-            data = api_client.post(Endpoints.DOCUMENT_CREATE, json=payload)
-
-        if not data:
-            raise RuntimeError("Backend returned an empty document response.")
-
-        return DocumentModel.from_dict(data)
-
-    def close_document(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """Permanently closes a completed document."""
-        payload = {"remarks": remarks, "expected_version": expected_version}
-        data = api_client.post(Endpoints.DOCUMENT_CLOSE(document_id), json=payload)
-        return DocumentModel.from_dict(data)
+    def reopen_document(self, doc_id: int, reason: Optional[str] = None) -> Optional[DocumentModel]:
+        data = self.client.post(Endpoints.DOCUMENT_REOPEN(doc_id), json={"reason": reason})
+        return DocumentModel.from_dict(data) if data else None
 
     # =========================================================
-    # ROUTING (DS Decisions & Director Return)
+    # BRANCHES (routing)
     # =========================================================
+
+    def get_document_branches(self, doc_id: int) -> List[BranchModel]:
+        data = self.client.get(Endpoints.DOCUMENT_BRANCHES(doc_id)) or []
+        return [BranchModel.from_dict(b) for b in data]
 
     def route_document(
+        self, doc_id: int, branches: List[Dict[str, Any]], expected_version: Optional[int] = None
+    ) -> List[BranchModel]:
+        """Open one or several workstreams in a single action.
+
+        Each entry is {branch_type, department_id?, target_user_id?,
+        instructions?, requires_hod_validation?, deadline?}.  They all coexist:
+        an HOD branch, a direct employee and TSO can be created together and
+        then progress at completely different rates.
+        """
+        data = self.client.post(
+            Endpoints.DOCUMENT_BRANCHES(doc_id),
+            json={"branches": branches, "expected_version": expected_version},
+        ) or []
+        return [BranchModel.from_dict(b) for b in data]
+
+    def assign_work(
         self,
-        document_id: int,
-        route_type: str,
-        to_user_id: Optional[int] = None,
-        to_department_id: Optional[int] = None,
-        remarks: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        expected_version: Optional[int] = None,
-    ) -> DocumentModel:
-        """
-        Routes a document. Translates frontend RouteTypeEnum values to backend
-        expected enum member strings.
-        """
-        backend_route_type = self.ROUTE_TYPE_MAP.get(route_type, route_type)
-        payload = {
-            "route_type": backend_route_type,
-            "to_user_id": to_user_id,
-            "to_department_id": to_department_id,
-            "remarks": remarks,
-            "requires_hod_validation": requires_hod_validation,
-            "expected_version": expected_version,
-        }
-        data = api_client.post(Endpoints.DOCUMENT_ROUTE(document_id), json=payload)
-        return DocumentModel.from_dict(data)
+        branch_id: int,
+        assignee_user_ids: List[int],
+        instructions: Optional[str] = None,
+        deadline: Optional[str] = None,
+        requires_validation: bool = False,
+        team_name: Optional[str] = None,
+    ) -> List[WorkItemModel]:
+        """Assign people to a workstream.  One work item is created per person;
+        a team name only groups them for display."""
+        data = self.client.post(
+            Endpoints.BRANCH_ASSIGN(branch_id),
+            json={
+                "assignee_user_ids": assignee_user_ids,
+                "instructions": instructions,
+                "deadline": deadline,
+                "requires_validation": requires_validation,
+                "team_name": team_name,
+            },
+        ) or []
+        return [WorkItemModel.from_dict(w) for w in data]
 
-    def save_director_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
-        """Director saves or updates a remark on the document."""
-        payload = {"director_remark": remark, "expected_version": expected_version}
-        data = api_client.put(Endpoints.DIRECTOR_REMARK(document_id), json=payload)
-        return DocumentModel.from_dict(data)
+    def add_branch_remark(self, branch_id: int, remark_text: str) -> Optional[RemarkModel]:
+        data = self.client.post(Endpoints.BRANCH_REMARK(branch_id), json={"remark_text": remark_text})
+        return RemarkModel.from_dict(data) if data else None
 
-    def return_to_ds(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """Director returns reviewed document back to DS."""
-        payload = {"remarks": remarks, "expected_version": expected_version}
-        data = api_client.post(Endpoints.DOCUMENT_RETURN_TO_DS(document_id), json=payload)
-        return DocumentModel.from_dict(data)
-
-    def save_hod_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
-        """HOD saves or updates department remarks on the document."""
-        payload = {"hod_remark": remark, "expected_version": expected_version}
-        data = api_client.put(Endpoints.HOD_REMARK(document_id), json=payload)
-        return DocumentModel.from_dict(data)
-
-    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """DS forwards employee progress update to Director as follow-up."""
-        payload = {"remarks": remarks, "expected_version": expected_version}
-        data = api_client.post(Endpoints.DOCUMENT_FOLLOW_UP(document_id), json=payload)
-        return DocumentModel.from_dict(data)
+    def close_branch(self, branch_id: int, reason: Optional[str] = None) -> Optional[BranchModel]:
+        data = self.client.post(Endpoints.BRANCH_CLOSE(branch_id), json={"reason": reason})
+        return BranchModel.from_dict(data) if data else None
 
     # =========================================================
-    # WORK ASSIGNMENT (HOD -> Employee Delegation)
+    # DIRECTOR REVIEW
     # =========================================================
 
-    def assign_employee(
-        self,
-        document_id: int,
-        assigned_to_id: int,
-        instructions: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        routing_id: Optional[int] = None,
-        change_reason: Optional[str] = None,
-        expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        """
-        HOD delegates work on a document to an employee.
-        Sends backend expected assigned_to_user_id and requires_hod_validation fields.
-        """
-        payload = {
-            "assigned_to_user_id": assigned_to_id,
-            "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation,
-            "routing_id": routing_id,
-            "change_reason": change_reason,
-            "expected_version": expected_version,
-        }
-        data = api_client.post(Endpoints.DOCUMENT_ASSIGN(document_id), json=payload)
-        return WorkAssignmentModel.from_dict(data)
-
-    def hod_assign_team(
-        self, document_id: int, member_user_ids: List[int], routing_id: Optional[int] = None,
-        team_name: Optional[str] = None, instructions: Optional[str] = None,
-        requires_hod_validation: bool = False, expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        payload = {
-            "member_user_ids": member_user_ids, "routing_id": routing_id,
-            "team_name": team_name, "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation, "expected_version": expected_version,
-        }
-        data = api_client.post(Endpoints.DOCUMENT_HOD_ASSIGN_TEAM(document_id), json=payload)
-        return WorkAssignmentModel.from_dict(data)
-
-    def ds_assign_team(
-        self, document_id: int, member_user_ids: List[int], routing_id: Optional[int] = None,
-        team_name: Optional[str] = None, instructions: Optional[str] = None,
-        requires_hod_validation: bool = False, expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        payload = {
-            "member_user_ids": member_user_ids, "routing_id": routing_id,
-            "team_name": team_name, "instructions": instructions,
-            "requires_hod_validation": requires_hod_validation, "expected_version": expected_version,
-        }
-        data = api_client.post(Endpoints.DOCUMENT_DS_ASSIGN_TEAM(document_id), json=payload)
-        return WorkAssignmentModel.from_dict(data)
-
-    def assign_multi(self, document_id: int, assignments_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """DS configures multi-department/employee routing."""
-        payload = {"assignments": assignments_list}
-        return api_client.post(Endpoints.DOCUMENT_ASSIGN_MULTI(document_id), json=payload) or []
-
-    def get_document_assignments(self, document_id: int) -> List[Dict[str, Any]]:
-        """Retrieves multi-assignment records for a document."""
-        try:
-            return api_client.get(Endpoints.DOCUMENT_ASSIGNMENTS(document_id)) or []
-        except Exception:
-            return []
-
-    def update_document_assignment(self, document_id: int, assignment_id: int, update_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """HOD updates an assignment record."""
-        return api_client.patch(Endpoints.DOCUMENT_ASSIGNMENT_UPDATE(document_id, assignment_id), json=update_dict) or {}
-
-    def hod_validate_progress(
-        self,
-        document_id: int,
-        progress_id: int,
-        action: str,
-        note: Optional[str] = None
-    ) -> ProgressUpdateModel:
-        """
-        HOD validates an employee progress update.
-
-        The active HOD membership is propagated automatically by APIClient via
-        X-Work-Context-Id; it is deliberately not duplicated in the JSON body.
-        """
-        payload = {"action": action, "note": note}
-        data = api_client.post(
-            Endpoints.PROGRESS_HOD_VALIDATE(document_id, progress_id),
-            json=payload,
-        )
-        return ProgressUpdateModel.from_dict(data)
-
-    def get_assignments(self, document_id: int) -> List[WorkAssignmentModel]:
-        """Retrieves assignment records for a document."""
-        try:
-            data = api_client.get(Endpoints.DOCUMENT_ASSIGNMENTS(document_id))
-            return [WorkAssignmentModel.from_dict(a) for a in data]
-        except Exception:
-            return []
-
-    def create_branches(
-        self,
-        document_id: int,
-        branches: List[Dict[str, Any]],
-        expected_version: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """DS creates one or more canonical routing branches."""
-        payload = {
-            "branches": branches,
-            "expected_version": expected_version
-        }
-        return api_client.post(Endpoints.DOCUMENT_BRANCHES(document_id), json=payload) or []
-
-    def get_document_branches(self, document_id: int) -> List[Dict[str, Any]]:
-        """Retrieves canonical routing branches for a document."""
-        try:
-            return api_client.get(Endpoints.DOCUMENT_BRANCHES(document_id)) or []
-        except Exception:
-            return []
-
-    def assign_branch_employee(
-        self,
-        document_id: int,
-        routing_id: int,
-        assigned_to_user_id: int,
-        instructions: Optional[str] = None,
-        change_reason: Optional[str] = None,
-        expected_version: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Assigns staff responsibility on a canonical branch."""
-        payload = {
-            "assigned_to_user_id": assigned_to_user_id,
-            "instructions": instructions,
-            "change_reason": change_reason,
-            "expected_version": expected_version
-        }
-        return api_client.post(Endpoints.DOCUMENT_BRANCH_ASSIGN(document_id, routing_id), json=payload) or {}
+    def start_director_review(self, branch_id: int) -> Optional[BranchModel]:
+        data = self.client.post(Endpoints.DIRECTOR_REVIEW_START(branch_id))
+        return BranchModel.from_dict(data) if data else None
 
     def submit_director_review(
-        self,
-        document_id: int,
-        decision: str,
-        remark_text: Optional[str] = None,
-        expected_version: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Director submits machine-readable decision (CONTINUE or CLOSE)."""
-        payload = {
-            "decision": decision,
-            "remark_text": remark_text,
-            "expected_version": expected_version
-        }
-        return api_client.post(Endpoints.DOCUMENT_DIRECTOR_REVIEW(document_id), json=payload) or {}
+        self, branch_id: int, remark_text: str, expected_version: Optional[int] = None
+    ) -> Optional[DirectorReviewModel]:
+        """The Director remarks and hands back to the DS.  There is no decision
+        to make here: the Director does not close documents."""
+        data = self.client.post(
+            Endpoints.DIRECTOR_REVIEW_SUBMIT(branch_id),
+            json={"remark_text": remark_text, "expected_version": expected_version},
+        )
+        return DirectorReviewModel.from_dict(data) if data else None
 
-    def get_active_tso(self) -> Optional[Dict[str, Any]]:
-        """Admin retrieves current active TSO membership."""
-        try:
-            return api_client.get(Endpoints.ADMIN_TSO)
-        except Exception:
-            return None
-
-    def activate_tso(self, user_id: int) -> Dict[str, Any]:
-        """Admin assigns a user as the single active TSO."""
-        return api_client.post(Endpoints.ADMIN_ACTIVATE_TSO(user_id)) or {}
+    def get_director_reviews(self, doc_id: int) -> List[DirectorReviewModel]:
+        data = self.client.get(Endpoints.DIRECTOR_REVIEWS(doc_id)) or []
+        return [DirectorReviewModel.from_dict(r) for r in data]
 
     # =========================================================
-    # PROGRESS & ATTACHMENTS (Employee Reporting)
+    # WORK ITEMS
     # =========================================================
+
+    def get_my_work_items(self, include_finished: bool = False) -> List[WorkItemModel]:
+        data = self.client.get(
+            Endpoints.WORK_ITEMS_MINE, params={"include_finished": include_finished}
+        ) or []
+        return [WorkItemModel.from_dict(w) for w in data]
+
+    def get_department_work_items(self) -> List[WorkItemModel]:
+        """HOD view: every individual's work across their department."""
+        data = self.client.get(Endpoints.WORK_ITEMS_DEPARTMENT) or []
+        return [WorkItemModel.from_dict(w) for w in data]
+
+    def get_document_work_items(self, doc_id: int) -> List[WorkItemModel]:
+        data = self.client.get(Endpoints.DOCUMENT_WORK_ITEMS(doc_id)) or []
+        return [WorkItemModel.from_dict(w) for w in data]
+
+    def get_work_item(self, work_item_id: int) -> Optional[WorkItemModel]:
+        data = self.client.get(Endpoints.WORK_ITEM_DETAIL(work_item_id))
+        return WorkItemModel.from_dict(data) if data else None
+
+    def set_work_stage(
+        self, work_item_id: int, stage: str, note: Optional[str] = None
+    ) -> Optional[WorkItemModel]:
+        data = self.client.patch(
+            Endpoints.WORK_ITEM_STAGE(work_item_id), json={"stage": stage, "note": note}
+        )
+        return WorkItemModel.from_dict(data) if data else None
 
     def submit_progress(
-        self,
-        document_id: int,
-        description: str,
-        work_assignment_id: Optional[int] = None,
-        attachment_file_path: Optional[str] = None,
-    ) -> ProgressUpdateModel:
-        """
-        Employee submits a progress update.
-        Creates progress record via JSON, then uploads attachment if provided.
-        """
-        payload = {"description": description, "work_assignment_id": work_assignment_id}
-        # APIClient automatically sends the selected EMPLOYEE/TSO context
-        # through X-Work-Context-Id. The backend binds the progress update to
-        # the corresponding WorkAssignment.
-        data = api_client.post(
-            Endpoints.PROGRESS_CREATE(document_id),
-            json=payload,
+        self, work_item_id: int, description: str, new_stage: Optional[str] = None
+    ) -> Optional[ProgressModel]:
+        """Free-text progress.  Stored exactly as written - there is no
+        percentage anywhere in this system."""
+        data = self.client.post(
+            Endpoints.WORK_ITEM_PROGRESS(work_item_id),
+            json={"description": description, "new_stage": new_stage},
         )
-        prog = ProgressUpdateModel.from_dict(data)
+        return ProgressModel.from_dict(data) if data else None
 
-        if attachment_file_path:
-            att = self.upload_attachment(
-                document_id=document_id,
-                file_path=attachment_file_path,
-                progress_update_id=prog.id,
-                category="WORKFLOW"
-            )
-            prog.attachments.append(att)
+    def submit_progress_with_file(
+        self,
+        work_item_id: int,
+        description: str,
+        file_path: Optional[str] = None,
+        new_stage: Optional[str] = None,
+    ) -> Optional[ProgressModel]:
+        """Progress plus a supporting document, so the file stays attached to
+        the update it belongs to."""
+        if not file_path:
+            return self.submit_progress(work_item_id, description, new_stage)
+        fields: Dict[str, Any] = {"description": description}
+        if new_stage:
+            fields["new_stage"] = new_stage
+        data = self.client.upload(
+            Endpoints.WORK_ITEM_PROGRESS_FILE(work_item_id), file_path=file_path, extra_data=fields
+        )
+        return ProgressModel.from_dict(data) if data else None
 
-        return prog
+    def submit_work(self, work_item_id: int, note: Optional[str] = None) -> Optional[WorkItemModel]:
+        data = self.client.post(Endpoints.WORK_ITEM_SUBMIT(work_item_id), json={"note": note})
+        return WorkItemModel.from_dict(data) if data else None
 
-    def get_progress_updates(self, document_id: int) -> List[ProgressUpdateModel]:
-        """Retrieves chronological progress updates for a document."""
-        data = api_client.get(Endpoints.PROGRESS_LIST(document_id))
-        return [ProgressUpdateModel.from_dict(p) for p in data]
+    def review_work_item(
+        self, work_item_id: int, outcome: str, note: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """HOD accepts or returns ONE person's work.  Never closes the
+        document."""
+        return self.client.post(
+            Endpoints.WORK_ITEM_REVIEW(work_item_id), json={"outcome": outcome, "note": note}
+        )
+
+    # =========================================================
+    # ATTACHMENTS
+    # =========================================================
+
+    def get_attachments(self, doc_id: int) -> List[AttachmentModel]:
+        data = self.client.get(Endpoints.ATTACHMENT_LIST(doc_id)) or []
+        return [AttachmentModel.from_dict(a) for a in data]
 
     def upload_attachment(
         self,
-        document_id: int,
+        doc_id: int,
         file_path: str,
+        attachment_type: str = "SUPPORTING_DOCUMENT",
         progress_update_id: Optional[int] = None,
-        category: str = "WORKFLOW",
-        source: Optional[str] = None
-    ) -> AttachmentModel:
-        """
-        Uploads a file attachment. Translates frontend category into backend
-        expected attachment_type enum string.
-        """
+    ) -> Optional[AttachmentModel]:
+        fields: Dict[str, Any] = {"attachment_type": attachment_type}
         if progress_update_id:
-            att_type = "PROGRESS_ATTACHMENT"
-        elif category == "ORIGINAL":
-            att_type = "ORIGINAL"
-        else:
-            att_type = "SUPPORTING_DOCUMENT"
+            fields["progress_update_id"] = progress_update_id
+        data = self.client.upload(Endpoints.ATTACHMENT_UPLOAD(doc_id), file_path=file_path, extra_data=fields)
+        return AttachmentModel.from_dict(data) if data else None
 
-        extra_data: Dict[str, Any] = {"attachment_type": att_type}
-        if progress_update_id:
-            extra_data["progress_update_id"] = str(progress_update_id)
-
-        data = api_client.upload(
-            Endpoints.ATTACHMENT_UPLOAD(document_id),
-            file_path_or_tuple=file_path,
-            field_name="file",
-            extra_data=extra_data
-        )
-        return AttachmentModel.from_dict(data)
-
-    def get_attachments(self, document_id: int, category: Optional[str] = None) -> List[AttachmentModel]:
-        """Retrieves all attachments associated with a document."""
-        data = api_client.get(Endpoints.ATTACHMENT_LIST(document_id))
-        attachments = [AttachmentModel.from_dict(a) for a in data]
-        if category:
-            cat_upper = category.upper()
-            attachments = [a for a in attachments if (a.category or "").upper() == cat_upper]
-        return attachments
+    def download_attachment(self, attachment_id: int, dest_path: str) -> Optional[str]:
+        return self.client.download(Endpoints.ATTACHMENT_DOWNLOAD(attachment_id), dest_path)
 
     # =========================================================
-    # WORKFLOW HISTORY & AUDIT
+    # HISTORY & REMARKS
     # =========================================================
 
-    def get_workflow_history(self, document_id: int) -> List[WorkflowEventModel]:
-        """Retrieves chronological workflow events for a specific document."""
-        data = api_client.get(Endpoints.DOCUMENT_HISTORY(document_id))
+    def get_workflow_history(self, doc_id: int) -> List[WorkflowEventModel]:
+        data = self.client.get(Endpoints.DOCUMENT_HISTORY(doc_id)) or []
         return [WorkflowEventModel.from_dict(e) for e in data]
 
-    def get_all_audit_history(
-        self,
-        user: Optional[str] = None,
-        action: Optional[str] = None
-    ) -> List[WorkflowEventModel]:
-        """
-        Retrieves system-wide activity history using the batch history endpoint with graceful fallback.
-        """
-        all_events: List[WorkflowEventModel] = []
-        try:
-            data = api_client.get(Endpoints.DOCUMENTS_HISTORY_ALL)
-            if isinstance(data, list):
-                all_events = [WorkflowEventModel.from_dict(e) for e in data]
-        except Exception:
-            docs = self.get_documents()
-            for doc in docs:
-                if doc.id:
-                    try:
-                        events = self.get_workflow_history(doc.id)
-                        all_events.extend(events)
-                    except Exception:
-                        pass
+    def get_all_audit_history(self, limit: int = 500) -> List[WorkflowEventModel]:
+        data = self.client.get(Endpoints.HISTORY_ALL, params={"limit": limit}) or []
+        return [WorkflowEventModel.from_dict(e) for e in data]
 
-        # Apply filtering
-        if user and user != "All Users":
-            u_lower = user.lower()
-            all_events = [e for e in all_events if u_lower in (e.user or "").lower()]
-        if action and action != "All Actions":
-            a_lower = action.lower()
-            all_events = [e for e in all_events if a_lower in (e.action or "").lower()]
-
-        # Sort by timestamp descending
-        all_events.sort(key=lambda e: str(e.timestamp or ""), reverse=True)
-        return all_events
+    def get_remarks(self, doc_id: int) -> List[RemarkModel]:
+        data = self.client.get(Endpoints.DOCUMENT_REMARKS(doc_id)) or []
+        return [RemarkModel.from_dict(r) for r in data]
 
     # =========================================================
-    # NOTIFICATIONS
+    # OCR & ROUTING INTELLIGENCE (assistive)
     # =========================================================
 
-    def get_notifications(
-        self,
-        user_id: Optional[int] = None,
-        unread_only: bool = False
-    ) -> List[NotificationModel]:
-        """Retrieves notification list for active user."""
+    def get_ocr_result(self, doc_id: int) -> Dict[str, Any]:
+        return self.client.get(Endpoints.OCR_GET(doc_id)) or {}
+
+    def trigger_ocr(self, doc_id: int) -> Dict[str, Any]:
+        return self.client.post(Endpoints.OCR_RUN(doc_id)) or {}
+
+    def verify_field(self, doc_id: int, field_name: str, verified_value: str) -> Dict[str, Any]:
+        return self.client.post(
+            Endpoints.OCR_VERIFY(doc_id),
+            json={"field_name": field_name, "verified_value": verified_value},
+        ) or {}
+
+    def get_routing_suggestion(self, doc_id: int) -> Optional[Dict[str, Any]]:
+        return self.client.get(Endpoints.ROUTING_SUGGESTION(doc_id))
+
+    def analyze_routing(self, doc_id: int) -> Optional[Dict[str, Any]]:
+        return self.client.post(
+            Endpoints.ROUTING_ANALYZE(doc_id), json={"include_director_remark": True}
+        )
+
+    # =========================================================
+    # NOTIFICATIONS & REMINDERS
+    # =========================================================
+
+    def get_notifications(self, unread_only: bool = False) -> List[NotificationModel]:
         endpoint = Endpoints.NOTIFICATIONS_UNREAD if unread_only else Endpoints.NOTIFICATIONS_LIST
-        data = api_client.get(endpoint)
+        data = self.client.get(endpoint) or []
         return [NotificationModel.from_dict(n) for n in data]
 
     def mark_notification_read(self, notification_id: int) -> bool:
-        """Marks specific notification as read."""
-        try:
-            api_client.patch(Endpoints.NOTIFICATION_MARK_READ(notification_id))
-            return True
-        except Exception:
-            return False
+        return bool(self.client.patch(Endpoints.NOTIFICATION_MARK_READ(notification_id)))
+
+    def mark_all_notifications_read(self) -> int:
+        result = self.client.patch(Endpoints.NOTIFICATIONS_MARK_ALL_READ) or {}
+        return result.get("updated", 0)
+
+    def get_reminders(self) -> List[Dict[str, Any]]:
+        return self.client.get(Endpoints.REMINDERS_LIST) or []
+
+    def check_reminders(self) -> Dict[str, Any]:
+        return self.client.post(Endpoints.REMINDERS_CHECK) or {}
+
+    def send_document_reminder(
+        self,
+        doc_id: int,
+        work_item_id: Optional[int] = None,
+        recipient_user_id: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.client.post(
+            Endpoints.DOCUMENT_REMIND(doc_id),
+            json={
+                "work_item_id": work_item_id,
+                "recipient_user_id": recipient_user_id,
+                "message": message,
+            },
+        ) or {}
 
     # =========================================================
     # DASHBOARD
     # =========================================================
 
-    def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
-        """Retrieves role-specific dashboard metrics."""
-        return api_client.get(Endpoints.DASHBOARD_STATS)
+    def get_dashboard_summary(self) -> Dict[str, Any]:
+        return self.client.get(Endpoints.DASHBOARD) or {}
 
     # =========================================================
-    # OCR & ROUTING INTELLIGENCE
+    # ADMINISTRATION
     # =========================================================
 
-    def get_ocr_result(self, document_id: int) -> Dict[str, Any]:
-        """
-        Returns the OCR record for a document including:
-          - ocr_status, ocr_engine, confidence, extracted_text
-          - extracted_fields (list of {field_name, extracted_value, confidence})
-        """
-        try:
-            return api_client.get(Endpoints.OCR_GET(document_id)) or {}
-        except Exception:
-            return {}
+    def admin_get_users(self) -> List[UserModel]:
+        data = self.client.get(Endpoints.ADMIN_USERS) or []
+        return [UserModel.from_dict(u) for u in data]
 
-    def trigger_ocr(self, document_id: int) -> Dict[str, Any]:
-        """
-        Asks the backend to run real PaddleOCR on the stored document file.
-        Called after a document is created via the intake pipeline.
-        """
-        try:
-            return api_client.post(Endpoints.OCR_PROCESS(document_id), json={}) or {}
-        except Exception:
-            return {}
+    def admin_create_user(self, payload: Dict[str, Any]) -> Optional[UserModel]:
+        data = self.client.post(Endpoints.ADMIN_USERS, json=payload)
+        return UserModel.from_dict(data) if data else None
 
-    def get_routing_suggestion(self, document_id: int) -> Dict[str, Any]:
-        """
-        Fetches the advisory routing suggestion persisted in the database.
-        Returns a dict with: suggested_department_name, suggested_employee_name,
-        routing_confidence (0.0–1.0), routing_reason, is_director_instruction.
-        """
-        try:
-            return api_client.get(Endpoints.ROUTING_SUGGESTION(document_id)) or {}
-        except Exception:
-            return {}
+    def admin_update_user(self, user_id: int, payload: Dict[str, Any]) -> Optional[UserModel]:
+        data = self.client.put(Endpoints.ADMIN_USER_DETAIL(user_id), json=payload)
+        return UserModel.from_dict(data) if data else None
 
-    def analyze_routing(self, document_id: int) -> Dict[str, Any]:
-        """
-        Triggers fresh routing analysis for a document (uses OCR text +
-        Director remark if present).  Returns same structure as get_routing_suggestion.
-        """
-        try:
-            return api_client.post(
-                Endpoints.ROUTING_ANALYZE(document_id),
-                json={"include_director_remark": True}
-            ) or {}
-        except Exception:
-            return {}
+    def admin_reset_password(self, user_id: int, new_password: str) -> bool:
+        return bool(self.client.post(
+            Endpoints.ADMIN_USER_RESET_PASSWORD(user_id), json={"new_password": new_password}
+        ))
 
-    # =========================================================
-    # OUTLOOK INTAKE & WORKFLOW REMINDERS
-    # =========================================================
+    def admin_toggle_user(self, user_id: int) -> Optional[bool]:
+        result = self.client.post(Endpoints.ADMIN_USER_TOGGLE(user_id))
+        return result.get("is_active") if result else None
 
-    def sync_outlook(self) -> Dict[str, Any]:
-        """
-        Calls backend to synchronize incoming emails and attachments from DS Outlook mailbox.
-        """
-        try:
-            return api_client.post(Endpoints.INTAKE_SYNC_OUTLOOK, json={}) or {}
-        except Exception as ex:
-            return {
-                "status": "error",
-                "synced_count": 0,
-                "ignored_duplicates": 0,
-                "message": f"Failed to sync Outlook mailbox: {str(ex)}"
-            }
+    def admin_get_user_contexts(self, user_id: int) -> List[ContextMembershipModel]:
+        data = self.client.get(Endpoints.ADMIN_USER_CONTEXTS(user_id)) or []
+        return [ContextMembershipModel.from_dict(c) for c in data]
 
-    def send_document_reminder(self, document_id: int, message: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Dispatches an official action reminder via backend API to current responsible user.
-        """
-        payload = {"message": message} if message else {}
-        return api_client.post(Endpoints.DOCUMENT_REMIND(document_id), json=payload)
+    def admin_grant_context(
+        self, user_id: int, context_type: str, department_id: Optional[int] = None
+    ) -> Optional[ContextMembershipModel]:
+        data = self.client.post(
+            Endpoints.ADMIN_USER_CONTEXTS(user_id),
+            json={"user_id": user_id, "context_type": context_type, "department_id": department_id},
+        )
+        return ContextMembershipModel.from_dict(data) if data else None
+
+    def admin_revoke_context(self, user_id: int, context_id: int) -> bool:
+        return bool(self.client.delete(Endpoints.ADMIN_USER_CONTEXT_DELETE(user_id, context_id)))
+
+    def admin_get_tso(self) -> Optional[ContextMembershipModel]:
+        data = self.client.get(Endpoints.ADMIN_TSO)
+        return ContextMembershipModel.from_dict(data) if data else None
+
+    def admin_set_tso(self, user_id: int) -> Optional[ContextMembershipModel]:
+        data = self.client.post(Endpoints.ADMIN_ACTIVATE_TSO(user_id))
+        return ContextMembershipModel.from_dict(data) if data else None
+
+    def admin_get_departments(self) -> List[DepartmentModel]:
+        data = self.client.get(Endpoints.ADMIN_DEPARTMENTS) or []
+        return [DepartmentModel.from_dict(d) for d in data]
+
+    def admin_create_department(self, name: str, code: Optional[str] = None) -> Optional[DepartmentModel]:
+        data = self.client.post(Endpoints.ADMIN_DEPARTMENTS, json={"name": name, "code": code})
+        return DepartmentModel.from_dict(data) if data else None
+
+    def admin_update_department(self, dept_id: int, payload: Dict[str, Any]) -> Optional[DepartmentModel]:
+        data = self.client.put(Endpoints.ADMIN_DEPARTMENT_DETAIL(dept_id), json=payload)
+        return DepartmentModel.from_dict(data) if data else None
+
+    def admin_get_settings(self) -> Dict[str, Any]:
+        return self.client.get(Endpoints.ADMIN_SETTINGS) or {}
+
+    def admin_update_setting(
+        self, key: str, value: str, description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.client.post(
+            Endpoints.ADMIN_SETTINGS,
+            json={"key": key, "value": value, "description": description},
+        ) or {}
+
+    def admin_get_audit_logs(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+        return self.client.get(
+            Endpoints.ADMIN_AUDIT_LOGS, params={"limit": limit, "offset": offset}
+        ) or []

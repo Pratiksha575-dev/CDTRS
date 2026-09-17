@@ -1,47 +1,69 @@
+"""Delete every document and all of its workflow data, keeping accounts,
+departments, work contexts and settings.
+
+Use this to start workflow testing from a clean register without re-seeding.
+
+    python clear_documents.py --confirm
+"""
+
 import os
 import sys
 
-# Ensure backend folder is in sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import models
-from database import engine, SessionLocal
+from database import SessionLocal
 
-def clear_all_documents():
-    print("=" * 60)
-    print("CDTRS Local Database: Clearing Documents for Clean Workflow Test")
-    print("=" * 60)
+
+def clear_all_documents() -> None:
+    print("=" * 62)
+    print("CDTRS - clearing documents and workflow data")
+    print("=" * 62)
 
     db = SessionLocal()
     try:
-        db.query(models.Notification).delete()
-        db.query(models.WorkflowHistory).delete()
-        db.query(models.Reminder).delete()
-        db.query(models.RoutingSuggestion).delete()
-        db.query(models.DocumentExtractedField).delete()
-        db.query(models.DocumentOCR).delete()
-        db.query(models.ProgressUpdate).delete()
-        db.query(models.DocumentRemark).delete()
-        db.query(models.WorkAssignment).delete()
-        db.query(models.DocumentAssignment).delete()
-        db.query(models.DocumentRoute).delete()
-        db.query(models.Attachment).delete()
-        deleted_docs = db.query(models.Document).delete()
+        # Children first, so foreign keys stay satisfied.
+        order = [
+            models.Notification,
+            models.Reminder,
+            models.WorkflowEvent,
+            models.Attachment,
+            models.WorkStageChange,
+            models.WorkItemReview,
+            models.ProgressUpdate,
+            models.WorkItem,
+            models.WorkTeam,
+            models.DocumentRemark,
+            models.DirectorReview,
+            models.DocumentBranch,
+            models.RoutingSuggestion,
+            models.DocumentExtractedField,
+            models.DocumentOCR,
+            models.IncomingMessage,
+        ]
+        for model in order:
+            removed = db.query(model).delete(synchronize_session=False)
+            print(f"  {model.__tablename__:<26} {removed} row(s)")
 
+        documents = db.query(models.Document).delete(synchronize_session=False)
         db.commit()
 
-        print(f"[OK] Successfully deleted all documents ({deleted_docs} removed).")
-        print("[OK] All child tables (OCR, history, remarks, assignments, attachments, notifications) cleared.")
-        print("[OK] All user accounts, departments, and employees preserved.")
-        print("\nYour database is now completely clean and ready for manual intake & upload testing!")
-        print("=" * 60)
-    except Exception as e:
+        print(f"\n[OK] {documents} document(s) removed.")
+        print("[OK] Accounts, departments, work contexts and settings preserved.")
+        print("=" * 62)
+    except Exception as exc:
         db.rollback()
-        print(f"Error clearing documents: {e}")
+        print(f"[ERROR] {exc}")
+        raise
     finally:
         db.close()
 
+
 if __name__ == "__main__":
+    if "--confirm" not in sys.argv:
+        print(__doc__)
+        print("Refusing to run: pass --confirm to proceed.")
+        sys.exit(1)
     clear_all_documents()

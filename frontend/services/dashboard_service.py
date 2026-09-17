@@ -1,18 +1,22 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from repositories.provider import get_repository
 
 
 class DashboardService:
-    """Client service for dashboard metrics in the active work context."""
+    """Dashboard counters for the active work context.
 
-    def __init__(self):
-        pass
+    Nothing is computed or filtered locally: the backend derives what this
+    context is allowed to count from the X-Work-Context-Id header, so
+    switching context changes the dashboard completely.
+    """
 
-    def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
-        # Do not synthesize or filter dashboard data locally. The backend
-        # derives the permitted scope from X-Work-Context-Id.
-        return get_repository().get_dashboard_summary(role=role)
+    def get_summary(self) -> Dict[str, Any]:
+        return get_repository().get_dashboard_summary()
+
+    # Legacy name kept so existing callers keep working.
+    def get_dashboard_summary(self, role: Any = None) -> Dict[str, Any]:
+        return self.get_summary()
 
 
 dashboard_service = DashboardService()

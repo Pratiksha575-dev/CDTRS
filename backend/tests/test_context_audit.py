@@ -55,11 +55,11 @@ USERS = {
         "password": "cdtrs@tso",
     },
     "hod": {
-        "username": "hod_pstd",
+        "username": "hod_prod",
         "password": "cdtrs@hod",
     },
     "ds": {
-        "username": "ds_user",
+        "username": "exec_user",
         "password": "cdtrs@ds",
     },
     "director": {
@@ -222,7 +222,7 @@ def find_context(
     Find a context by type and optionally department.
 
     Example:
-        find_context(contexts, "EMPLOYEE", "FCTD")
+        find_context(contexts, "EMPLOYEE", "Engineering & Innovation")
     """
 
     wanted_type = context_name.upper()
@@ -347,14 +347,14 @@ def test_rahul_has_multiple_contexts(rahul_session):
 
     context_pairs = {
         (
-            context_type(ctx),
-            context_department_name(ctx),
+            (context_type(ctx) or "").upper(),
+            (context_department_name(ctx) or "").upper(),
         )
         for ctx in contexts
     }
 
     assert any(
-        ctype == "EMPLOYEE" and dept == "FCTD"
+        ctype == "EMPLOYEE" and dept == "ENGINEERING & INNOVATION"
         for ctype, dept in context_pairs
     ), (
         "Rahul is missing EMPLOYEE • FCTD context.\n"
@@ -362,7 +362,7 @@ def test_rahul_has_multiple_contexts(rahul_session):
     )
 
     assert any(
-        ctype == "HOD" and dept == "PSTD"
+        ctype == "HOD" and dept == "PRODUCT STRATEGY"
         for ctype, dept in context_pairs
     ), (
         "Rahul is missing HOD • PSTD context.\n"
@@ -395,7 +395,7 @@ def test_rahul_can_switch_to_employee_context(rahul_session):
     employee_context = find_context(
         contexts,
         "EMPLOYEE",
-        "FCTD",
+        "Engineering & Innovation",
     )
 
     membership_id = context_id(employee_context)
@@ -421,7 +421,7 @@ def test_rahul_can_switch_to_hod_context(rahul_session):
     hod_context = find_context(
         contexts,
         "HOD",
-        "PSTD",
+        "Product Strategy",
     )
 
     membership_id = context_id(hod_context)
@@ -687,7 +687,7 @@ def test_documents_endpoint_accepts_valid_employee_context(
     employee_ctx = find_context(
         rahul_session["contexts"],
         "EMPLOYEE",
-        "FCTD",
+        "Engineering & Innovation",
     )
 
     membership_id = context_id(employee_ctx)
@@ -720,7 +720,7 @@ def test_documents_endpoint_accepts_valid_hod_context(
     hod_ctx = find_context(
         rahul_session["contexts"],
         "HOD",
-        "PSTD",
+        "Product Strategy",
     )
 
     membership_id = context_id(hod_ctx)

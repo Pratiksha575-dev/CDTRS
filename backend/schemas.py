@@ -1,18 +1,35 @@
+"""CDTRS API contracts.
+
+Response shapes follow the model: a document carries a lifecycle, branches
+carry their own stages, and work items carry one person's stage, deadline and
+progress.  Nothing here rolls several people's work into one figure.
+"""
+
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Any
+from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 
 from models import (
-    UserRole, DocumentStatus, WorkflowStage, Priority, RouteType,
-    SourceType, MessageProcessingStatus, AttachmentType, OCRStatus,
-    RoutingSource, RemarkType, ReminderReason,
-    ProgressValidationStatus, AssignmentStatus,
-    WorkContextType, DirectorDecision, BranchType
+    AttachmentType,
+    BranchStage,
+    BranchType,
+    DocumentLifecycle,
+    MessageProcessingStatus,
+    OCRStatus,
+    Priority,
+    RemarkType,
+    ReminderReason,
+    ReviewOutcome,
+    RoutingSource,
+    SourceType,
+    UserRole,
+    WorkContextType,
+    WorkStage,
 )
 
 
 # =========================================================
-# DEPARTMENT
+# DEPARTMENTS
 # =========================================================
 
 class DepartmentCreate(BaseModel):
@@ -21,67 +38,63 @@ class DepartmentCreate(BaseModel):
 
 
 class DepartmentResponse(BaseModel):
-    id:         int
-    name:       str
-    code:       Optional[str] = None
-    is_active:  bool
-    created_at: datetime
+    id: int
+    name: str
+    code: Optional[str] = None
+    is_active: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
 
 # =========================================================
-# EMPLOYEE
+# EMPLOYEE DIRECTORY
 # =========================================================
 
 class EmployeeCreate(BaseModel):
     employee_code: str
-    full_name:     str
+    full_name: str
     department_id: int
-    designation:   str
-    email:         Optional[str] = None
+    designation: str
+    email: Optional[str] = None
     outlook_email: Optional[str] = None
-    gov_email:     Optional[str] = None
-    user_id:       Optional[int] = None
+    gov_email: Optional[str] = None
 
 
 class EmployeeResponse(BaseModel):
-    id:            int
+    id: int
     employee_code: str
-    full_name:     str
+    full_name: str
     department_id: int
-    designation:   str
-    email:         Optional[str] = None
+    designation: str
+    email: Optional[str] = None
     outlook_email: Optional[str] = None
-    gov_email:     Optional[str] = None
-    user_id:       Optional[int] = None
-    is_active:     bool
+    gov_email: Optional[str] = None
+    user_id: Optional[int] = None
+    is_active: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
 
 # =========================================================
-# WORK CONTEXT MEMBERSHIP
+# WORK CONTEXTS
 # =========================================================
 
-class WorkContextMembershipResponse(BaseModel):
-    id:              int
-    user_id:         int
-    context_type:    WorkContextType
-    department_id:   Optional[int] = None
-    department_name: Optional[str] = None
-    is_active:       bool
-    created_at:      datetime
-    updated_at:      datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class WorkContextMembershipCreate(BaseModel):
-    user_id:       int
-    context_type:  WorkContextType
+class WorkContextResponse(BaseModel):
+    id: int
+    user_id: int
+    context_type: WorkContextType
     department_id: Optional[int] = None
-    is_active:     bool = True
+    department_name: Optional[str] = None
+    label: str
+    is_active: bool = True
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkContextCreate(BaseModel):
+    user_id: int
+    context_type: WorkContextType
+    department_id: Optional[int] = None
 
 
 class WorkContextSwitchRequest(BaseModel):
@@ -89,456 +102,106 @@ class WorkContextSwitchRequest(BaseModel):
 
 
 # =========================================================
-# USER
+# USERS & AUTH
 # =========================================================
 
 class UserCreate(BaseModel):
-    username:               str
-    password:               str
-    full_name:              str
-    role:                   UserRole
-    employee_code:          Optional[str] = None
-    designation:            Optional[str] = None
-    department:             Optional[str] = None
-    managed_depts:          Optional[List[str]] = None
-    email:                  Optional[str] = None
-    outlook_email:          Optional[str] = None
-    gov_email:              Optional[str] = None
-    preferred_mail_channel: Optional[str] = "outlook"
-    department_id:          Optional[int] = None
-    employee_id:            Optional[int] = None
+    username: str
+    password: str
+    full_name: str
+    role: UserRole
+    employee_code: Optional[str] = None
+    designation: Optional[str] = None
+    email: Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email: Optional[str] = None
+    department_id: Optional[int] = None
 
 
 class UserResponse(BaseModel):
-    id:                     int
-    username:               str
-    full_name:              str
-    role:                   UserRole
-    employee_code:          Optional[str] = None
-    designation:            Optional[str] = None
-    department:             Optional[str] = None
-    managed_depts:          Optional[Any] = None
-    email:                  Optional[str] = None
-    outlook_email:          Optional[str] = None
-    gov_email:              Optional[str] = None
-    preferred_mail_channel: Optional[str] = "outlook"
-    department_id:          Optional[int] = None
-    employee_id:            Optional[int] = None
-    is_active:              bool
-    active_context_id:      Optional[int] = None
-    context_memberships:    List[WorkContextMembershipResponse] = []
-    created_at:             datetime
-    updated_at:             datetime
+    id: int
+    username: str
+    full_name: str
+    role: UserRole
+    employee_code: Optional[str] = None
+    designation: Optional[str] = None
+    email: Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email: Optional[str] = None
+    department_id: Optional[int] = None
+    department: Optional[str] = None
+    is_active: bool = True
+    contexts: List[WorkContextResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
-
-# =========================================================
-# AUTH / LOGIN
-# =========================================================
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 
-class TokenData(BaseModel):
-    user_id:            int
-    username:           str
-    role:               UserRole
-    active_context_id:  Optional[int] = None
-
-
 class LoginResponse(BaseModel):
-    access_token:      str
-    token_type:        str = "bearer"
-    user:              UserResponse
-    active_context_id: Optional[int] = None
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+    contexts: List[WorkContextResponse] = Field(default_factory=list)
+    active_context: Optional[WorkContextResponse] = None
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str
+    current_password: str
     new_password: str
 
 
 class ResetPasswordRequest(BaseModel):
     username: str
-    old_password: str
     new_password: str
 
 
 class AdminPasswordResetRequest(BaseModel):
-    username: str
     new_password: str
 
 
 # =========================================================
-# INCOMING MESSAGES (Mail Intake)
+# INTAKE
 # =========================================================
 
 class IntakeCreate(BaseModel):
-    source_type:         SourceType = SourceType.OUTLOOK
+    source_type: SourceType = SourceType.MANUAL_UPLOAD
     external_message_id: Optional[str] = None
-    sender_name:         Optional[str] = None
-    sender_email:        Optional[str] = None
-    subject:             Optional[str] = None
-    received_at:         Optional[datetime] = None
-    body_reference:      Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_email: Optional[str] = None
+    subject: Optional[str] = None
+    body_reference: Optional[str] = None
+    received_at: Optional[datetime] = None
 
 
 class IntakeProcessRequest(BaseModel):
-    title:                   Optional[str] = None
-    deadline:                Optional[date] = None
-    priority:                Priority = Priority.MEDIUM
-    ocr_text:                Optional[str] = None
-    confidence:              Optional[float] = None
-    suggested_department_id: Optional[int] = None
-    suggested_employee_id:   Optional[int] = None
+    title: Optional[str] = None
+    subject: Optional[str] = None
+    description: Optional[str] = None
+    received_date: Optional[date] = None
+    deadline: Optional[date] = None
+    priority: Priority = Priority.MEDIUM
+    source: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_reference: Optional[str] = None
 
 
 class IntakeResponse(BaseModel):
-    id:                  int
-    source_type:         SourceType
+    id: int
+    source_type: SourceType
     external_message_id: Optional[str] = None
-    sender_name:         Optional[str] = None
-    sender_email:        Optional[str] = None
-    subject:             Optional[str] = None
-    received_at:         datetime
-    body_reference:      Optional[str] = None
-    has_attachments:     bool
-    processing_status:   MessageProcessingStatus
-    created_at:          datetime
+    sender_name: Optional[str] = None
+    sender_email: Optional[str] = None
+    subject: Optional[str] = None
+    received_at: datetime
+    body_reference: Optional[str] = None
+    has_attachments: bool = False
+    processing_status: MessageProcessingStatus
 
     model_config = ConfigDict(from_attributes=True)
-
-
-# =========================================================
-# CANONICAL BRANCH (DocumentDepartmentRouting)
-# =========================================================
-
-class BranchCreate(BaseModel):
-    branch_type:             BranchType
-    department_id:           Optional[int] = None
-    target_user_id:          Optional[int] = None
-    requires_hod_validation: bool = False
-    instructions:            Optional[str] = None
-
-
-class BranchResponse(BaseModel):
-    id:                              int
-    document_id:                     int
-    branch_type:                     BranchType
-    department_id:                   Optional[int] = None
-    routed_by_user_id:               Optional[int] = None
-    routed_by_context_membership_id: Optional[int] = None
-    target_context_membership_id:    Optional[int] = None
-    target_user_id:                  Optional[int] = None
-    requires_hod_validation:         bool = False
-    status:                          DocumentStatus
-    is_active:                       bool
-    version:                         int
-    routed_at:                       datetime
-    instructions:                    Optional[str] = None
-    completed_at:                    Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class MultiBranchRouteRequest(BaseModel):
-    branches:         List[BranchCreate]
-    expected_version: Optional[int] = None
-
-
-# =========================================================
-# DOCUMENT
-# =========================================================
-
-class DocumentCreate(BaseModel):
-    title:                   str
-    description:             Optional[str] = None
-    received_date:           date
-    deadline:                Optional[date] = None
-    source:                  Optional[str] = None
-    mode:                    str = "Manual Upload"
-    priority:                Priority = Priority.MEDIUM
-    source_message_id:       Optional[int] = None
-    suggested_department_id: Optional[int] = None
-    suggested_employee_id:   Optional[int] = None
-    ocr_text:                Optional[str] = None
-    confidence:              Optional[float] = None
-    director_remark:         Optional[str] = None
-
-
-# =========================================================
-# DIRECTOR REVIEWS
-# =========================================================
-
-class DirectorReviewRequest(BaseModel):
-    decision:         DirectorDecision
-    remark_text:      Optional[str] = None
-    expected_version: Optional[int] = None
-
-
-class DirectorReviewResponse(BaseModel):
-    id:                             int
-    document_id:                    int
-    director_user_id:               int
-    director_context_membership_id: Optional[int] = None
-    decision:                       DirectorDecision
-    remark_text:                    Optional[str] = None
-    created_at:                     datetime
-    document_version:               int
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class DocumentResponse(BaseModel):
-    doc_id: int
-    reference_no: str
-    title: str
-    description: Optional[str] = None
-    received_date: date
-    deadline: Optional[date] = None
-    source: Optional[str] = None
-    mode: str
-    priority: Priority
-    status: DocumentStatus
-    suggested_department_id: Optional[int] = None
-    suggested_department_name: Optional[str] = None
-    suggested_employee_id: Optional[int] = None
-    suggested_employee_name: Optional[str] = None
-    routing_confidence: Optional[float] = None
-    routing_reason: Optional[str] = None
-    is_director_instruction: bool = False
-    created_by: int
-    source_message_id: Optional[int] = None
-    ocr_status: OCRStatus
-    version: int
-    director_remark: Optional[str] = None
-    hod_remark: Optional[str] = None
-    branches: List[BranchResponse] = Field(default_factory=list)
-    work_assignments: List["AssignmentResponse"] = Field(default_factory=list)
-    director_reviews: List[DirectorReviewResponse] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
-    closed_at: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
-
-class DocumentListResponse(BaseModel):
-    doc_id: int
-    reference_no: str
-    title: str
-    description: Optional[str] = None
-    source: Optional[str] = None
-    priority: Priority
-    status: DocumentStatus
-    suggested_department_id: Optional[int] = None
-    suggested_department_name: Optional[str] = None
-    suggested_employee_id: Optional[int] = None
-    suggested_employee_name: Optional[str] = None
-    routing_confidence: Optional[float] = None
-    routing_reason: Optional[str] = None
-    is_director_instruction: bool = False
-    director_remark: Optional[str] = None
-    hod_remark: Optional[str] = None
-    ocr_status: OCRStatus
-    version: int
-    received_date: date
-    deadline: Optional[date] = None
-    branches: List[BranchResponse] = Field(default_factory=list)
-    work_assignments: List["AssignmentResponse"] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# =========================================================
-# DOCUMENT ROUTING (DS -> Director / HOD / Employee)
-# =========================================================
-
-class RouteRequest(BaseModel):
-    route_type:       RouteType
-    to_user_id:       Optional[int] = None
-    to_department_id: Optional[int] = None
-    remarks:          Optional[str] = None
-    requires_hod_validation: bool = False
-    expected_version: Optional[int] = None
-
-
-# =========================================================
-# DIRECTOR REMARK
-# =========================================================
-
-class DirectorRemarkUpdate(BaseModel):
-    director_remark:  str
-    expected_version: Optional[int] = None
-
-
-class ReturnToDSRequest(BaseModel):
-    remarks:          Optional[str] = None
-    decision:         Optional[DirectorDecision] = None
-    expected_version: Optional[int] = None
-
-
-# =========================================================
-# HOD REMARK & ASSIGNMENT
-# =========================================================
-
-class HODRemarkUpdate(BaseModel):
-    hod_remark:       str
-    expected_version: Optional[int] = None
-
-
-class AssignmentRequest(BaseModel):
-    assigned_to_user_id:     int
-    routing_id:              Optional[int] = None
-    requires_hod_validation: bool = False
-    instructions:            Optional[str] = None
-    change_reason:           Optional[str] = None
-    expected_version:        Optional[int] = None
-
-
-class AssignmentResponse(BaseModel):
-    id:                                int
-    document_id:                       int
-    assigned_by_user_id:               int
-    assigned_to_user_id:               int
-    routing_id:                        int
-    assigned_to_context_membership_id: Optional[int] = None
-    requires_hod_validation:           bool = False
-    instructions:                      Optional[str] = None
-    is_active:                         bool
-    superseded_by_id:                  Optional[int] = None
-    change_reason:                     Optional[str] = None
-    assigned_at:                       datetime
-    completed_at:                      Optional[datetime] = None
-    team_name:                         Optional[str] = None
-    is_team:                           bool = False
-    members:                           List["AssignmentMemberResponse"] = Field(default_factory=list)
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# =========================================================
-# HOD TEAM / MULTI-EMPLOYEE ASSIGNMENT
-# =========================================================
-
-class AssignmentMemberCreate(BaseModel):
-    user_id: int
-    context_membership_id: Optional[int] = None
-
-
-class AssignmentMemberResponse(BaseModel):
-    id: int
-    work_assignment_id: int
-    user_id: int
-    user_name: Optional[str] = None
-    context_membership_id: Optional[int] = None
-    is_active: bool
-    assigned_at: datetime
-    completed_at: Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class HODTeamAssignmentRequest(BaseModel):
-    """HOD delegates within their department; DS may span departments."""
-    member_user_ids: List[int]
-    routing_id: Optional[int] = None
-    team_name: Optional[str] = None
-    instructions: Optional[str] = None
-    requires_hod_validation: bool = False
-    expected_version: Optional[int] = None
-
-
-class DSTeamAssignmentRequest(HODTeamAssignmentRequest):
-    """DS may create a team spanning employees from multiple routed departments."""
-    pass
-
-
-class HODTeamAssignmentResponse(BaseModel):
-    id: int
-    document_id: int
-    assigned_by_user_id: int
-    assigned_to_user_id: int
-    routing_id: Optional[int] = None
-    requires_hod_validation: bool = False
-    instructions: Optional[str] = None
-    team_name: Optional[str] = None
-    is_team: bool = False
-    members: List[AssignmentMemberResponse] = Field(default_factory=list)
-    is_active: bool
-    assigned_at: datetime
-    completed_at: Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-AssignmentResponse.model_rebuild()
-
-# =========================================================
-# DOCUMENT REMARKS (History)
-# =========================================================
-
-class DocumentRemarkResponse(BaseModel):
-    id:                    int
-    document_id:           int
-    author_user_id:        int
-    role:                  UserRole
-    remark_text:           str
-    remark_type:           RemarkType
-    provenance:            str = "MANUAL"
-    context_membership_id: Optional[int] = None
-    created_at:            datetime
-    updated_at:            datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# =========================================================
-# PROGRESS UPDATES (Employee)
-# =========================================================
-
-class ProgressCreate(BaseModel):
-    description:        str
-    work_assignment_id: Optional[int] = None
-
-
-class HODValidationRequest(BaseModel):
-    action: str                       # "approve" or "return"
-    note:   Optional[str] = None      # Optional correction or approval guidance
-
-
-class ProgressResponse(BaseModel):
-    id:                      int
-    document_id:             int
-    submitted_by_user_id:    int
-    user_name:               Optional[str] = None
-    description:             str
-    hod_validation_required: bool = False
-    hod_validation_status:   ProgressValidationStatus = ProgressValidationStatus.DIRECT_TO_DS
-    hod_review_note:         Optional[str] = None
-    hod_reviewed_by_user_id: Optional[int] = None
-    hod_reviewer_name:       Optional[str] = None
-    hod_reviewed_at:         Optional[datetime] = None
-    work_assignment_id:      int
-    created_at:              datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# =========================================================
-# FOLLOW-UP & CLOSURE
-# =========================================================
-
-class FollowUpRequest(BaseModel):
-    remarks:          Optional[str] = None
-    expected_version: Optional[int] = None
-
-
-class CloseRequest(BaseModel):
-    remarks:          Optional[str] = None
-    expected_version: Optional[int] = None
 
 
 # =========================================================
@@ -546,107 +209,432 @@ class CloseRequest(BaseModel):
 # =========================================================
 
 class AttachmentResponse(BaseModel):
-    id:                  int
-    document_id:         Optional[int] = None
-    progress_update_id:  Optional[int] = None
+    id: int
+    document_id: Optional[int] = None
+    progress_update_id: Optional[int] = None
+    work_item_id: Optional[int] = None
+    file_name: str
+    file_type: Optional[str] = None
+    file_size: Optional[int] = None
+    attachment_type: AttachmentType
     uploaded_by_user_id: int
-    file_name:           str
-    file_type:           Optional[str] = None
-    file_size:           Optional[int] = None
-    checksum:            Optional[str] = None
-    attachment_type:     AttachmentType
-    source_message_id:   Optional[int] = None
-    created_at:          datetime
+    uploaded_by_name: Optional[str] = None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
 
 # =========================================================
-# OUTLOOK SYNC & EMAIL DISPATCH SCHEMAS
+# PROGRESS (free text - never a percentage)
 # =========================================================
 
-class OutlookSyncResponse(BaseModel):
-    status:             str               # "success", "not_configured", "error"
-    synced_count:       int = 0
-    ignored_duplicates: int = 0
-    message:            str
-    details:            Optional[List[dict]] = None
+class ProgressCreate(BaseModel):
+    """What the worker wrote.  `description` is free text and is stored as
+    written."""
+    description: str
+    new_stage: Optional[WorkStage] = None
 
 
-class ReminderSendRequest(BaseModel):
-    message: Optional[str] = None
+class ProgressResponse(BaseModel):
+    id: int
+    document_id: int
+    work_item_id: int
+    author_user_id: int
+    author_name: Optional[str] = None
+    description: str
+    stage_at_time: Optional[WorkStage] = None
+    created_at: datetime
+    attachments: List[AttachmentResponse] = Field(default_factory=list)
 
-
-class ReminderSendResponse(BaseModel):
-    status:             str
-    recipient_user_id:  int
-    recipient_name:     str
-    recipient_email:    Optional[str] = None
-    recipient_role:     str
-    document_id:        int
-    document_reference: str
-    document_title:     str
-    channel_used:       str               # "outlook", "gov_mail", "in_app"
-    email_dispatched:   bool
-    message:            str
+    model_config = ConfigDict(from_attributes=True)
 
 
 # =========================================================
-# OCR & EXTRACTED FIELDS
+# WORK ITEM REVIEW / STAGE HISTORY
+# =========================================================
+
+class WorkReviewResponse(BaseModel):
+    id: int
+    work_item_id: int
+    reviewer_user_id: int
+    reviewer_name: Optional[str] = None
+    outcome: ReviewOutcome
+    note: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkReviewRequest(BaseModel):
+    outcome: ReviewOutcome
+    note: Optional[str] = None
+
+
+class StageChangeResponse(BaseModel):
+    id: int
+    work_item_id: int
+    from_stage: Optional[WorkStage] = None
+    to_stage: WorkStage
+    changed_by_user_id: int
+    note: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================
+# WORK ITEMS (one person's work)
+# =========================================================
+
+class WorkItemResponse(BaseModel):
+    id: int
+    document_id: int
+    branch_id: int
+    branch_label: Optional[str] = None
+    team_id: Optional[int] = None
+    team_name: Optional[str] = None
+
+    assigned_to_user_id: int
+    assignee_name: Optional[str] = None
+    assigned_to_context_membership_id: Optional[int] = None
+    context_type: Optional[str] = None
+    department_name: Optional[str] = None
+    assigned_by_user_id: int
+    assigner_name: Optional[str] = None
+
+    instructions: Optional[str] = None
+    deadline: Optional[date] = None
+    deadline_state: str = "none"
+
+    stage: WorkStage
+    stage_label: str = ""
+    requires_validation: bool = False
+    round_no: int = 1
+    is_active: bool = True
+
+    latest_progress_text: Optional[str] = None
+    last_update_at: Optional[datetime] = None
+    attachment_count: int = 0
+
+    assigned_at: datetime
+    started_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    version: int = 1
+
+    progress_updates: List[ProgressResponse] = Field(default_factory=list)
+    reviews: List[WorkReviewResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkStageUpdateRequest(BaseModel):
+    stage: WorkStage
+    note: Optional[str] = None
+
+
+class WorkSubmitRequest(BaseModel):
+    note: Optional[str] = None
+
+
+# =========================================================
+# BRANCHES (independent workstreams)
+# =========================================================
+
+class BranchCreate(BaseModel):
+    """One routing target.  Several of these may be sent at once and they all
+    become independent, coexisting workstreams."""
+    branch_type: BranchType
+    department_id: Optional[int] = None
+    target_user_id: Optional[int] = None
+    instructions: Optional[str] = None
+    requires_hod_validation: bool = False
+    deadline: Optional[date] = None
+    # Optional: DS may pre-assign people inside a DEPARTMENT branch.
+    assignee_user_ids: List[int] = Field(default_factory=list)
+    team_name: Optional[str] = None
+
+
+class RouteRequest(BaseModel):
+    branches: List[BranchCreate]
+    expected_version: Optional[int] = None
+
+
+class BranchResponse(BaseModel):
+    id: int
+    document_id: int
+    branch_type: BranchType
+    label: str
+    stage: BranchStage
+    stage_label: str = ""
+
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    target_user_id: Optional[int] = None
+    target_user_name: Optional[str] = None
+    target_context_membership_id: Optional[int] = None
+
+    opened_by_user_id: int
+    instructions: Optional[str] = None
+    requires_hod_validation: bool = False
+    deadline: Optional[date] = None
+    deadline_state: str = "none"
+    round_no: int = 1
+
+    is_active: bool = True
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    version: int = 1
+
+    work_items: List[WorkItemResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BranchAssignRequest(BaseModel):
+    """DS or HOD assigns people to a workstream.  One work item is created per
+    person; a team name only groups them."""
+    assignee_user_ids: List[int]
+    instructions: Optional[str] = None
+    deadline: Optional[date] = None
+    requires_validation: bool = False
+    team_name: Optional[str] = None
+
+
+class BranchRemarkRequest(BaseModel):
+    remark_text: str
+
+
+class BranchCloseRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+# =========================================================
+# REMARKS / DIRECTOR REVIEWS
+# =========================================================
+
+class RemarkResponse(BaseModel):
+    id: int
+    document_id: int
+    branch_id: Optional[int] = None
+    branch_label: Optional[str] = None
+    work_item_id: Optional[int] = None
+    author_user_id: int
+    author_name: Optional[str] = None
+    remark_type: RemarkType
+    remark_text: str
+    provenance: str = "MANUAL"
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DirectorReviewRequest(BaseModel):
+    """The Director remarks and hands back to DS.  There is deliberately no
+    decision field: the Director does not close documents."""
+    remark_text: str
+    expected_version: Optional[int] = None
+
+
+class DirectorReviewResponse(BaseModel):
+    id: int
+    document_id: int
+    branch_id: Optional[int] = None
+    director_user_id: int
+    director_name: Optional[str] = None
+    remark_text: str
+    review_no: int = 1
+    requested_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================
+# WORKFLOW HISTORY
+# =========================================================
+
+class WorkflowEventResponse(BaseModel):
+    id: int
+    document_id: int
+    branch_id: Optional[int] = None
+    branch_label: Optional[str] = None
+    work_item_id: Optional[int] = None
+    event_type: str
+    actor_user_id: Optional[int] = None
+    actor_name: str = "System"
+    actor_context_type: Optional[str] = None
+    summary: str
+    details: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================
+# DOCUMENTS
+# =========================================================
+
+class DocumentCreate(BaseModel):
+    title: str
+    subject: Optional[str] = None
+    description: Optional[str] = None
+    received_date: date
+    deadline: Optional[date] = None
+    source: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_reference: Optional[str] = None
+    mode: str = "MANUAL_UPLOAD"
+    priority: Priority = Priority.MEDIUM
+    source_message_id: Optional[int] = None
+
+
+class DocumentUpdate(BaseModel):
+    """DS corrects extracted or entered metadata."""
+    title: Optional[str] = None
+    subject: Optional[str] = None
+    description: Optional[str] = None
+    received_date: Optional[date] = None
+    deadline: Optional[date] = None
+    source: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_reference: Optional[str] = None
+    priority: Optional[Priority] = None
+    expected_version: Optional[int] = None
+
+
+class BranchSummary(BaseModel):
+    """Compact per-branch state for list views.  Kept as a LIST so a document
+    with branches at different stages is displayed as such, never averaged
+    into one status."""
+    branch_id: int
+    branch_type: BranchType
+    label: str
+    stage: BranchStage
+    stage_label: str
+    is_active: bool
+    people: List[str] = Field(default_factory=list)
+    open_items: int = 0
+    total_items: int = 0
+
+
+class DocumentListResponse(BaseModel):
+    doc_id: int
+    reference_no: str
+    title: str
+    subject: Optional[str] = None
+    description: Optional[str] = None
+    source: Optional[str] = None
+    sender_name: Optional[str] = None
+    priority: Priority
+    lifecycle: DocumentLifecycle
+    lifecycle_label: str = ""
+    received_date: date
+    deadline: Optional[date] = None
+    deadline_state: str = "none"
+    ocr_status: OCRStatus
+    version: int
+
+    branch_summaries: List[BranchSummary] = Field(default_factory=list)
+    people_involved: List[str] = Field(default_factory=list)
+    active_branch_count: int = 0
+    open_work_item_count: int = 0
+    latest_director_remark: Optional[str] = None
+    has_open_director_review: bool = False
+
+    # Only populated on "my tasks" style listings.
+    my_work_items: List[WorkItemResponse] = Field(default_factory=list)
+
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DocumentDetailResponse(DocumentListResponse):
+    mode: str
+    created_by: int
+    source_message_id: Optional[int] = None
+    registered_at: Optional[datetime] = None
+    closed_by_user_id: Optional[int] = None
+    closure_remark: Optional[str] = None
+
+    branches: List[BranchResponse] = Field(default_factory=list)
+    remarks: List[RemarkResponse] = Field(default_factory=list)
+    director_reviews: List[DirectorReviewResponse] = Field(default_factory=list)
+    attachments: List[AttachmentResponse] = Field(default_factory=list)
+    history: List[WorkflowEventResponse] = Field(default_factory=list)
+
+    suggested_department_id: Optional[int] = None
+    suggested_department_name: Optional[str] = None
+    suggested_employee_id: Optional[int] = None
+    suggested_employee_name: Optional[str] = None
+    routing_confidence: Optional[float] = None
+    routing_reason: Optional[str] = None
+    is_director_instruction: bool = False
+
+
+class CloseRequest(BaseModel):
+    remark: Optional[str] = None
+    force: bool = False
+    expected_version: Optional[int] = None
+
+
+class ReopenRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+# =========================================================
+# OCR & EXTRACTION
 # =========================================================
 
 class ExtractedFieldResponse(BaseModel):
-    id:              int
-    document_id:     int
-    field_name:      str
+    id: int
+    document_id: int
+    field_name: str
     extracted_value: Optional[str] = None
-    confidence:      Optional[float] = None
-    source_page:     Optional[int] = None
-    source_text:     Optional[str] = None
-    verified_value:  Optional[str] = None
-    verified_by:     Optional[int] = None
-    verified_at:     Optional[datetime] = None
+    verified_value: Optional[str] = None
+    effective_value: Optional[str] = None
+    confidence: Optional[float] = None
+    source_page: Optional[int] = 1
+    verified_by: Optional[int] = None
+    verified_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class FieldVerifyRequest(BaseModel):
-    field_name:     str
+    field_name: str
     verified_value: str
 
 
 class OCRResponse(BaseModel):
-    id:               Optional[int] = None
-    document_id:      int
-    ocr_status:       OCRStatus
-    ocr_engine:       Optional[str] = None
-    confidence:       Optional[float] = None
-    extracted_text:   Optional[str] = None
-    processed_at:     Optional[datetime] = None
-    error_message:    Optional[str] = None
-    extracted_fields: List[ExtractedFieldResponse] = []
+    id: Optional[int] = None
+    document_id: int
+    extracted_text: Optional[str] = None
+    ocr_status: OCRStatus
+    ocr_engine: Optional[str] = None
+    confidence: Optional[float] = None
+    processed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    fields: List[ExtractedFieldResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# =========================================================
-# ROUTING SUGGESTIONS
-# =========================================================
-
 class RoutingSuggestionResponse(BaseModel):
-    id:                      Optional[int] = None
-    document_id:             int
+    id: int
+    document_id: int
     suggested_department_id: Optional[int] = None
     suggested_department_name: Optional[str] = None
-    suggested_employee_id:   Optional[int] = None
+    suggested_employee_id: Optional[int] = None
     suggested_employee_name: Optional[str] = None
-    routing_confidence:      float
-    routing_reason:          str
-    routing_source:          RoutingSource
-    is_director_instruction: bool
-    generated_at:            datetime
-    confirmed_by:            Optional[int] = None
-    confirmed_at:            Optional[datetime] = None
+    routing_confidence: float
+    routing_reason: str
+    routing_source: RoutingSource
+    is_director_instruction: bool = False
+    generated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -656,95 +644,136 @@ class RoutingAnalyzeRequest(BaseModel):
 
 
 # =========================================================
-# REMINDERS
+# NOTIFICATIONS & REMINDERS
 # =========================================================
 
+class NotificationResponse(BaseModel):
+    id: int
+    user_id: int
+    context_membership_id: Optional[int] = None
+    document_id: Optional[int] = None
+    branch_id: Optional[int] = None
+    work_item_id: Optional[int] = None
+    title: str
+    message: str
+    is_read: bool = False
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ReminderResponse(BaseModel):
-    id:                int
-    document_id:       int
+    id: int
+    document_id: int
+    work_item_id: Optional[int] = None
     recipient_user_id: int
-    reason:            ReminderReason
-    due_at:            Optional[datetime] = None
-    sent_at:           datetime
-    is_read:           bool
-    deduplication_key: str
+    reason: ReminderReason
+    message: Optional[str] = None
+    due_at: Optional[datetime] = None
+    sent_at: datetime
+    is_read: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class ReminderCheckResponse(BaseModel):
-    reminders_created: int
-    reminders:         List[ReminderResponse]
+    generated: int
+    reminders: List[ReminderResponse] = Field(default_factory=list)
 
 
-# =========================================================
-# WORKFLOW HISTORY
-# =========================================================
-
-class WorkflowHistoryResponse(BaseModel):
-    id:                  int
-    document_id:         int
-    performed_by_user_id: int
-    performed_by_name:   Optional[str] = None
-    user:                Optional[str] = None
-    action:              str
-    from_role:           Optional[str] = None
-    to_role:             Optional[str] = None
-    remarks:             Optional[str] = None
-    details:             Optional[str] = None
-    created_at:          datetime
-
-    model_config = ConfigDict(from_attributes=True)
+class ReminderSendRequest(BaseModel):
+    work_item_id: Optional[int] = None
+    recipient_user_id: Optional[int] = None
+    message: Optional[str] = None
 
 
-# =========================================================
-# NOTIFICATIONS
-# =========================================================
-
-class NotificationResponse(BaseModel):
-    id:                int
-    user_id:           int
-    document_id:       Optional[int] = None
-    workflow_event_id: Optional[int] = None
-    title:             str
-    message:           str
-    is_read:           bool
-    created_at:        datetime
-
-    model_config = ConfigDict(from_attributes=True)
+class ReminderSendResponse(BaseModel):
+    sent: int
+    channel: str = "in-app"
+    detail: Optional[str] = None
 
 
-# =========================================================
-# LIVE EVENTS
-# =========================================================
-
-class LiveEventMessage(BaseModel):
-    event_type:  str
-    document_id: Optional[int] = None
-    user_id:     Optional[int] = None
-    timestamp:   datetime = datetime.utcnow()
-    payload:     Optional[dict] = None
+class OutlookSyncResponse(BaseModel):
+    """Result of pulling the DS mailbox."""
+    status: str
+    synced_count: int = 0
+    ignored_duplicates: int = 0
+    message: Optional[str] = None
+    details: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # =========================================================
 # DASHBOARD
 # =========================================================
 
+class DashboardCard(BaseModel):
+    key: str
+    label: str
+    value: int
+
+
 class DashboardResponse(BaseModel):
-    role:                  str
-    total_documents:       int
-    pending_action:        int
-    unread_notifications:  int
-    unread_reminders:      int = 0
-    # DS-specific
-    under_director_review: Optional[int] = None
-    under_hod_processing:  Optional[int] = None
-    in_progress:           Optional[int] = None
-    closed_documents:      Optional[int] = None
-    intake_pending:        Optional[int] = None
-    # Director-specific
-    documents_for_review:  Optional[int] = None
-    # HOD-specific
-    pending_assignment:    Optional[int] = None
-    # Employee-specific
-    active_assignments:    Optional[int] = None
+    context_type: Optional[str] = None
+    department: Optional[str] = None
+    cards: List[DashboardCard] = Field(default_factory=list)
+    documents: List[DocumentListResponse] = Field(default_factory=list)
+
+
+# =========================================================
+# ADMIN
+# =========================================================
+
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    role: UserRole
+    email: Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email: Optional[str] = None
+    employee_code: Optional[str] = None
+    designation: Optional[str] = None
+    department_id: Optional[int] = None
+
+
+class AdminUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    email: Optional[str] = None
+    outlook_email: Optional[str] = None
+    gov_email: Optional[str] = None
+    employee_code: Optional[str] = None
+    designation: Optional[str] = None
+    department_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    action: str
+    entity_type: Optional[str] = None
+    entity_id: Optional[int] = None
+    description: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemSettingUpdate(BaseModel):
+    key: str
+    value: str
+    description: Optional[str] = None
+
+
+# =========================================================
+# LIVE EVENTS (websocket)
+# =========================================================
+
+class LiveEventMessage(BaseModel):
+    event: str
+    document_id: Optional[int] = None
+    branch_id: Optional[int] = None
+    work_item_id: Optional[int] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.now)

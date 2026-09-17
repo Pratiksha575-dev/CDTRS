@@ -1,280 +1,213 @@
+"""Repository protocol.
+
+Defines the data operations the UI is allowed to perform.  The vocabulary is
+the workflow vocabulary: branches are opened, work items are assigned to one
+person each, progress is free text, and only the DS closes a document.
+"""
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from models import (
     AttachmentModel,
+    BranchModel,
+    DepartmentModel,
+    DirectorReviewModel,
     DocumentModel,
     NotificationModel,
-    ProgressUpdateModel,
+    ProgressModel,
+    RemarkModel,
     UserModel,
-    WorkAssignmentModel,
+    WorkItemModel,
     WorkflowEventModel,
 )
-from models.department import DepartmentModel
+from models.user import ContextMembershipModel
 
 
 class BaseRepository(ABC):
-    """
-    Abstract repository protocol defining data access operations for CDTRS V2.
-    Implemented by APIRepository (FastAPI live client).
-    """
 
     # =========================================================
-    # AUTHENTICATION & USER SESSION
+    # AUTHENTICATION & WORK CONTEXT
     # =========================================================
 
     @abstractmethod
     def authenticate(self, username: str, password: str) -> Optional[UserModel]:
-        """Validates credentials and establishes authenticated user session."""
-        pass
+        """Sign in and establish the session."""
 
     @abstractmethod
     def get_current_user(self) -> Optional[UserModel]:
-        """Returns currently authenticated user profile or None."""
-        pass
+        """The signed-in account."""
 
     @abstractmethod
     def logout(self) -> None:
-        """Terminates active user session and clears authentication tokens."""
-        pass
+        """Clear the session and the active context."""
 
     @abstractmethod
-    def reset_password(self, username: str, old_password: str, new_password: str) -> bool:
-        """Resets the password for the specified user after verifying current password."""
-        pass
+    def get_user_contexts(self) -> List[ContextMembershipModel]:
+        """Every hat this user can wear, e.g. HOD-Engineering plus
+        Employee-Product plus TSO."""
 
     @abstractmethod
-    def get_users(self, role: Optional[str] = None, department_id: Optional[int] = None) -> List[UserModel]:
-        """Retrieves list of users filtered by role or department."""
-        pass
+    def switch_context(self, context_membership_id: int) -> Optional[ContextMembershipModel]:
+        """Change the active hat.  Everything the user sees and may do changes
+        with it."""
+
+    # =========================================================
+    # REFERENCE DATA
+    # =========================================================
+
+    @abstractmethod
+    def get_users(
+        self, context_type: Optional[str] = None, department_id: Optional[int] = None
+    ) -> List[UserModel]:
+        """People, filtered by the work context they hold."""
 
     @abstractmethod
     def get_departments(self) -> List[DepartmentModel]:
-        """Retrieves list of all institutional departments."""
-        pass
+        """Active departments."""
 
     # =========================================================
-    # DOCUMENT LIFECYCLE & INBOX
+    # DOCUMENTS
     # =========================================================
+
+    @abstractmethod
+    def get_documents(self, **filters: Any) -> List[DocumentModel]:
+        """Everything the active context may open."""
 
     @abstractmethod
     def get_inbox(self) -> List[DocumentModel]:
-        """Retrieves incoming/unprocessed documents for DS intake."""
-        pass
+        """Only what the active context must act on now."""
 
     @abstractmethod
-    def add_inbox_item(self, document: DocumentModel) -> DocumentModel:
-        """Adds a newly arrived dispatch or communication to the raw intake queue."""
-        pass
+    def get_document(self, doc_id: int) -> Optional[DocumentModel]:
+        """One document with its branches, work items, remarks and history."""
 
     @abstractmethod
-    def remove_inbox_item(self, item_id: int) -> bool:
-        """Removes an incoming intake item after it has been processed and registered."""
-        pass
+    def create_document(self, payload: Dict[str, Any]) -> Optional[DocumentModel]:
+        """Register a new document (DS)."""
 
     @abstractmethod
-    def get_documents(
-        self,
-        status: Optional[str] = None,
-        department: Optional[str] = None,
-        source: Optional[str] = None,
-        search: Optional[str] = None
-    ) -> List[DocumentModel]:
-        """Retrieves documents repository with optional filtering."""
-        pass
+    def update_document(self, doc_id: int, payload: Dict[str, Any]) -> Optional[DocumentModel]:
+        """Correct document metadata, including anything OCR mis-read (DS)."""
 
     @abstractmethod
-    def get_document(self, document_id: int) -> Optional[DocumentModel]:
-        """Retrieves single canonical document by ID or reference."""
-        pass
-
-    @abstractmethod
-    def create_document(self, document: DocumentModel, file_path: Optional[str] = None) -> DocumentModel:
-        """Creates a new document in the repository."""
-        pass
-
-    @abstractmethod
-    def close_document(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """Closes a completed document (DS action)."""
-        pass
+    def close_document(
+        self, doc_id: int, remark: Optional[str] = None,
+        force: bool = False, expected_version: Optional[int] = None,
+    ) -> Optional[DocumentModel]:
+        """DS closure.  The only way a document closes."""
 
     # =========================================================
-    # ROUTING (DS Decisions & Director Return)
+    # BRANCHES (independent workstreams)
     # =========================================================
+
+    @abstractmethod
+    def get_document_branches(self, doc_id: int) -> List[BranchModel]:
+        """Every workstream on the document, each with its own stage."""
 
     @abstractmethod
     def route_document(
+        self, doc_id: int, branches: List[Dict[str, Any]], expected_version: Optional[int] = None
+    ) -> List[BranchModel]:
+        """Open one or several workstreams at once.  They coexist."""
+
+    @abstractmethod
+    def assign_work(
         self,
-        document_id: int,
-        route_type: str,
-        to_user_id: Optional[int] = None,
-        to_department_id: Optional[int] = None,
-        remarks: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        expected_version: Optional[int] = None,
-    ) -> DocumentModel:
-        """Performs a routing transition (DS -> Director, DS -> HOD, DS -> Employee, etc.)."""
-        pass
-
-    @abstractmethod
-    def save_director_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
-        """Saves/updates Director remark on document without returning it."""
-        pass
-
-    @abstractmethod
-    def return_to_ds(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """Director workflow action returning reviewed document back to DS."""
-        pass
-
-    @abstractmethod
-    def save_hod_remark(self, document_id: int, remark: str, expected_version: Optional[int] = None) -> DocumentModel:
-        """Saves/updates HOD remark on document without assigning."""
-        pass
-
-    @abstractmethod
-    def forward_followup_to_director(self, document_id: int, remarks: Optional[str] = None, expected_version: Optional[int] = None) -> DocumentModel:
-        """DS forwards employee progress update to Director as follow-up."""
-        pass
-
-    # =========================================================
-    # WORK ASSIGNMENT (HOD -> Employee Delegation)
-    # =========================================================
-
-    @abstractmethod
-    def assign_employee(
-        self,
-        document_id: int,
-        assigned_to_id: int,
+        branch_id: int,
+        assignee_user_ids: List[int],
         instructions: Optional[str] = None,
-        requires_hod_validation: bool = False,
-        routing_id: Optional[int] = None,
-        change_reason: Optional[str] = None,
-        expected_version: Optional[int] = None,
-    ) -> WorkAssignmentModel:
-        """HOD delegates work on a document to an employee."""
-        pass
+        deadline: Optional[str] = None,
+        requires_validation: bool = False,
+        team_name: Optional[str] = None,
+    ) -> List[WorkItemModel]:
+        """One work item per person.  A team name groups them, never merges
+        them."""
 
     @abstractmethod
-    def get_assignments(self, document_id: int) -> List[WorkAssignmentModel]:
-        """Retrieves assignment records for a document."""
-        pass
+    def add_branch_remark(self, branch_id: int, remark_text: str) -> Optional[RemarkModel]:
+        """Append a remark to a workstream.  Remarks are never overwritten."""
+
+    @abstractmethod
+    def close_branch(self, branch_id: int, reason: Optional[str] = None) -> Optional[BranchModel]:
+        """End one workstream; the document and other branches carry on."""
 
     # =========================================================
-    # PROGRESS & ATTACHMENTS (Employee Reporting)
+    # DIRECTOR REVIEW
     # =========================================================
+
+    @abstractmethod
+    def submit_director_review(
+        self, branch_id: int, remark_text: str, expected_version: Optional[int] = None
+    ) -> Optional[DirectorReviewModel]:
+        """Record a Director remark and hand back to the DS."""
+
+    @abstractmethod
+    def get_director_reviews(self, doc_id: int) -> List[DirectorReviewModel]:
+        """Every review ever made on the document.  None replaces another."""
+
+    # =========================================================
+    # WORK ITEMS (one person's work)
+    # =========================================================
+
+    @abstractmethod
+    def get_my_work_items(self, include_finished: bool = False) -> List[WorkItemModel]:
+        """The caller's own tasks in the active context."""
+
+    @abstractmethod
+    def get_department_work_items(self) -> List[WorkItemModel]:
+        """HOD view: every individual's work across their department."""
+
+    @abstractmethod
+    def get_document_work_items(self, doc_id: int) -> List[WorkItemModel]:
+        """Everyone's work on one document."""
+
+    @abstractmethod
+    def set_work_stage(
+        self, work_item_id: int, stage: str, note: Optional[str] = None
+    ) -> Optional[WorkItemModel]:
+        """The worker moves their own work through its stages."""
 
     @abstractmethod
     def submit_progress(
-        self,
-        document_id: int,
-        description: str,
-        work_assignment_id: Optional[int] = None,
-        attachment_file_path: Optional[str] = None
-    ) -> ProgressUpdateModel:
-        """Employee submits a free-text progress update with optional attachment."""
-        pass
+        self, work_item_id: int, description: str, new_stage: Optional[str] = None
+    ) -> Optional[ProgressModel]:
+        """Free-text progress.  Never a percentage."""
 
     @abstractmethod
-    def get_progress_updates(self, document_id: int) -> List[ProgressUpdateModel]:
-        """Retrieves chronological progress updates for a document."""
-        pass
+    def submit_work(self, work_item_id: int, note: Optional[str] = None) -> Optional[WorkItemModel]:
+        """Hand the work in for validation or completion."""
+
+    @abstractmethod
+    def review_work_item(
+        self, work_item_id: int, outcome: str, note: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """HOD accepts or returns ONE person's work."""
+
+    # =========================================================
+    # ATTACHMENTS, HISTORY, NOTIFICATIONS
+    # =========================================================
+
+    @abstractmethod
+    def get_attachments(self, doc_id: int) -> List[AttachmentModel]:
+        """Files on the document, including those attached to progress."""
 
     @abstractmethod
     def upload_attachment(
-        self,
-        document_id: int,
-        file_path: str,
+        self, doc_id: int, file_path: str,
+        attachment_type: str = "SUPPORTING_DOCUMENT",
         progress_update_id: Optional[int] = None,
-        category: str = "WORKFLOW",
-        source: Optional[str] = None
-    ) -> AttachmentModel:
-        """Uploads a supporting attachment linked to document or progress update."""
-        pass
+    ) -> Optional[AttachmentModel]:
+        """Attach a supporting document, optionally to a specific update."""
 
     @abstractmethod
-    def get_attachments(self, document_id: int, category: Optional[str] = None) -> List[AttachmentModel]:
-        """Retrieves all attachments associated with a document."""
-        pass
-
-    # =========================================================
-    # WORKFLOW HISTORY & AUDIT
-    # =========================================================
+    def get_workflow_history(self, doc_id: int) -> List[WorkflowEventModel]:
+        """The document's complete chronological history."""
 
     @abstractmethod
-    def get_workflow_history(self, document_id: int) -> List[WorkflowEventModel]:
-        """Retrieves chronological workflow events for a specific document."""
-        pass
+    def get_notifications(self, unread_only: bool = False) -> List[NotificationModel]:
+        """Notifications for the active context."""
 
     @abstractmethod
-    def get_all_audit_history(
-        self,
-        user: Optional[str] = None,
-        action: Optional[str] = None
-    ) -> List[WorkflowEventModel]:
-        """Retrieves system-wide activity history with filtering."""
-        pass
-
-    # =========================================================
-    # NOTIFICATIONS
-    # =========================================================
-
-    @abstractmethod
-    def get_notifications(
-        self,
-        user_id: Optional[int] = None,
-        unread_only: bool = False
-    ) -> List[NotificationModel]:
-        """Retrieves notification list for active user."""
-        pass
-
-    @abstractmethod
-    def mark_notification_read(self, notification_id: int) -> bool:
-        """Marks specific notification as read."""
-        pass
-
-    # =========================================================
-    # DASHBOARD
-    # =========================================================
-
-    @abstractmethod
-    def get_dashboard_summary(self, role: Optional[str] = None) -> Dict[str, Any]:
-        """Retrieves role-specific dashboard metrics and document queues."""
-        pass
-
-    # =========================================================
-    # OCR & ROUTING INTELLIGENCE
-    # =========================================================
-
-    @abstractmethod
-    def get_ocr_result(self, document_id: int) -> Dict[str, Any]:
-        """Returns the OCR record for a document (status, extracted text, fields)."""
-        pass
-
-    @abstractmethod
-    def trigger_ocr(self, document_id: int) -> Dict[str, Any]:
-        """Triggers server-side OCR processing on the stored document file."""
-        pass
-
-    @abstractmethod
-    def get_routing_suggestion(self, document_id: int) -> Dict[str, Any]:
-        """Returns the advisory routing suggestion generated from OCR + Director remarks."""
-        pass
-
-    @abstractmethod
-    def analyze_routing(self, document_id: int) -> Dict[str, Any]:
-        """Generates (or refreshes) the routing suggestion for a document."""
-        pass
-
-    # =========================================================
-    # OUTLOOK INTAKE & WORKFLOW REMINDERS
-    # =========================================================
-
-    @abstractmethod
-    def sync_outlook(self) -> Dict[str, Any]:
-        """Synchronizes new incoming emails and attachments from DS Outlook mailbox."""
-        pass
-
-    @abstractmethod
-    def send_document_reminder(self, document_id: int, message: Optional[str] = None) -> Dict[str, Any]:
-        """Dispatches an official action reminder to the current responsible user with email notification."""
-        pass
+    def get_dashboard_summary(self) -> Dict[str, Any]:
+        """Counters that mean something for the active context."""

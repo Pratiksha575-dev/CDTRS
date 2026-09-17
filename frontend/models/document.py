@@ -1,736 +1,334 @@
+"""Frontend domain model for a CDTRS document.
+
+A document carries a LIFECYCLE and a list of BRANCHES.  It deliberately has
+no single "current owner", "current department" or "current stage": those
+concepts stop meaning anything the moment a document is being worked on by
+an HOD, a direct employee and the TSO at the same time, which is the normal
+case here.
+
+    Document (lifecycle: In Work)
+      |
+      +-- Engineering HOD      stage: Employee Work
+      |     +-- Rahul   Under Work
+      |     +-- Sneha   Waiting
+      |
+      +-- Anil (direct)        stage: Completed
+      |
+      +-- TSO                  stage: Technical Work
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from models.enums import DocumentStatusEnum, PriorityEnum
-from models.work_assignment import WorkAssignmentModel
+from models.workflow import (
+    DEADLINE_COLORS,
+    DEADLINE_LABELS,
+    AttachmentModel,
+    BranchModel,
+    BranchSummaryModel,
+    DirectorReviewModel,
+    ProgressModel,
+    RemarkModel,
+    WorkItemModel,
+    WorkflowEventModel,
+    _fmt_date,
+    _fmt_datetime,
+    _get,
+)
+
+LIFECYCLE_COLORS = {
+    "RECEIVED": "#475569",
+    "REGISTERED": "#0F766E",
+    "IN_REVIEW": "#7C3AED",
+    "IN_WORK": "#0369A1",
+    "WITH_DS": "#B45309",
+    "CLOSED": "#166534",
+}
+
+PRIORITY_COLORS = {
+    "CRITICAL": "#B91C1C",
+    "HIGH": "#C2410C",
+    "MEDIUM": "#B45309",
+    "LOW": "#166534",
+}
 
 
 @dataclass
 class DocumentModel:
-    """
-    Canonical frontend domain model for a CDTRS document.
-
-    A Document is the common container for the complete lifecycle.
-
-    Operational routing is represented through canonical WorkAssignments.
-    A document may have multiple independent workstreams at the same time.
-
-    Examples:
-
-        Document
-        ├── HOD Department A
-        │      └── WorkAssignment -> Employee A
-        │
-        ├── HOD Department B
-        │      └── WorkAssignment -> Employee B
-        │
-        └── TSO
-               └── WorkAssignment -> TSO
-
-    There is intentionally NO single frontend owner, target department,
-    or single operational stage. Those concepts become ambiguous as soon
-    as a document has parallel routes.
-    """
-
-    # ================================================================
-    # DOCUMENT IDENTITY
-    # ================================================================
-
+    # --- identity ---
     id: Optional[int] = None
     reference_no: Optional[str] = None
     title: str = ""
-
-    date: Optional[str] = None
-    mode: str = "Government Mail"
-    source: Optional[str] = None
-    priority: str = "Medium"
-    deadline: Optional[str] = None
-
-    # Document-level lifecycle status only.
-    #
-    # This is NOT a representation of which department/person currently
-    # owns the document.
-    status: str = "Received"
-    version: Optional[int] = None
+    subject: Optional[str] = None
     description: Optional[str] = None
-    source_message_id: Optional[int] = None
+
+    received_date: Optional[str] = None
+    deadline: Optional[str] = None
+    deadline_state: str = "none"
+    source: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_reference: Optional[str] = None
+    mode: str = "MANUAL_UPLOAD"
+    priority: str = "MEDIUM"
+
+    # --- document lifecycle (NOT the state of the work) ---
+    lifecycle: str = "RECEIVED"
+    lifecycle_label: str = "Received"
+    version: int = 1
     ocr_status: Optional[str] = None
+
+    created_by: Optional[int] = None
+    source_message_id: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    registered_at: Optional[str] = None
     closed_at: Optional[str] = None
-    branches: List[Dict[str, Any]] = field(default_factory=list)
+    closed_by_user_id: Optional[int] = None
+    closure_remark: Optional[str] = None
 
-    # ================================================================
-    # DOCUMENT-LEVEL REVIEW INFORMATION
-    # ================================================================
+    # --- the work (each branch keeps its own stage) ---
+    branch_summaries: List[BranchSummaryModel] = field(default_factory=list)
+    branches: List[BranchModel] = field(default_factory=list)
+    people_involved: List[str] = field(default_factory=list)
+    active_branch_count: int = 0
+    open_work_item_count: int = 0
+    my_work_items: List[WorkItemModel] = field(default_factory=list)
 
-    director_remark: Optional[str] = None
-    hod_remark: Optional[str] = None
+    # --- review & history ---
+    latest_director_remark: Optional[str] = None
+    has_open_director_review: bool = False
+    director_reviews: List[DirectorReviewModel] = field(default_factory=list)
+    remarks: List[RemarkModel] = field(default_factory=list)
+    attachments: List[AttachmentModel] = field(default_factory=list)
+    history: List[WorkflowEventModel] = field(default_factory=list)
 
-    remarks: Optional[str] = None
-    action: Optional[str] = None
-
-    has_prior_director_remark: bool = False
-
-    # ================================================================
-    # ADVISORY ROUTING / INTELLIGENCE
-    # ================================================================
-    #
-    # These are suggestions only. They are NOT actual routing.
-    # Actual routing exists in canonical routing branches/work assignments.
-
+    # --- advisory routing intelligence (suggestions only) ---
     suggested_department_id: Optional[int] = None
     suggested_department_name: Optional[str] = None
-
     suggested_employee_id: Optional[int] = None
     suggested_employee_name: Optional[str] = None
-
-    has_director_routing_instruction: bool = False
-    director_routing_raw_text: Optional[str] = None
-
-    routing_instruction_confidence: int = 0
     routing_confidence: Optional[float] = None
-    confidence: Optional[float] = None
     routing_reason: Optional[str] = None
     is_director_instruction: bool = False
 
     # ================================================================
-    # FILE / OCR
+    # CONSTRUCTION
     # ================================================================
 
-    file_path: Optional[str] = None
-    file_type: Optional[str] = None
-    format: Optional[str] = None
-    ocr_text: Optional[str] = None
+    @classmethod
+    def from_dict(cls, data: Any) -> "DocumentModel":
+        if data is None:
+            return cls()
+        if isinstance(data, cls):
+            return data
+        return cls(
+            id=_get(data, "doc_id") or _get(data, "id"),
+            reference_no=_get(data, "reference_no"),
+            title=_get(data, "title") or "",
+            subject=_get(data, "subject"),
+            description=_get(data, "description"),
+            received_date=_get(data, "received_date"),
+            deadline=_get(data, "deadline"),
+            deadline_state=_get(data, "deadline_state") or "none",
+            source=_get(data, "source"),
+            sender_name=_get(data, "sender_name"),
+            sender_reference=_get(data, "sender_reference"),
+            mode=_get(data, "mode") or "MANUAL_UPLOAD",
+            priority=_get(data, "priority") or "MEDIUM",
+            lifecycle=_get(data, "lifecycle") or "RECEIVED",
+            lifecycle_label=_get(data, "lifecycle_label") or "Received",
+            version=_get(data, "version") or 1,
+            ocr_status=_get(data, "ocr_status"),
+            created_by=_get(data, "created_by"),
+            source_message_id=_get(data, "source_message_id"),
+            created_at=_get(data, "created_at"),
+            updated_at=_get(data, "updated_at"),
+            registered_at=_get(data, "registered_at"),
+            closed_at=_get(data, "closed_at"),
+            closed_by_user_id=_get(data, "closed_by_user_id"),
+            closure_remark=_get(data, "closure_remark"),
+            branch_summaries=[
+                BranchSummaryModel.from_dict(b) for b in (_get(data, "branch_summaries") or [])
+            ],
+            branches=[BranchModel.from_dict(b) for b in (_get(data, "branches") or [])],
+            people_involved=list(_get(data, "people_involved") or []),
+            active_branch_count=_get(data, "active_branch_count") or 0,
+            open_work_item_count=_get(data, "open_work_item_count") or 0,
+            my_work_items=[WorkItemModel.from_dict(w) for w in (_get(data, "my_work_items") or [])],
+            latest_director_remark=_get(data, "latest_director_remark"),
+            has_open_director_review=bool(_get(data, "has_open_director_review")),
+            director_reviews=[
+                DirectorReviewModel.from_dict(r) for r in (_get(data, "director_reviews") or [])
+            ],
+            remarks=[RemarkModel.from_dict(r) for r in (_get(data, "remarks") or [])],
+            attachments=[AttachmentModel.from_dict(a) for a in (_get(data, "attachments") or [])],
+            history=[WorkflowEventModel.from_dict(e) for e in (_get(data, "history") or [])],
+            suggested_department_id=_get(data, "suggested_department_id"),
+            suggested_department_name=_get(data, "suggested_department_name"),
+            suggested_employee_id=_get(data, "suggested_employee_id"),
+            suggested_employee_name=_get(data, "suggested_employee_name"),
+            routing_confidence=_get(data, "routing_confidence"),
+            routing_reason=_get(data, "routing_reason"),
+            is_director_instruction=bool(_get(data, "is_director_instruction")),
+        )
 
     # ================================================================
-    # ATTACHMENTS
-    # ================================================================
-
-    attachment_count: int = 0
-    attachments_list: List[str] = field(default_factory=list)
-
-    # ================================================================
-    # CANONICAL OPERATIONAL DATA
-    # ================================================================
-
-    work_assignments: List[WorkAssignmentModel] = field(
-        default_factory=list
-    )
-
-    # ================================================================
-    # AUDIT / TIMESTAMPS
-    # ================================================================
-
-    created_by: Optional[int] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-    # ================================================================
-    # BASIC DERIVED INFORMATION
+    # DISPLAY
     # ================================================================
 
     @property
     def reference(self) -> str:
-        """Human-readable document reference."""
-        return self.reference_no or (
-            f"CDTRS-2026-{self.id:03d}" if self.id else "-"
-        )
+        return self.reference_no or (f"DOC-{self.id}" if self.id else "-")
 
     @property
-    def subject(self) -> str:
-        """Human-readable subject alias."""
-        return self.title
+    def received_display(self) -> str:
+        return _fmt_date(self.received_date)
 
     @property
-    def received(self) -> str:
-        """Human-readable received date."""
-        return self.date or ""
+    def deadline_display(self) -> str:
+        return _fmt_date(self.deadline)
+
+    @property
+    def deadline_color(self) -> str:
+        return DEADLINE_COLORS.get(self.deadline_state, DEADLINE_COLORS["none"])
+
+    @property
+    def deadline_label(self) -> str:
+        return DEADLINE_LABELS.get(self.deadline_state, "")
+
+    @property
+    def updated_display(self) -> str:
+        return _fmt_datetime(self.updated_at)
+
+    @property
+    def lifecycle_color(self) -> str:
+        return LIFECYCLE_COLORS.get(self.lifecycle, "#475569")
+
+    @property
+    def priority_color(self) -> str:
+        return PRIORITY_COLORS.get(str(self.priority).upper(), "#475569")
+
+    @property
+    def is_closed(self) -> bool:
+        return self.lifecycle == "CLOSED"
 
     # ================================================================
-    # WORK ASSIGNMENT HELPERS
+    # BRANCH / WORK PROJECTIONS
     # ================================================================
 
     @property
-    def active_work_assignments(self) -> List[WorkAssignmentModel]:
-        """
-        All currently active operational workstreams.
-
-        This is the authoritative frontend representation of
-        operational responsibility.
-        """
-        return [
-            assignment
-            for assignment in self.work_assignments
-            if assignment.is_active
-        ]
+    def active_branches(self) -> List[BranchModel]:
+        return [b for b in self.branches if b.is_active]
 
     @property
-    def team_assignments(self) -> List[WorkAssignmentModel]:
-        """
-        Active collaborative assignments.
-
-        A team assignment is one WorkAssignment containing multiple
-        active members.
-        """
-        return [
-            assignment
-            for assignment in self.active_work_assignments
-            if assignment.is_team or assignment.member_count > 1
-        ]
+    def work_branches(self) -> List[BranchModel]:
+        """Everything except Director review - the branches where work happens."""
+        return [b for b in self.branches if b.branch_type != "DIRECTOR"]
 
     @property
-    def team_assignment(self) -> Optional[WorkAssignmentModel]:
-        """
-        Return the first active team assignment.
-
-        This is only a convenience helper. It must NOT be used to
-        represent the document's complete operational assignment state.
-        """
-        assignments = self.team_assignments
-        return assignments[0] if assignments else None
+    def director_branches(self) -> List[BranchModel]:
+        return [b for b in self.branches if b.branch_type == "DIRECTOR"]
 
     @property
-    def assignment_count(self) -> int:
-        """Number of active workstreams."""
-        return len(self.active_work_assignments)
+    def open_director_branch(self) -> Optional[BranchModel]:
+        for b in self.branches:
+            if b.branch_type == "DIRECTOR" and b.is_active:
+                return b
+        return None
 
     @property
-    def assigned_member_count(self) -> int:
-        """
-        Number of unique active users participating in active
-        work assignments.
-        """
-        return len(self.all_assigned_user_ids)
+    def all_work_items(self) -> List[WorkItemModel]:
+        items: List[WorkItemModel] = []
+        for b in self.branches:
+            items.extend(b.work_items)
+        return items
 
-    @property
-    def all_assigned_user_ids(self) -> List[int]:
-        """
-        Return unique active user IDs across all active work assignments.
-
-        This includes:
-          - single-person work assignments
-          - team members
-        """
-        ids: List[int] = []
-
-        for assignment in self.active_work_assignments:
-            for user_id in assignment.member_ids:
-                if user_id is not None and user_id not in ids:
-                    ids.append(user_id)
-
-            # A single-user assignment can be represented directly by
-            # assigned_to_id without a member row.
-            if (
-                assignment.assigned_to_id is not None
-                and assignment.assigned_to_id not in ids
-            ):
-                ids.append(assignment.assigned_to_id)
-
-        return ids
-
-    @property
-    def all_assigned_user_names(self) -> List[str]:
-        """
-        Return unique names across all active work assignments.
-        """
-        names: List[str] = []
-
-        for assignment in self.active_work_assignments:
-            for name in assignment.member_names:
-                if name and name not in names:
-                    names.append(name)
-
-            if (
-                assignment.assigned_to_name
-                and assignment.assigned_to_name != "Not Assigned"
-                and assignment.assigned_to_name not in names
-            ):
-                names.append(assignment.assigned_to_name)
-
-        return names
-
-    @property
-    def has_active_work(self) -> bool:
-        """True when at least one active workstream exists."""
-        return bool(self.active_work_assignments)
-
-    @property
-    def has_team_assignment(self) -> bool:
-        """True when at least one active team workstream exists."""
-        return bool(self.team_assignments)
-
-    # ================================================================
-    # WORKSTREAM LOOKUP HELPERS
-    # ================================================================
-
-    def get_work_assignment(
-        self,
-        assignment_id: Optional[int],
-    ) -> Optional[WorkAssignmentModel]:
-        """
-        Find one work assignment by ID.
-        """
-        if assignment_id is None:
+    def branch_by_id(self, branch_id: Optional[int]) -> Optional[BranchModel]:
+        if branch_id is None:
             return None
+        return next((b for b in self.branches if b.id == branch_id), None)
 
-        for assignment in self.work_assignments:
-            if assignment.id == assignment_id:
-                return assignment
-
-        return None
-
-    def get_active_work_assignment(
-        self,
-        assignment_id: Optional[int],
-    ) -> Optional[WorkAssignmentModel]:
-        """
-        Find one active work assignment by ID.
-        """
-        assignment = self.get_work_assignment(assignment_id)
-
-        if assignment and assignment.is_active:
-            return assignment
-
-        return None
-
-    def get_work_assignments_for_user(
-        self,
-        user_id: Optional[int],
-    ) -> List[WorkAssignmentModel]:
-        """
-        Return all active workstreams in which the given user participates.
-
-        A user participates when they are:
-          - the direct assigned_to user, or
-          - an active team member.
-        """
+    def work_items_for_user(self, user_id: Optional[int], context_id: Optional[int] = None) -> List[WorkItemModel]:
+        """This person's own work on this document, scoped to one context when
+        given.  A user wearing two hats keeps two separate sets of work."""
         if user_id is None:
             return []
+        return [
+            w for w in self.all_work_items
+            if w.assigned_to_user_id == user_id
+            and (context_id is None or w.assigned_to_context_membership_id == context_id)
+        ]
 
-        result: List[WorkAssignmentModel] = []
-
-        for assignment in self.active_work_assignments:
-            if assignment.assigned_to_id == user_id:
-                result.append(assignment)
-                continue
-
-            if user_id in assignment.member_ids:
-                result.append(assignment)
-
-        return result
-
-    # ================================================================
-    # API → DOMAIN MODEL
-    # ================================================================
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DocumentModel":
-        """
-        Construct the canonical frontend document model from API data.
-
-        Only canonical operational data is retained for routing and
-        assignment behavior.
-        """
-
-        if not data:
-            return cls()
-
-        raw_date = (
-            data.get("date")
-            or data.get("received_date")
-            or data.get("received")
-        )
-
-        raw_deadline = data.get("deadline")
-
-        raw_status = data.get("status", "Received")
-
-        raw_priority = data.get("priority", "Medium")
-
-        # ------------------------------------------------------------
-        # Work assignments
-        # ------------------------------------------------------------
-
-        raw_work_assignments = (
-            data.get("work_assignments")
-            or data.get("assignments")
-            or []
-        )
-
-        work_assignments: List[WorkAssignmentModel] = []
-
-        raw_branches = data.get("branches") or []
-        branch_department_by_id = {}
-        if isinstance(raw_branches, list):
-            for branch in raw_branches:
-                if isinstance(branch, dict) and branch.get("id") is not None:
-                    branch_department_by_id[branch.get("id")] = branch.get("department_id")
-
-        if isinstance(raw_work_assignments, list):
-            for assignment in raw_work_assignments:
-                if not assignment:
-                    continue
-
-                try:
-                    parsed = WorkAssignmentModel.from_any(assignment)
-                    if parsed.department_id is None and parsed.routing_id in branch_department_by_id:
-                        parsed.department_id = branch_department_by_id[parsed.routing_id]
-                    work_assignments.append(parsed)
-                except Exception:
-                    continue
-
-        # ------------------------------------------------------------
-        # Construct document
-        # ------------------------------------------------------------
-
-        return cls(
-            id=data.get("id") or data.get("doc_id"),
-
-            reference_no=(
-                data.get("reference_no")
-                or data.get("reference")
-            ),
-
-            title=(
-                data.get("title")
-                or data.get("subject")
-                or ""
-            ),
-
-            date=(
-                str(raw_date)
-                if raw_date is not None
-                else None
-            ),
-
-            mode=(
-                data.get("mode")
-                or data.get("ingestion_mode")
-                or "Government Mail"
-            ),
-
-            source=data.get("source"),
-
-            priority=PriorityEnum.normalize(
-                str(raw_priority)
-            ),
-
-            deadline=(
-                str(raw_deadline)
-                if raw_deadline is not None
-                else None
-            ),
-
-            status=DocumentStatusEnum.normalize(
-                str(raw_status)
-            ),
-
-            version=data.get("version"),
-            description=data.get("description"),
-            source_message_id=data.get("source_message_id"),
-            ocr_status=(str(data.get("ocr_status")) if data.get("ocr_status") is not None else None),
-            closed_at=(str(data.get("closed_at")) if data.get("closed_at") is not None else None),
-            branches=[dict(b) for b in raw_branches if isinstance(b, dict)],
-
-            director_remark=(
-                data.get("director_remark")
-                or data.get("director_remarks")
-            ),
-
-            hod_remark=(
-                data.get("hod_remark")
-                or data.get("hod_remarks")
-            ),
-
-            remarks=data.get("remarks"),
-
-            action=data.get("action"),
-
-            # --------------------------------------------------------
-            # Advisory routing only
-            # --------------------------------------------------------
-
-            suggested_department_id=data.get(
-                "suggested_department_id"
-            ),
-
-            suggested_department_name=data.get(
-                "suggested_department_name"
-            ),
-
-            suggested_employee_id=data.get(
-                "suggested_employee_id"
-            ),
-
-            suggested_employee_name=data.get(
-                "suggested_employee_name"
-            ),
-
-            has_director_routing_instruction=bool(
-                data.get(
-                    "has_director_routing_instruction",
-                    data.get(
-                        "is_director_instruction",
-                        False,
-                    ),
-                )
-            ),
-
-            director_routing_raw_text=(
-                data.get("director_routing_raw_text")
-                or data.get("routing_reason")
-            ),
-
-            routing_instruction_confidence=(
-                cls._parse_instruction_confidence(data)
-            ),
-
-            routing_confidence=(
-                float(data.get("routing_confidence"))
-                if data.get("routing_confidence") is not None
-                else (
-                    float(data.get("confidence"))
-                    if data.get("confidence") is not None
-                    else None
-                )
-            ),
-
-            confidence=(
-                float(data.get("confidence"))
-                if data.get("confidence") is not None
-                else (
-                    float(data.get("routing_confidence"))
-                    if data.get("routing_confidence") is not None
-                    else None
-                )
-            ),
-
-            routing_reason=data.get("routing_reason"),
-
-            is_director_instruction=bool(
-                data.get(
-                    "is_director_instruction",
-                    data.get(
-                        "has_director_routing_instruction",
-                        False,
-                    ),
-                )
-            ),
-
-            # --------------------------------------------------------
-            # Files / OCR
-            # --------------------------------------------------------
-
-            file_path=data.get("file_path"),
-
-            file_type=(
-                data.get("file_type")
-                or data.get("format")
-            ),
-
-            format=(
-                data.get("format")
-                or data.get("file_type")
-                or "PDF"
-            ),
-
-            ocr_text=data.get("ocr_text"),
-
-            # --------------------------------------------------------
-            # Attachments
-            # --------------------------------------------------------
-
-            has_prior_director_remark=bool(
-                data.get("has_prior_director_remark", False)
-            ),
-
-            attachment_count=int(
-                data.get("attachment_count", 0) or 0
-            ),
-
-            attachments_list=(
-                data.get("attachments_list")
-                or []
-            ),
-
-            # --------------------------------------------------------
-            # Canonical operational assignments
-            # --------------------------------------------------------
-
-            work_assignments=work_assignments,
-
-            # --------------------------------------------------------
-            # Audit
-            # --------------------------------------------------------
-
-            created_by=data.get("created_by"),
-
-            created_at=(
-                str(data.get("created_at"))
-                if data.get("created_at") is not None
-                else None
-            ),
-
-            updated_at=(
-                str(data.get("updated_at"))
-                if data.get("updated_at") is not None
-                else None
-            ),
-        )
+    def branches_for_department(self, department_id: Optional[int]) -> List[BranchModel]:
+        if department_id is None:
+            return []
+        return [
+            b for b in self.branches
+            if b.branch_type == "DEPARTMENT" and b.department_id == department_id
+        ]
 
     # ================================================================
-    # ROUTING INTELLIGENCE HELPERS
+    # TABLE CELL HELPERS
     # ================================================================
 
-    @staticmethod
-    def _parse_instruction_confidence(
-        data: Dict[str, Any],
-    ) -> int:
-        """
-        Normalize routing instruction confidence to an integer
-        percentage.
-        """
+    @property
+    def branch_stage_lines(self) -> List[str]:
+        """One line per branch, e.g. ['Engineering HOD: Employee Work',
+        'Anil Kumar: Completed'].  Deliberately a LIST: a document with
+        branches at different stages must read as exactly that."""
+        return [s.cell_text for s in self.branch_summaries]
 
-        raw = data.get("routing_instruction_confidence")
+    @property
+    def branch_stage_cell(self) -> str:
+        if not self.branch_summaries:
+            return "Not routed"
+        return "\n".join(self.branch_stage_lines)
 
-        if raw is not None:
-            try:
-                return int(float(raw))
-            except Exception:
-                return 0
+    @property
+    def people_cell(self) -> str:
+        if not self.people_involved:
+            return "-"
+        if len(self.people_involved) <= 3:
+            return ", ".join(self.people_involved)
+        return f"{', '.join(self.people_involved[:3])} +{len(self.people_involved) - 3} more"
 
-        routing_confidence = data.get("routing_confidence")
+    @property
+    def workstream_summary(self) -> str:
+        if not self.branch_summaries:
+            return "Not routed"
+        active = self.active_branch_count
+        total = len(self.branch_summaries)
+        return f"{active} open / {total} total"
 
-        if routing_confidence is not None:
-            try:
-                value = float(routing_confidence)
-
-                if value <= 1.0:
-                    return round(value * 100)
-
-                return round(value)
-            except Exception:
-                return 0
-
-        confidence = data.get("confidence")
-
-        if confidence is not None:
-            try:
-                value = float(confidence)
-
-                if value <= 1.0:
-                    return round(value * 100)
-
-                return round(value)
-            except Exception:
-                return 0
-
-        return 0
-
-    # ================================================================
-    # DOMAIN MODEL → DICTIONARY
-    # ================================================================
+    @property
+    def latest_progress_line(self) -> str:
+        """Most recent update across every person on the document."""
+        latest: Optional[ProgressModel] = None
+        for item in self.all_work_items:
+            for p in item.progress_updates:
+                if latest is None or (p.created_at or "") > (latest.created_at or ""):
+                    latest = p
+        if latest is None:
+            return "No updates yet"
+        text = " ".join(latest.description.split())
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return f"{latest.author_name}: {text}"
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Serialize the canonical frontend model.
-
-        Routing/assignment information is represented exclusively through
-        work_assignments. No synthetic single-owner or single-department
-        values are generated.
-        """
-
         return {
-            "id": self.id,
+            "doc_id": self.id,
             "reference_no": self.reference_no,
             "title": self.title,
-            "date": self.date,
-            "mode": self.mode,
-            "source": self.source,
+            "subject": self.subject,
+            "lifecycle": self.lifecycle,
             "priority": self.priority,
             "deadline": self.deadline,
-            "status": self.status,
             "version": self.version,
-            "description": self.description,
-            "source_message_id": self.source_message_id,
-            "ocr_status": self.ocr_status,
-            "closed_at": self.closed_at,
-            "branches": self.branches,
-
-            "director_remark": self.director_remark,
-            "hod_remark": self.hod_remark,
-
-            "remarks": self.remarks,
-            "action": self.action,
-
-            # Advisory routing intelligence
-            "suggested_department_id": self.suggested_department_id,
-            "suggested_department_name": self.suggested_department_name,
-            "suggested_employee_id": self.suggested_employee_id,
-            "suggested_employee_name": self.suggested_employee_name,
-
-            "has_director_routing_instruction": (
-                self.has_director_routing_instruction
-            ),
-
-            "director_routing_raw_text": (
-                self.director_routing_raw_text
-            ),
-
-            "routing_instruction_confidence": (
-                self.routing_instruction_confidence
-            ),
-
-            "routing_confidence": self.routing_confidence,
-            "confidence": self.confidence,
-            "routing_reason": self.routing_reason,
-
-            "is_director_instruction": (
-                self.is_director_instruction
-            ),
-
-            # Files / OCR
-            "file_path": self.file_path,
-            "file_type": self.file_type,
-            "format": self.format,
-            "ocr_text": self.ocr_text,
-
-            "has_prior_director_remark": (
-                self.has_prior_director_remark
-            ),
-
-            "attachment_count": self.attachment_count,
-            "attachments_list": self.attachments_list,
-
-            # Canonical operational state
-            "work_assignments": [
-                assignment.to_dict()
-                for assignment in self.work_assignments
-            ],
-
-            # Useful derived values
-            "has_active_work": self.has_active_work,
-            "has_team_assignment": self.has_team_assignment,
-            "assignment_count": self.assignment_count,
-            "assigned_member_count": self.assigned_member_count,
-            "all_assigned_user_ids": self.all_assigned_user_ids,
-            "all_assigned_user_names": self.all_assigned_user_names,
-
-            # Audit
-            "created_by": self.created_by,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-
-            # Safe identity aliases
-            "reference": self.reference,
-            "subject": self.subject,
-            "received": self.received,
         }
 
     def __repr__(self) -> str:
         return (
-            f"DocumentModel("
-            f"id={self.id}, "
-            f"reference_no={self.reference_no!r}, "
-            f"status={self.status!r}, "
-            f"active_workstreams={self.assignment_count})"
+            f"DocumentModel({self.reference}, lifecycle={self.lifecycle}, "
+            f"branches={len(self.branches)}, work_items={len(self.all_work_items)})"
         )

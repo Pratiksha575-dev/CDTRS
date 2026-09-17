@@ -282,25 +282,25 @@ class APIClient:
     def upload(
         self,
         endpoint: str,
-        file_path_or_tuple: Union[str, Tuple[str, Any, str]],
+        file_path: Union[str, Tuple[str, Any, str]],
         field_name: str = "file",
         extra_data: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> Any:
         """
         Uploads a file as multipart/form-data with appropriate MIME type.
-        `file_path_or_tuple` can be an absolute file path or a tuple: (filename, file_bytes, content_type)
+        `file_path` can be an absolute file path or a tuple: (filename, file_bytes, content_type)
         """
         import mimetypes
 
         opened_file = None
         try:
-            if isinstance(file_path_or_tuple, str):
-                if not os.path.exists(file_path_or_tuple):
-                    raise FileNotFoundError(f"File not found for upload: {file_path_or_tuple}")
-                opened_file = open(file_path_or_tuple, "rb")
-                filename = os.path.basename(file_path_or_tuple)
-                mime_type, _ = mimetypes.guess_type(file_path_or_tuple)
+            if isinstance(file_path, str):
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"File not found for upload: {file_path}")
+                opened_file = open(file_path, "rb")
+                filename = os.path.basename(file_path)
+                mime_type, _ = mimetypes.guess_type(file_path)
                 if not mime_type:
                     ext = filename.lower()
                     if ext.endswith(".pdf"):
@@ -318,7 +318,7 @@ class APIClient:
 
                 files = {field_name: (filename, opened_file, mime_type)}
             else:
-                files = {field_name: file_path_or_tuple}
+                files = {field_name: file_path}
 
             return self.request("POST", endpoint, data=extra_data, files=files, **kwargs)
         finally:

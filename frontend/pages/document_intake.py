@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.document import DocumentModel
-from models.enums import IngestionModeEnum, PriorityEnum, RouteTypeEnum
+from models.enums import IngestionModeEnum, PriorityEnum
 from repositories.provider import get_repository
 from services.document_service import document_service
 from services.ocr_service import ocr_service
@@ -580,87 +580,121 @@ class DocumentIntakePage(QWidget):
         actual_upload_path = self.selected_file if (self.selected_file and os.path.exists(self.selected_file)) else None
         ref_no = self.ref_input.text().strip() or "Auto-Generated"
 
-        # Explicit Confirmation Dialog before routing
-        target_stage_name = "Director Review Queue"
-        target_info = (
-            "Routing suggestions are advisory and will be handled by DS "
-            "after the Director returns the document."
-        )
-
+        # Registering is one step; deciding where the document goes is a
+        # separate DS decision. Director review is an option here, not a
+        # mandatory first hop (spec section 4).
         confirm_msg = (
-            f"Are you sure you want to dispatch this document?\n\n"
-            f"📄 Reference: {ref_no}\n"
-            f"📑 Title: {title}\n"
-            f"🎯 Route Target: {target_stage_name}\n"
-            f"🏢 {target_info}\n\n"
-            f"Proceed with dispatch?"
+            f"Register this document?\n\n"
+            f"Reference: {ref_no}\n"
+            f"Title: {title}\n\n"
+            "After registering you choose where it goes: the Director for review, "
+            "one or more HODs, employees directly, the TSO, or any combination of "
+            "those at once.\n\n"
+            "Proceed?"
         )
         reply = QMessageBox.question(
             self,
-            "Confirm Document Routing",
+            "Register Document",
             confirm_msg,
             QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
+            QMessageBox.Yes,
         )
         if reply != QMessageBox.Yes:
             return
 
-
-        # DEBUG PRINT FOR SUBMISSION PAYLOAD
-        print(f"\n=== [DEBUG SUBMIT PAYLOAD] ===")
-        print(f"Title: {title}")
-        print(f"Selected File Path: {actual_upload_path}")
-        print(f"Passed OCR Text Length: {len(self.extracted_ocr_text)}")
-        print(f"Suggested Dept ID: {target_dept_id} ({dept_text})")
-        print(f"Suggested Employee ID: {emp_id} ({emp_text})")
-        print(f"==============================\n")
-
-        doc_model = DocumentModel(
-            id=self.current_inbox_item_id,
-            title=title,
-            reference_no=self.ref_input.text().strip() or None,
-            date=self.date_input.text().strip() or datetime.now().strftime("%Y-%m-%d"),
-            mode=self.mode_input.currentText(),
-            source=self.source_input.text().strip() or "External",
-            priority=self.priority_input.currentText(),
-            deadline=self.deadline_input.text().strip() or None,
-            format=self.format_input.currentText(),
-            file_path=self.selected_file,
-            ocr_text=self.extracted_ocr_text,  # <--- Handoff of extracted text
-            confidence=float(getattr(self, "extracted_ocr_confidence", 0.0)),
-            attachment_count=getattr(self, "incoming_attachment_count", 1 if self.selected_file else 0),
-            attachments_list=getattr(self, "incoming_attachments_list", [os.path.basename(self.selected_file)] if self.selected_file else []),
-            # Canonical routing suggestions only.
-            # Operational routing is created later as DocumentDepartmentRouting branches.
-            suggested_department_name=dept_text,
-            suggested_department_id=target_dept_id,
-            suggested_employee_name=emp_text,
-            suggested_employee_id=emp_id,
-            has_prior_director_remark=self.has_prior_director_remark,
-            director_remark=self.prior_remark_lbl.text().replace('Directive: "', '').rstrip('"')
-            if self.has_prior_director_remark else None
-        )
+        received = self.date_input.text().strip() or datetime.now().strftime("%Y-%m-%d")
+        deadline = self.deadline_input.text().strip() or None
 
         try:
-            created_doc = document_service.create_document(doc_model, file_path=actual_upload_path)
-
-            routed_doc = routing_service.route_to_director(created_doc.id)
-            msg = (
-                f"Document {routed_doc.reference} ('{routed_doc.title}') "
-                "successfully registered and sent for Director Review."
-            )
-
             if self.current_inbox_item_id:
-                document_service.remove_inbox_item(self.current_inbox_item_id)
+                # Arrived by mail: convert the intake record into a document.
+                created_doc = document_service.process_intake(
+                    self.current_inbox_item_id,
+                    {
+                        "title": title,
+                        "subject": title,
+                        "priority": PriorityEnum.normalize(self.priority_input.currentText()),
+                        "source": self.source_input.text().strip() or None,
+                        "sender_name": self.source_input.text().strip() or None,
+                        "sender_reference": self.ref_input.text().strip() or None,
+                        "received_date": received,
+                        "deadline": deadline,
+                    },
+                )
                 self.current_inbox_item_id = None
+            else:
+                if not actual_upload_path:
+                    QMessageBox.warning(
+                        self,
+                        "Register Document",
+                        "Attach the document file before registering.",
+                    )
+                    return
+                fields = {
+                    "title": title,
+                    "subject": title,
+                    "received_date": received,
+                    "mode": IngestionModeEnum.normalize(self.mode_input.currentText())
+                    or "MANUAL_UPLOAD",
+                    "priority": PriorityEnum.normalize(self.priority_input.currentText()),
+                    "source": self.source_input.text().strip() or "External",
+                    "sender_name": self.source_input.text().strip() or "",
+                    "sender_reference": self.ref_input.text().strip() or "",
+                    "ocr_text": self.extracted_ocr_text or "",
+                    "confidence": str(getattr(self, "extracted_ocr_confidence", 0.0) or 0.0),
+                }
+                if deadline:
+                    fields["deadline"] = deadline
+                if target_dept_id:
+                    fields["suggested_department_id"] = str(target_dept_id)
+                if emp_id:
+                    fields["suggested_employee_id"] = str(emp_id)
 
-            QMessageBox.information(self, "Intake Registered & Routed", msg)
+                created_doc = document_service.manual_upload(fields, actual_upload_path)
 
-            self.clear_form()
-            self.document_processed.emit(routed_doc)
+            if not created_doc:
+                raise RuntimeError("The document could not be registered.")
+
+            document_service.register_document(created_doc.id)
+            created_doc = document_service.get_document(created_doc.id) or created_doc
 
         except Exception as ex:
-            QMessageBox.critical(self, "Intake Error", f"Failed to register and route document: {str(ex)}")
+            QMessageBox.critical(
+                self, "Intake Error", f"Could not register the document.\n{ex}"
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Document Registered",
+            f"{created_doc.reference} registered.\n\nChoose where it should go next.",
+        )
+
+        # Offer routing immediately, with every destination available.
+        try:
+            from components.routing_dialogs import RoutingDialog
+
+            dialog = RoutingDialog(created_doc, self)
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                branches = dialog.get_branches()
+                routing_service.route(created_doc.id, branches, created_doc.version)
+                QMessageBox.information(
+                    self,
+                    "Routed",
+                    f"Opened {len(branches)} workstream(s). "
+                    "They now run independently of each other.",
+                )
+                created_doc = document_service.get_document(created_doc.id) or created_doc
+        except Exception as ex:
+            QMessageBox.warning(
+                self,
+                "Routing",
+                f"The document is registered, but routing failed.\n{ex}\n\n"
+                "You can route it from the Documents page.",
+            )
+
+        self.clear_form()
+        self.document_processed.emit(created_doc)
 
     def clear_form(self):
         self.title_input.clear()
@@ -685,4 +719,4 @@ class DocumentIntakePage(QWidget):
     def _set_submit_button_text(self):
         """Keep the intake action label consistent with the mandatory
           flow."""
-        self.submit_btn.setText("Confirm & Send for Director Review")
+        self.submit_btn.setText("Register Document")

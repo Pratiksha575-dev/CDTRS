@@ -359,7 +359,8 @@ class UserModel:
             ),
             employee_id=data.get("employee_id"),
             department_id=data.get("department_id"),
-            department_name=data.get("department_name"),
+            # The API serialises the home department name as "department".
+            department_name=data.get("department_name") or data.get("department"),
             department_code=data.get("department_code"),
             is_active=bool(data.get("is_active", True)),
             context_memberships=memberships,

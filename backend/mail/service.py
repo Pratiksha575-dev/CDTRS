@@ -344,7 +344,7 @@ Document Ref : {doc.reference_no}
 Title / Subj : {doc.title}
 Priority     : {doc.priority.value}
 Deadline     : {doc.deadline or 'Not Specified'}
-Current Stage: {doc.current_stage.value}
+Lifecycle    : {doc.lifecycle.value}
 
 Message / Instructions:
 {message}
@@ -362,7 +362,7 @@ Please log in to CDTRS to view or process this document.
     <tr><td style="padding: 6px 0; font-weight: 600;">Title / Subject:</td><td>{doc.title}</td></tr>
     <tr><td style="padding: 6px 0; font-weight: 600;">Priority:</td><td><span style="background: #0F172A; color: white; padding: 2px 8px; border-radius: 4px; font-weight: 600;">{doc.priority.value}</span></td></tr>
     <tr><td style="padding: 6px 0; font-weight: 600;">Deadline:</td><td>{doc.deadline or 'Not Specified'}</td></tr>
-    <tr><td style="padding: 6px 0; font-weight: 600;">Workflow Stage:</td><td>{doc.current_stage.value}</td></tr>
+    <tr><td style="padding: 6px 0; font-weight: 600;">Lifecycle:</td><td>{doc.lifecycle.value}</td></tr>
   </table>
   <div style="background-color: #F8FAFC; border-left: 4px solid #0F172A; padding: 12px; margin: 16px 0; font-size: 13px; color: #1E293B;">
     <strong>Instructions / Directives:</strong><br/>

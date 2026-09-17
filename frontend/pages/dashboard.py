@@ -1,618 +1,256 @@
+"""Dashboard for the active work context.
+
+The counters come from the backend, which derives them from the active
+context: the same person sees a different dashboard wearing their HOD hat than
+wearing their Employee hat.  Nothing here is a percentage or an averaged
+progress figure - the cards count things, and the table lists what needs
+attention.
+"""
+
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from components.state_widgets import EmptyStateWidget
+from components.document_viewer import DocumentViewer
+from core.context.context_manager import context_manager
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, RoleEnum
 from services.auth_service import auth_service
 from services.dashboard_service import dashboard_service
 from services.document_service import document_service
-from repositories.provider import get_repository
+
+CARD_COLORS = ["#0369A1", "#1D4ED8", "#B45309", "#166534", "#7C3AED", "#B91C1C"]
 
 
 class DashboardPage(QWidget):
-    """
-    Role-specialized Dashboard for CDTRS.
-    Provides customized operational KPI cards and actionable summaries for:
-    - Director Secretary (operational overview and compact action cards)
-    - Director (executive document reviews and progress follow-ups)
-    - HOD (departmental workload, task delegation, and progress oversight)
-    - Employee (task assignments, active work items, and progress submissions)
-    """
 
     view_requested = Signal(object, str)
-    navigate_requested = Signal(str, object)  # Emits target page name (e.g. "Inbox", "Documents") and filter dictionary
+    navigate_requested = Signal(str, object)
 
-    def __init__(self, role: str = "DS"):
+
+    HEADERS = [
+        "Reference", "Title / Subject", "Priority",
+        "Lifecycle", "Workstreams & Stages", "Deadline",
+    ]
+
+    def __init__(self, user_role: str = "DS"):
         super().__init__()
-        self._role = RoleEnum.normalize(role)
-        self._dashboard_initialized = False
+        self.user_role = user_role
         self.documents: List[DocumentModel] = []
+        self.viewer: Optional[DocumentViewer] = None
+        self._build()
+        self._connect_events()
 
-        self.setup_ui()
-        self._dashboard_initialized = True
-        self.refresh()
-
-        from services.event_bus import event_bus
-        event_bus.data_changed.connect(self.refresh)
-        event_bus.inbox_updated.connect(self.refresh)
-
-    @property
-    def role(self) -> str:
-        return self._role
-
-    @role.setter
-    def role(self, value: str):
-        new_role = RoleEnum.normalize(value)
-        if new_role == getattr(self, "_role", None):
-            return
-
-        self._role = new_role
-
-        # MainWindow changes dashboard_page.role directly when the active
-        # work context changes. Rebuild the dashboard immediately so that
-        # role-specific KPI cards/table controls actually exist for the new
-        # context before MainWindow calls refresh().
-        if getattr(self, "_dashboard_initialized", False):
-            self.setup_ui()
-            self.refresh()
+    def _connect_events(self) -> None:
+        try:
+            from services.event_bus import event_bus
+            event_bus.document_updated.connect(self._on_workflow_changed)
+        except Exception:
+            pass
+        try:
+            context_manager.active_context_changed.connect(self._on_workflow_changed)
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh()
+        self.load()
 
-    def setup_ui(self):
-        # setup_ui can be called more than once because the active work
-        # context may change the dashboard role (e.g. EMPLOYEE <-> HOD).
-        # Reuse the existing top-level layout instead of calling
-        # setLayout() a second time, which would leave the old widgets
-        # attached and cause role-specific attributes to be missing.
-        existing_layout = self.layout()
-        if existing_layout is not None:
-            self._clear_layout(existing_layout)
-            main_layout = existing_layout
-        else:
-            main_layout = QVBoxLayout()
-            self.setLayout(main_layout)
+    # ------------------------------------------------------------------
 
-        main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(18)
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 22, 28, 24)
+        layout.setSpacing(14)
 
-        # --------------------------------
-        # HEADER
-        # --------------------------------
-        header_layout = QHBoxLayout()
-        title_vbox = QVBoxLayout()
-        title_vbox.setSpacing(2)
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.title = QLabel("Dashboard")
+        self.title.setObjectName("pageTitle")
+        titles.addWidget(self.title)
+        self.subtitle = QLabel()
+        self.subtitle.setObjectName("pageSubtitle")
+        self.subtitle.setWordWrap(True)
+        titles.addWidget(self.subtitle)
+        header.addLayout(titles, 1)
 
-        if self.role == RoleEnum.DIRECTOR.value:
-            title_text = "Director Executive Dashboard"
-            sub_text = "Executive overview of incoming policy documents, initial reviews, and progress follow-ups."
-        elif self.role in (RoleEnum.HOD.value, "HOD"):
-            title_text = "Department Head (HOD) Dashboard"
-            sub_text = "Departmental workload oversight, employee delegation, and execution progress tracking."
-        elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
-            title_text = "Employee Task Dashboard"
-            sub_text = "Active task assignments, deliverables, and progress submission overview."
-        else:
-            title_text = "Director Secretary Dashboard"
-            sub_text = "Operational intake overview, review routing, and lifecycle monitoring."
+        refresh = QPushButton("Refresh")
+        refresh.setStyleSheet(
+            "background-color: #0F172A; color: white; font-weight: 600; "
+            "padding: 7px 16px; border-radius: 4px;"
+        )
+        refresh.clicked.connect(self.load)
+        header.addWidget(refresh, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header)
 
-        title = QLabel(title_text)
-        title.setObjectName("pageTitle")
+        self.cards_host = QWidget()
+        self.cards_grid = QGridLayout(self.cards_host)
+        self.cards_grid.setContentsMargins(0, 0, 0, 0)
+        self.cards_grid.setSpacing(12)
+        layout.addWidget(self.cards_host)
 
-        subtitle = QLabel(sub_text)
-        subtitle.setObjectName("pageSubtitle")
+        self.table_title = QLabel("Needs Attention")
+        self.table_title.setObjectName("sectionTitle")
+        self.table_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #0F172A;")
+        layout.addWidget(self.table_title)
 
-        title_vbox.addWidget(title)
-        title_vbox.addWidget(subtitle)
-        header_layout.addLayout(title_vbox)
-        header_layout.addStretch()
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.doubleClicked.connect(self.open_document)
 
-        main_layout.addLayout(header_layout)
-
-        # --------------------------------
-        # KPI SUMMARY CARDS
-        # --------------------------------
-        self.kpi_grid = QGridLayout()
-        self.kpi_grid.setSpacing(12)
-
-        if self.role == RoleEnum.DIRECTOR.value:
-            self.card_dir_new = self._create_kpi_card(
-                "Awaiting Initial Review", "0", "#0F172A",
-                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Initial Reviews"})
+        header_view = self.table.horizontalHeader()
+        for col in range(len(self.HEADERS)):
+            header_view.setSectionResizeMode(
+                col,
+                QHeaderView.ResizeMode.Stretch if col in (1, 4)
+                else QHeaderView.ResizeMode.ResizeToContents,
             )
-            self.card_dir_followup = self._create_kpi_card(
-                "Progress Follow-ups", "0", "#0284C7",
-                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Progress Follow-ups"})
-            )
-            self.card_dir_reviewed = self._create_kpi_card(
-                "Total Reviewed / Returned", "0", "#059669",
-                callback=lambda: self.navigate_requested.emit("Inbox", {"category": "Reviewed & Returned to DS"})
-            )
-            self.card_dir_critical = self._create_kpi_card(
-                "Critical / High Priority", "0", "#E11D48",
-                callback=lambda: self.navigate_requested.emit("Inbox", {"priority": "High"})
-            )
+        layout.addWidget(self.table, 1)
 
+        self.empty_note = QLabel()
+        self.empty_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_note.setStyleSheet("color: #94A3B8; font-size: 12px; padding: 16px;")
+        self.empty_note.setVisible(False)
+        layout.addWidget(self.empty_note)
 
-            self.kpi_grid.addWidget(self.card_dir_new["frame"], 0, 0)
-            self.kpi_grid.addWidget(self.card_dir_followup["frame"], 0, 1)
-            self.kpi_grid.addWidget(self.card_dir_reviewed["frame"], 0, 2)
-            self.kpi_grid.addWidget(self.card_dir_critical["frame"], 0, 3)
+    # ------------------------------------------------------------------
 
-        elif self.role in (RoleEnum.HOD.value, "HOD"):
-            self.card_hod_unassigned = self._create_kpi_card(
-                "Awaiting Employee Assignment", "0", "#D97706",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_hod_assigned = self._create_kpi_card(
-                "Assigned / In Progress", "0", "#0284C7",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_hod_progress = self._create_kpi_card(
-                "Progress Updates Received", "0", "#059669",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_hod_critical = self._create_kpi_card(
-                "Critical / High Priority", "0", "#E11D48",
-                callback=lambda: self.navigate_requested.emit("Documents", {"priority": "High Priority"})
-            )
+    def _card(self, label: str, value: Any, color: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("contentCard")
+        card.setStyleSheet(
+            "QFrame#contentCard { background-color: #FFFFFF; border: 1px solid #E2E8F0; "
+            f"border-left: 4px solid {color}; border-radius: 6px; }}"
+        )
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(18, 14, 18, 14)
+        inner.setSpacing(3)
 
-            self.kpi_grid.addWidget(self.card_hod_unassigned["frame"], 0, 0)
-            self.kpi_grid.addWidget(self.card_hod_assigned["frame"], 0, 1)
-            self.kpi_grid.addWidget(self.card_hod_progress["frame"], 0, 2)
-            self.kpi_grid.addWidget(self.card_hod_critical["frame"], 0, 3)
+        value_label = QLabel(str(value))
+        value_label.setStyleSheet(f"font-size: 26px; font-weight: 700; color: {color};")
+        inner.addWidget(value_label)
 
-        elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
-            self.card_emp_active = self._create_kpi_card(
-                "Active Assigned Tasks", "0", "#0F172A",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_emp_pending = self._create_kpi_card(
-                "New / Pending Progress", "0", "#D97706",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_emp_progress = self._create_kpi_card(
-                "Progress Updates Submitted", "0", "#059669",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
-            self.card_emp_critical = self._create_kpi_card(
-                "Critical / High Priority", "0", "#E11D48",
-                callback=lambda: self.navigate_requested.emit("Inbox", {})
-            )
+        name = QLabel(label)
+        name.setWordWrap(True)
+        name.setStyleSheet("color: #475569; font-size: 11px; font-weight: 600;")
+        inner.addWidget(name)
+        return card
 
-            self.kpi_grid.addWidget(self.card_emp_active["frame"], 0, 0)
-            self.kpi_grid.addWidget(self.card_emp_pending["frame"], 0, 1)
-            self.kpi_grid.addWidget(self.card_emp_progress["frame"], 0, 2)
-            self.kpi_grid.addWidget(self.card_emp_critical["frame"], 0, 3)
-
-        else:
-            self.card_intake = self._create_kpi_card(
-                "New Incoming", "0", "#0284C7"
-            )
-            self.card_director_rev = self._create_kpi_card(
-                "Awaiting Director Review", "0", "#6366F1"
-            )
-            self.card_director_done = self._create_kpi_card(
-                "Returned by Director", "0", "#D97706"
-            )
-            self.card_hod = self._create_kpi_card(
-                "Under HOD Processing", "0", "#0D9488"
-            )
-            self.card_progress = self._create_kpi_card(
-                "Progress Updates", "0", "#2563EB"
-            )
-            self.card_closed = self._create_kpi_card(
-                "Closed Documents", "0", "#059669"
-            )
-
-            self.kpi_grid.addWidget(self.card_intake["frame"], 0, 0)
-            self.kpi_grid.addWidget(self.card_director_rev["frame"], 0, 1)
-            self.kpi_grid.addWidget(self.card_director_done["frame"], 0, 2)
-            self.kpi_grid.addWidget(self.card_hod["frame"], 1, 0)
-            self.kpi_grid.addWidget(self.card_progress["frame"], 1, 1)
-            self.kpi_grid.addWidget(self.card_closed["frame"], 1, 2)
-
-        main_layout.addLayout(self.kpi_grid)
-
-        # --------------------------------
-        # ROLE-SPECIFIC CONTENT
-        # --------------------------------
-        if self.role == RoleEnum.DS.value or self.role == "DS":
-            self._setup_ds_actionable_cards(main_layout)
-        else:
-            self._setup_standard_queue_table(main_layout)
-
-        # The layout is assigned above on first construction and reused on
-        # subsequent role/context changes.
-        main_layout.update()
-
-    def _clear_layout(self, layout):
-        """Remove all widgets/layouts from an existing dashboard layout."""
-        while layout.count():
-            item = layout.takeAt(0)
+    def load(self) -> None:
+        while self.cards_grid.count():
+            item = self.cards_grid.takeAt(0)
             widget = item.widget()
-            child_layout = item.layout()
-
+            # Layout items are not always widgets (spacers have none).
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-            elif child_layout is not None:
-                self._clear_layout(child_layout)
 
-    def _setup_ds_actionable_cards(self, main_layout: QVBoxLayout):
-        """Sets up clean operational Action Required navigation sections for DS."""
-        action_title = QLabel("Operational Action Required")
-        action_title.setObjectName("sectionTitle")
-        main_layout.addWidget(action_title)
+        summary: Dict[str, Any] = {}
+        try:
+            summary = dashboard_service.get_summary() or {}
+        except Exception as exc:
+            QMessageBox.warning(self, "Dashboard", f"Could not load the dashboard.\n{exc}")
 
-        action_grid = QGridLayout()
-        action_grid.setSpacing(14)
+        context_type = summary.get("context_type") or self.user_role
+        department = summary.get("department")
 
-        # Action Card 1: Incoming Dispatches
-        self.act_card_intake = self._create_action_card(
-            "New Incoming Documents",
-            "0 documents awaiting processing",
-            "View Inbox →",
-            lambda: self.navigate_requested.emit("Inbox", {}),
-            accent_color="#0284C7"
-        )
-        # Action Card 2: Returned by Director
-        self.act_card_dir = self._create_action_card(
-            "Documents Returned by Director",
-            "0 documents requiring routing",
-            "View Documents →",
-            lambda: self.navigate_requested.emit("Documents", {"status": "Director Review Completed"}),
-            accent_color="#D97706"
-        )
-        # Action Card 3: Progress Follow-up
-        self.act_card_prog = self._create_action_card(
-            "Progress / Follow-up Requiring Attention",
-            "0 updates requiring attention",
-            "View Documents →",
-            lambda: self.navigate_requested.emit("Documents", {"status": "Progress Updated"}),
-            accent_color="#2563EB"
-        )
-        # Action Card 4: Upcoming Deadlines
-        self.act_card_deadlines = self._create_action_card(
-            "Upcoming Deadlines",
-            "0 active documents registered",
-            "View Documents →",
-            lambda: self.navigate_requested.emit("Documents", {"deadline": "Due Within 7 Days"}),
-            accent_color="#059669"
+        user_name = ""
+        try:
+            user = auth_service.get_current_user()
+            user_name = user.full_name if user else ""
+        except Exception:
+            pass
+
+        self.title.setText(f"{context_type} Dashboard" if context_type else "Dashboard")
+        self.subtitle.setText(
+            (f"{user_name} - " if user_name else "")
+            + f"working as {context_type}"
+            + (f" ({department})" if department else "")
+            + ". Switch context from the sidebar to see a different workspace."
         )
 
-        action_grid.addWidget(self.act_card_intake["frame"], 0, 0)
-        action_grid.addWidget(self.act_card_dir["frame"], 0, 1)
-        action_grid.addWidget(self.act_card_prog["frame"], 1, 0)
-        action_grid.addWidget(self.act_card_deadlines["frame"], 1, 1)
-        main_layout.addLayout(action_grid)
-        main_layout.addStretch()
+        cards = summary.get("cards") or []
+        for index, card in enumerate(cards):
+            color = CARD_COLORS[index % len(CARD_COLORS)]
+            widget = self._card(card.get("label", ""), card.get("value", 0), color)
+            self.cards_grid.addWidget(widget, index // 4, index % 4)
 
-    def _setup_standard_queue_table(self, main_layout: QVBoxLayout):
-        """Sets up document action queue table for Director, HOD, and Employee."""
-        if self.role == RoleEnum.DIRECTOR.value:
-            queue_title = "Executive Review Queue"
-            btn_text = "Review Selected Document"
-        elif self.role in (RoleEnum.HOD.value, "HOD"):
-            queue_title = "Departmental Action Queue"
-            btn_text = "Open Document / Assign"
-        elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
-            queue_title = "My Active Tasks Queue"
-            btn_text = "Open Task / Submit Progress"
-        else:
-            queue_title = "Actionable Documents Queue"
-            btn_text = "View Selected Document"
+        raw_docs = summary.get("documents") or []
+        self.documents = [
+            d if isinstance(d, DocumentModel) else DocumentModel.from_dict(d) for d in raw_docs
+        ]
 
-        section_lbl = QLabel(queue_title)
-        section_lbl.setObjectName("sectionTitle")
-        main_layout.addWidget(section_lbl)
+        self.table.setRowCount(len(self.documents))
+        for row, doc in enumerate(self.documents):
+            self._set(row, 0, doc.reference)
+            self._set(row, 1, doc.subject or doc.title)
+            self._set(row, 2, str(doc.priority).title(), color=doc.priority_color, bold=True)
+            self._set(row, 3, doc.lifecycle_label, color=doc.lifecycle_color, bold=True)
+            self._set(row, 4, doc.branch_stage_cell, tooltip="\n".join(doc.branch_stage_lines))
+            self._set(row, 5, doc.deadline_display, color=doc.deadline_color,
+                      bold=doc.deadline_state in ("overdue", "due_soon"))
+            lines = max(1, len(doc.branch_stage_lines))
+            self.table.setRowHeight(row, 26 + (lines - 1) * 15)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels([
-            "Reference", "Title", "Priority", "Department / Origin", "Status"
-        ])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.empty_note.setVisible(not self.documents)
+        self.empty_note.setText("Nothing needs your attention in this work context right now.")
 
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+    def _set(self, row, col, text, color=None, bold=False, tooltip=None) -> None:
+        cell = QTableWidgetItem(str(text or "-"))
+        cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        cell.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if color:
+            cell.setForeground(QBrush(QColor(color)))
+        if bold:
+            font = cell.font()
+            font.setBold(True)
+            cell.setFont(font)
+        if tooltip:
+            cell.setToolTip(tooltip)
+        self.table.setItem(row, col, cell)
 
-        main_layout.addWidget(self.table, 1)
+    def open_document(self) -> None:
+        row = self.table.currentRow()
+        if not (0 <= row < len(self.documents)):
+            return
+        doc = self.documents[row]
+        self._show_document(doc, self.user_role)
 
-        btn_bar = QHBoxLayout()
-        btn_bar.addStretch()
-        self.view_btn = QPushButton(btn_text)
-        self.view_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 7px 18px; border-radius: 5px;")
-        self.view_btn.clicked.connect(self._handle_view_selected)
-        btn_bar.addWidget(self.view_btn)
-        main_layout.addLayout(btn_bar)
+    # Names the application shell calls.
+    def refresh(self) -> None:
+        self.load()
 
-    def _create_kpi_card(self, title: str, value: str, accent_color: str, callback=None) -> dict:
-        frame = QFrame()
-        frame.setObjectName("contentCard")
-        frame.setStyleSheet(f"QFrame#contentCard {{ border-left: 4px solid {accent_color}; background-color: #FFFFFF; border-radius: 6px; border-top: 1px solid #E2E8F0; border-right: 1px solid #E2E8F0; border-bottom: 1px solid #E2E8F0; }}")
+    def _show_document(self, doc, role: str) -> None:
+        """Hand the document to the application shell when one is hosting this
+        page; otherwise open it in its own window."""
+        from services.document_service import document_service as _docs
 
-        if callback:
-            frame.setCursor(Qt.PointingHandCursor)
-            frame.mousePressEvent = lambda event: callback()
+        full = _docs.get_document(doc.id) or doc
+        self.view_requested.emit(full, role)
 
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(4)
-
-        t_lbl = QLabel(title)
-        t_lbl.setWordWrap(True)
-        t_lbl.setStyleSheet("color: #64748B; font-size: 11px; font-weight: 600; text-transform: uppercase;")
-
-        v_lbl = QLabel(value)
-        v_lbl.setStyleSheet("color: #0F172A; font-size: 22px; font-weight: bold;")
-
-        layout.addWidget(t_lbl)
-        layout.addWidget(v_lbl)
-
-        return {"frame": frame, "value_label": v_lbl}
-
-    def _create_action_card(self, title: str, subtitle: str, btn_text: str, callback, accent_color: str = "#0F172A") -> dict:
-        frame = QFrame()
-        frame.setObjectName("contentCard")
-        frame.setStyleSheet(f"QFrame#contentCard {{ background-color: #FFFFFF; border: 1px solid #E2E8F0; border-left: 4px solid {accent_color}; border-radius: 6px; }}")
-
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(12)
-
-        vbox = QVBoxLayout()
-        vbox.setSpacing(3)
-        t_lbl = QLabel(title)
-        t_lbl.setWordWrap(True)
-        t_lbl.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
-
-        s_lbl = QLabel(subtitle)
-        s_lbl.setWordWrap(True)
-        s_lbl.setStyleSheet("color: #64748B; font-size: 12px;")
-
-        vbox.addWidget(t_lbl)
-        vbox.addWidget(s_lbl)
-        layout.addLayout(vbox, 1)
-
-        btn = QPushButton(btn_text)
-        btn.setStyleSheet("background-color: #F8FAFC; border: 1px solid #CBD5E1; color: #0F172A; font-weight: 600; padding: 7px 14px; border-radius: 5px;")
-        btn.clicked.connect(callback)
-        layout.addWidget(btn)
-
-        return {"frame": frame, "title_label": t_lbl, "sub_label": s_lbl, "btn": btn}
-
-    def refresh(self):
-        """Loads live KPI metrics and recent documents dynamically from services."""
-        self.documents = document_service.get_documents()
-
-        if self.role == RoleEnum.DIRECTOR.value:
-            dir_docs = [d for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value]
-
-            # Use in-memory attribute checks — no per-document network calls (avoids UI freeze)
-            initial_count = 0
-            followup_count = 0
-            for d in dir_docs:
-                has_progress = (
-                    d.status == DocumentStatusEnum.PROGRESS_UPDATED.value
-                    or getattr(d, "has_progress_updates", False)
-                )
-                if has_progress:
-                    followup_count += 1
-                else:
-                    initial_count += 1
-
-            reviewed_count = sum(
-                1 for d in self.documents
-                if bool(d.director_remark) or d.status == "Director Review Completed"
-            )
-            critical_count = sum(1 for d in dir_docs if (d.priority or "").lower() in ("high", "red"))
-
-            self.card_dir_new["value_label"].setText(str(initial_count))
-            self.card_dir_followup["value_label"].setText(str(followup_count))
-            self.card_dir_reviewed["value_label"].setText(str(reviewed_count))
-            self.card_dir_critical["value_label"].setText(str(critical_count))
-
-            display_list = dir_docs
-            if hasattr(self, "table"):
-                self._populate_table(display_list)
-
-        elif self.role in (RoleEnum.HOD.value, "HOD"):
-            # GET /documents is already scoped by the active HOD work context.
-            # Do not derive departmental ownership from legacy document fields.
-            hod_docs = [
-                d for d in self.documents
-                if d.status in (
-                    DocumentStatusEnum.UNDER_HOD_PROCESSING.value,
-                    DocumentStatusEnum.ASSIGNED_FOR_EXECUTION.value,
-                    DocumentStatusEnum.IN_PROGRESS.value,
-                    DocumentStatusEnum.PROGRESS_UPDATED.value,
-                )
-            ]
-
-            unassigned_count = sum(
-                1 for d in hod_docs
-                if not self._has_active_assignment(d)
-            )
-            assigned_count = sum(
-                1 for d in hod_docs
-                if self._has_active_assignment(d)
-            )
-            progress_count = sum(1 for d in hod_docs if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value)
-            critical_count = sum(1 for d in hod_docs if (d.priority or "").lower() in ("high", "red"))
-
-            self.card_hod_unassigned["value_label"].setText(str(unassigned_count))
-            self.card_hod_assigned["value_label"].setText(str(assigned_count))
-            self.card_hod_progress["value_label"].setText(str(progress_count))
-            self.card_hod_critical["value_label"].setText(str(critical_count))
-
-            display_list = hod_docs
-            if hasattr(self, "table"):
-                self._populate_table(display_list)
-
-        elif self.role in (RoleEnum.EMPLOYEE.value, "Employee"):
-            current_user = auth_service.get_current_user()
-            emp_id = current_user.id if current_user else None
-
-            if emp_id is None:
-                emp_docs = []
-            else:
-                emp_docs = [
-                    d for d in self.documents
-                    if self._is_employee_assigned(d, emp_id)
-                ]
-
-            active_count = len(emp_docs)
-            progress_count = sum(1 for d in emp_docs if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value or getattr(d, "has_progress_updates", False))
-            pending_count = active_count - progress_count
-            critical_count = sum(1 for d in emp_docs if (d.priority or "").lower() in ("high", "urgent"))
-
-            self.card_emp_active["value_label"].setText(str(active_count))
-            self.card_emp_pending["value_label"].setText(str(pending_count))
-            self.card_emp_progress["value_label"].setText(str(progress_count))
-            self.card_emp_critical["value_label"].setText(str(critical_count))
-
-            display_list = emp_docs
-            if hasattr(self, "table"):
-                self._populate_table(display_list)
-
-        else:
-            # Director Secretary KPI calculations - strictly count unregistered intake items
-            repo = get_repository()
-            try:
-                unregistered_items = repo.get_incoming_messages(status="PENDING") or []
-                intake_cnt = len(unregistered_items)
-            except Exception:
-                intake_cnt = 0
-
-            dir_rev_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value)
-            dir_done_cnt = sum(
-                1
-                for d in self.documents
-                if d.status == DocumentStatusEnum.RETURNED_TO_DS.value
-                or bool(d.director_remark)
-            )
-            hod_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.UNDER_HOD_PROCESSING.value)
-            prog_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.PROGRESS_UPDATED.value)
-            closed_cnt = sum(1 for d in self.documents if d.status == DocumentStatusEnum.CLOSED.value)
-
-            self.card_intake["value_label"].setText(str(intake_cnt))
-            self.card_director_rev["value_label"].setText(str(dir_rev_cnt))
-            self.card_director_done["value_label"].setText(str(dir_done_cnt))
-            self.card_hod["value_label"].setText(str(hod_cnt))
-            self.card_progress["value_label"].setText(str(prog_cnt))
-            self.card_closed["value_label"].setText(str(closed_cnt))
-
-            # Update DS Actionable Cards
-            if hasattr(self, "act_card_intake"):
-                self.act_card_intake["sub_label"].setText(f"{intake_cnt} documents awaiting processing")
-                self.act_card_dir["sub_label"].setText(f"{dir_done_cnt} documents requiring routing")
-                self.act_card_prog["sub_label"].setText(f"{prog_cnt} updates requiring attention")
-
-                today = datetime.now().date()
-                due_soon_cutoff = today + timedelta(days=7)
-                upcoming_active_cnt = sum(
-                    1 for d in self.documents
-                    if d.deadline
-                    and self._parse_date(d.deadline)
-                    and today <= self._parse_date(d.deadline) <= due_soon_cutoff
-                    and (d.status or "").lower() != "closed"
-                )
-                self.act_card_deadlines["sub_label"].setText(f"{upcoming_active_cnt} active documents due within 7 days")
-
-    @staticmethod
-    def _has_active_assignment(doc) -> bool:
-        assignments = getattr(doc, "work_assignments", None)
-        if assignments is None:
-            assignments = getattr(doc, "assignments", None)
-
-        for assignment in assignments or []:
-            if isinstance(assignment, dict):
-                if assignment.get("is_active", True) is not False:
-                    return True
-            elif getattr(assignment, "is_active", True) is not False:
-                return True
-
-        return False
-
-    @staticmethod
-    def _is_employee_assigned(doc, employee_id: int) -> bool:
-        for assignment in getattr(doc, "work_assignments", None) or []:
-            if isinstance(assignment, dict):
-                if assignment.get("is_active", True) is False:
-                    continue
-                if assignment.get("assigned_to_user_id") == employee_id:
-                    return True
-                for member in assignment.get("members") or []:
-                    if isinstance(member, dict) and member.get("user_id") == employee_id:
-                        return True
-            else:
-                if getattr(assignment, "is_active", True) is False:
-                    continue
-                if getattr(assignment, "assigned_to_user_id", None) == employee_id:
-                    return True
-                if any(
-                    getattr(member, "user_id", None) == employee_id
-                    for member in (getattr(assignment, "members", None) or [])
-                ):
-                    return True
-
-        return False
-
-    def _parse_date(self, date_str: str):
-        if not date_str:
-            return None
-        cleaned = str(date_str).strip().split()[0]
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y"):
-            try:
-                return datetime.strptime(cleaned, fmt).date()
-            except Exception:
-                pass
-        return None
-
-    def _populate_table(self, display_list: List[DocumentModel]):
-        self.table.setRowCount(len(display_list))
-        self._displayed_docs = display_list
-        for row, doc in enumerate(display_list):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
-            self.table.setItem(row, 2, QTableWidgetItem(doc.priority or "-"))
-            self.table.setItem(
-                row, 3,
-                QTableWidgetItem(
-                    getattr(doc, "suggested_department_name", None)
-                    or doc.source
-                    or "-"
-                ),
-            )
-            self.table.setItem(row, 4, QTableWidgetItem(doc.status or "-"))
-
-    def _handle_view_selected(self):
-        if hasattr(self, "table"):
-            row = self.table.currentRow()
-            if row >= 0 and row < len(getattr(self, "_displayed_docs", [])):
-                selected_doc = self._displayed_docs[row]
-                self.view_requested.emit(selected_doc, self.role)
+    def _on_workflow_changed(self, *_) -> None:
+        """Bound method, not a lambda: Qt disconnects this when the
+        widget is destroyed, so a stale page never reloads itself."""
+        self.load()

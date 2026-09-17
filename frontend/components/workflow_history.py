@@ -1,140 +1,45 @@
-from PySide6.QtWidgets import (
-    QFrame,
-    QVBoxLayout,
-    QLabel,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView
-)
+"""Workflow history card wrapper."""
+
+from typing import List, Optional
+
+from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
+
+from components.history_table import HistoryTable
+from models import WorkflowEventModel
 
 
 class WorkflowHistory(QFrame):
+    """The document's complete chronological record, workstream-tagged."""
 
-    def __init__(self, history=None):
-        super().__init__()
+    def __init__(self, history: Optional[List[WorkflowEventModel]] = None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("contentCard")
 
-        self.history = history or []
-
-        self.setObjectName(
-            "contentCard"
-        )
-
-        self.setup_ui()
-
-    def setup_ui(self):
-
-        layout = QVBoxLayout()
-
-        layout.setContentsMargins(16, 14, 16, 14)
-
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(8)
 
-        # --------------------------------
-        # TITLE
-        # --------------------------------
-
-        title = QLabel(
-            "Workflow History"
-        )
-
-        title.setObjectName(
-            "sectionTitle"
-        )
-
+        title = QLabel("Workflow History")
+        title.setObjectName("sectionTitle")
+        title.setStyleSheet("font-size: 13px; font-weight: 700; color: #0F172A;")
         layout.addWidget(title)
 
-        # --------------------------------
-        # TABLE
-        # --------------------------------
-
-        self.table = QTableWidget()
-
-        self.table.setColumnCount(5)
-
-        self.table.setHorizontalHeaderLabels([
-            "Timestamp",
-            "User",
-            "Action",
-            "Document",
-            "Details"
-        ])
-
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setWordWrap(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setMinimumHeight(180)
-
-        self.table.setSelectionBehavior(
-            QTableWidget.SelectRows
+        hint = QLabel(
+            "Every routing decision, assignment, progress update, remark, validation "
+            "and stage change, in order."
         )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748B; font-size: 10px;")
+        layout.addWidget(hint)
 
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        self.table = HistoryTable()
+        layout.addWidget(self.table)
 
-        layout.addWidget(
-            self.table
-        )
+        self.load_history(history or [])
 
-        self.setLayout(layout)
+    def load_history(self, history: List[WorkflowEventModel]) -> None:
+        self.table.load_history(history)
 
-        self.load_history()
-
-    # ====================================
-    # LOAD HISTORY
-    # ====================================
-
-    def load_history(self):
-
-        self.table.setRowCount(
-            len(self.history)
-        )
-
-        for row, entry in enumerate(
-            self.history
-        ):
-
-            values = [
-                entry.get(
-                    "timestamp",
-                    ""
-                ),
-                entry.get(
-                    "user",
-                    ""
-                ),
-                entry.get(
-                    "action",
-                    ""
-                ),
-                entry.get(
-                    "reference",
-                    ""
-                ),
-                entry.get(
-                    "details",
-                    ""
-                )
-            ]
-
-            for column, value in enumerate(
-                values
-            ):
-
-                self.table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(
-                        str(value)
-                    )
-                )
-
-    # ====================================
-    # UPDATE HISTORY
-    # ====================================
-
-    def set_history(self, history):
-
-        self.history = history or []
-
-        self.load_history()
+    # Alias kept for older callers.
+    def update_history(self, history: List[WorkflowEventModel]) -> None:
+        self.load_history(history)

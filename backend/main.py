@@ -1,70 +1,81 @@
+"""CDTRS API.
+
+Endpoint shape mirrors the model:
+
+    /documents                      the register
+    /documents/{id}/branches        routing - open independent workstreams
+    /branches/{id}/work-items       assign people (one work item each)
+    /work-items/{id}/...            one person's stage, progress, submission
+    /branches/{id}/director-review  the Director's remark
+    /documents/{id}/close           DS closure - the only way a document closes
+
+Every mutating endpoint takes the caller's active work context from the
+X-Work-Context-Id header; the workflow engine decides what that context may do.
+"""
+
+import asyncio
 import os
 import sys
-import asyncio
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import date as _date, datetime
 from pathlib import Path
 from typing import List, Optional
-from pydantic import BaseModel
-
-
-# Ensure OCR package directory is accessible
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_OCR_DIR = _PROJECT_ROOT / "OCR"
-if str(_OCR_DIR) not in sys.path:
-    sys.path.insert(0, str(_OCR_DIR))
-
 
 from fastapi import (
-    FastAPI,
     Depends,
-    HTTPException,
-    status,
-    UploadFile,
+    FastAPI,
     File,
     Form,
+    Header,
+    HTTPException,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
-    Header,
-    Request
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_OCR_DIR = _PROJECT_ROOT / "OCR"
+for _p in (str(_OCR_DIR), str(_PROJECT_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import crud
+import intelligence
 import models
 import schemas
-import crud
-
+import serializers
+import workflow
 from database import engine, get_db
-from models import UserRole, AttachmentType, SourceType, Priority, WorkContextType, DirectorDecision, BranchType
-from datetime import date as _date
+from models import (
+    AttachmentType,
+    BranchType,
+    Priority,
+    ReviewOutcome,
+    UserRole,
+    WorkContextType,
+    WorkStage,
+)
+
+API_V1 = "/api/v1"
 
 
-def _parse_flexible_date(date_str: Optional[str]) -> _date:
-    """Safely parse various date string representations into a datetime.date object."""
-    if not date_str:
+# =========================================================
+# HELPERS
+# =========================================================
+
+def _parse_flexible_date(value: Optional[str]) -> _date:
+    if not value:
         return datetime.utcnow().date()
-    s = str(date_str).strip()
-    if "T" in s:
-        s = s.split("T")[0]
-    formats = [
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%d-%m-%Y",
-        "%m-%d-%Y",
-        "%Y/%m/%d",
-        "%d.%m.%Y",
-        "%Y.%m.%d",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%d %B, %Y",
-        "%b %d %Y",
-    ]
-    for fmt in formats:
+    s = str(value).strip().split("T")[0]
+    for fmt in (
+        "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y", "%Y/%m/%d",
+        "%d.%m.%Y", "%Y.%m.%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y",
+    ):
         try:
             return datetime.strptime(s, fmt).date()
         except (ValueError, TypeError):
@@ -72,69 +83,64 @@ def _parse_flexible_date(date_str: Optional[str]) -> _date:
     return datetime.utcnow().date()
 
 
-# =========================================================
-# DATABASE TABLE CREATION
-# =========================================================
+def _optional_date(value: Optional[str]) -> Optional[_date]:
+    if not value or not str(value).strip():
+        return None
+    return _parse_flexible_date(value)
 
-models.Base.metadata.create_all(bind=engine)
-
-
-# =========================================================
-# FILE STORAGE — uploads/<year>/<doc_id>/<filename>
-# =========================================================
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 20 * 1024 * 1024))  # 20 MB limit
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 20 * 1024 * 1024))
 
-ALLOWED_TYPES = {
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "image/jpeg",
-    "image/jpg",
-    "image/png",
-    "text/plain",
-    "text/csv",
-    "application/zip",
-    "application/x-zip-compressed",
-    "application/octet-stream",
-}
 ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".txt", ".csv", ".zip"
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg",
+    ".txt", ".csv", ".zip",
 }
 
 
+def _store_upload(doc_id: int, filename: str, contents: bytes) -> str:
+    dest_dir = UPLOAD_DIR / str(datetime.utcnow().year) / str(doc_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / Path(filename).name
+    with open(dest_path, "wb") as f:
+        f.write(contents)
+    return str(dest_path.relative_to(UPLOAD_DIR))
 
-from contextlib import asynccontextmanager
 
-from contextlib import asynccontextmanager
+def _validate_upload(file: UploadFile, contents: bytes) -> None:
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds the {MAX_FILE_SIZE // (1024 * 1024)} MB limit.",
+        )
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"'{ext}' files are not accepted. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+
+# =========================================================
+# LIFESPAN
+# =========================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Automatic Database Table Creation & Zero-Touch Seeding
     try:
-        from database import SessionLocal, engine
+        from database import SessionLocal
         models.Base.metadata.create_all(bind=engine)
         db = SessionLocal()
         try:
-            dept_count = db.query(models.Department).count()
-            user_count = db.query(models.User).count()
-            if dept_count == 0 or user_count == 0:
-                print("[STARTUP] Database unseeded — running automatic initial seeding...", flush=True)
-                crud.seed_data(db)
-                print("[STARTUP] Automatic initial database seeding completed.", flush=True)
-            else:
-                # Ensure all 3 departments and 6 staff accounts are present and synced
-                crud.seed_data(db)
+            if db.query(models.Department).count() == 0 or db.query(models.User).count() == 0:
+                print("[STARTUP] Database unseeded - seeding now...", flush=True)
+            crud.seed_data(db)
         finally:
             db.close()
     except Exception as e:
-        print(f"[STARTUP WARN] Database startup check encountered error: {e}", flush=True)
+        print(f"[STARTUP WARN] {e}", flush=True)
 
-    # 2. Periodic Mailbox Synchronization
     async def _periodic_mailbox_sync():
         while True:
             try:
@@ -152,28 +158,34 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+    async def _periodic_reminders():
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                from database import SessionLocal
+                db = SessionLocal()
+                try:
+                    workflow.generate_deadline_reminders(db)
+                finally:
+                    db.close()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
     sync_task = asyncio.create_task(_periodic_mailbox_sync())
+    reminder_task = asyncio.create_task(_periodic_reminders())
     yield
     sync_task.cancel()
+    reminder_task.cancel()
 
-
-# =========================================================
-# FASTAPI APPLICATION
-# =========================================================
 
 app = FastAPI(
-    title="CDTRS V2 Backend",
-    description="Centralized Document Tracking and Routing System — Complete V2 API",
-    version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    title="CDTRS Backend",
+    description="Centralised Document Tracking and Routing System",
+    version="3.0.0",
     lifespan=lifespan,
 )
-
-
-# =========================================================
-# CORS MIDDLEWARE
-# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,7 +197,7 @@ app.add_middleware(
 
 
 # =========================================================
-# AUTHENTICATION & ROLE / CONTEXT GUARDS
+# AUTH & CONTEXT DEPENDENCIES
 # =========================================================
 
 bearer_scheme = HTTPBearer()
@@ -195,548 +207,321 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> models.User:
-    token = credentials.credentials
-    payload = crud.decode_access_token(token)
-
-    if payload is None:
+    payload = crud.decode_access_token(credentials.credentials)
+    if payload is None or payload.get("sub") is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token payload missing user identity.",
-        )
-
-    user = crud.get_user_by_id(db, int(user_id))
+    user = crud.get_user_by_id(db, int(payload["sub"]))
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or account is inactive.",
         )
-
     return user
 
 
-def get_current_work_context(
-    request: Request,
+def get_active_context(
     x_work_context_id: Optional[str] = Header(None, alias="X-Work-Context-Id"),
     current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ) -> Optional[models.WorkContextMembership]:
-    """Resolves and validates the active work context for the current request."""
+    """The hat the caller says they are wearing.  Validated against their own
+    memberships; never trusted blindly."""
     if x_work_context_id:
         try:
             cid = int(x_work_context_id)
-            membership = crud.validate_user_context(db, current_user.id, cid)
-            if not membership:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Specified work context does not belong to user or is inactive."
-                )
-            return membership
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid X-Work-Context-Id header format.")
-
-    memberships = crud.get_user_context_memberships(db, current_user.id)
-    if memberships:
-        for m in memberships:
-            if m.context_type.value == current_user.role.value:
-                return m
-        return memberships[0]
-    return None
-
-
-def require_roles(*roles: UserRole):
-    """Enforces server-side role-based access control."""
-    def _check(current_user: models.User = Depends(get_current_user)):
-        if current_user.role not in roles:
+            raise HTTPException(status_code=400, detail="Invalid X-Work-Context-Id header.")
+        membership = crud.validate_user_context(db, current_user.id, cid)
+        if not membership:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied. Required role(s): {[r.value for r in roles]}",
+                detail="That work context does not belong to you, or is inactive.",
             )
-        return current_user
-    return _check
+        return membership
+    return workflow.resolve_context(db, current_user)
 
 
-def require_context_types(*context_types: WorkContextType):
-    """Enforces that the user's active work context matches the required type(s)."""
-    def _check(
-        current_user: models.User = Depends(get_current_user),
-        active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context)
-    ):
-        if active_context and active_context.context_type in context_types:
-            return current_user
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied. Active work context must be one of: {[ct.value for ct in context_types]}"
-        )
-    return _check
+def _context_id(ctx: Optional[models.WorkContextMembership]) -> Optional[int]:
+    return ctx.id if ctx else None
 
 
-# =========================================================
-# SECURITY & ISOLATION HELPERS
-# =========================================================
+def _handle(exc: Exception) -> HTTPException:
+    if isinstance(exc, workflow.PermissionDenied):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    if isinstance(exc, (workflow.WorkflowError, ValueError)):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    raise exc
 
-def _get_authorized_doc_or_404(
+
+def _authorized_document(
     db: Session,
     doc_id: int,
     user: models.User,
-    active_context: Optional[models.WorkContextMembership] = None,
+    ctx: Optional[models.WorkContextMembership],
 ) -> models.Document:
     doc = crud.get_document(db, doc_id)
     if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
-
-    if not crud.is_document_accessible(
-        db, doc, user,
-        context_id=active_context.id if active_context else None,
-    ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this document.")
-
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if not workflow.can_access_document(db, doc, user, _context_id(ctx)):
+        raise HTTPException(status_code=403, detail="You do not have access to this document.")
     return doc
 
 
-def _assert_not_closed(doc: models.Document) -> None:
-    if doc.status == models.DocumentStatus.CLOSED:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Document is already closed. Normal workflow mutations are rejected.",
-        )
-
-
-API_V1 = "/api/v1"
-
-
 # =========================================================
-# BASIC / HEALTH CHECK
+# HEALTH
 # =========================================================
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"message": "CDTRS V2 Backend is running", "version": "2.0.0"}
+    return {"service": "CDTRS", "version": "3.0.0", "status": "ok"}
 
 
 @app.get("/health", tags=["Health"])
-def health_check():
-    return {"status": "healthy", "version": "2.0.0"}
-
-
-# =========================================================
-# LIVE EVENT WEBSOCKET & FALLBACK EVENT STREAM
-# =========================================================
-
-@app.websocket(f"{API_V1}/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket connection endpoint for real-time live event streaming to connected PySide6 clients.
-    Broadcasts events (DOCUMENT_CREATED, ROUTED, REMARK_UPDATED, PROGRESS_SUBMITTED, etc.)
-    """
-    await crud.event_manager.connect(websocket)
-    try:
-        while True:
-            # Keep connection open and listen for client heartbeats
-            data = await websocket.receive_text()
-    except WebSocketDisconnect:
-        crud.event_manager.disconnect(websocket)
-    except Exception:
-        crud.event_manager.disconnect(websocket)
-
-
-@app.get(
-    f"{API_V1}/events/recent",
-    tags=["Events"],
-    summary="Get recent live events (Polling fallback)"
-)
-def get_recent_events(
-    limit: int = 20,
-    current_user: models.User = Depends(get_current_user)
-):
-    return crud.event_manager.get_recent_events(limit=limit)
-
-
-# =========================================================
-# AUTHENTICATION
-# =========================================================
-
-@app.post(
-    f"{API_V1}/auth/login",
-    response_model=schemas.LoginResponse,
-    tags=["Authentication"],
-    summary="Login and receive a JWT bearer token",
-)
-def login(
-    login_data: schemas.LoginRequest,
-    db: Session = Depends(get_db),
-):
-    user = crud.authenticate_user(db, login_data.username, login_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password.",
-        )
-
-    # TSO is a single operational role in CDTRS. When the designated TSO
-    # logs in, automatically create/activate the TSO work-context membership.
-    # This keeps login self-contained while preserving the backend's
-    # single-active-TSO rule implemented by crud.set_active_tso().
-    if user.role == UserRole.TSO:
-        try:
-            crud.set_active_tso(db, user.id)
-            db.refresh(user)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unable to initialize TSO work context: {e}",
-            )
-
-    token = crud.create_access_token(
-        data={"sub": str(user.id), "role": user.role.value}
-    )
-
-    # Only record login audit events for admin users to keep the audit trail focused
-    if user.role == UserRole.ADMIN:
-        crud.create_audit_log(
-            db=db,
-            user_id=user.id,
-            action="USER_LOGIN",
-            entity_type="User",
-            entity_id=user.id,
-            description=f"Admin user '{user.username}' logged in."
-        )
-
+def health(db: Session = Depends(get_db)):
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
+        "status": "healthy",
+        "documents": db.query(models.Document).count(),
+        "open_branches": db.query(models.DocumentBranch).filter(
+            models.DocumentBranch.is_active.is_(True)).count(),
+        "open_work_items": db.query(models.WorkItem).filter(
+            models.WorkItem.is_active.is_(True)).count(),
     }
 
 
-@app.get(
-    f"{API_V1}/auth/me",
-    response_model=schemas.UserResponse,
-    tags=["Authentication"],
-    summary="Get current authenticated user",
-)
-def get_me(current_user: models.User = Depends(get_current_user)):
-    return current_user
+@app.websocket(f"{API_V1}/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await crud.event_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        crud.event_manager.disconnect(websocket)
 
 
-@app.post(
-    f"{API_V1}/auth/logout",
-    tags=["Authentication"],
-    summary="Logout (client discards token)",
-)
-def logout(current_user: models.User = Depends(get_current_user)):
-    return {"message": "Logged out successfully. Please discard your token."}
+@app.get(f"{API_V1}/events/recent", tags=["Events"])
+def recent_events(limit: int = 20, current_user: models.User = Depends(get_current_user)):
+    return crud.event_manager.get_recent_events(limit)
 
 
-@app.get(
-    f"{API_V1}/auth/contexts",
-    response_model=List[schemas.WorkContextMembershipResponse],
-    tags=["Authentication"],
-    summary="Get all active work contexts for the authenticated user",
-)
-def get_user_contexts(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    return crud.get_user_context_memberships(db, current_user.id)
+# =========================================================
+# AUTH
+# =========================================================
 
-
-@app.post(
-    f"{API_V1}/auth/switch-context",
-    response_model=schemas.WorkContextMembershipResponse,
-    tags=["Authentication"],
-    summary="Switch active work context for the current user session",
-)
-def switch_context(
-    body: schemas.WorkContextSwitchRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    membership = crud.validate_user_context(db, current_user.id, body.context_membership_id)
-    if not membership:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Context membership does not exist, is inactive, or does not belong to you."
-        )
-    return membership
-
-
-@app.post(
-    f"{API_V1}/auth/change-password",
-    tags=["Authentication"],
-    summary="Change password for current logged-in user",
-)
-def change_password(
-    data: schemas.ChangePasswordRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    if data.old_password:
-        if not crud.verify_password(data.old_password, current_user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Current password does not match.",
-            )
-    if len(data.new_password) < 4:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be at least 4 characters long.",
-        )
-    crud.update_user_password(db, current_user.id, data.new_password)
-    return {"message": "Password updated successfully."}
-
-
-@app.post(
-    f"{API_V1}/auth/reset-password",
-    tags=["Authentication"],
-    summary="Change / Reset password from login screen (requires current password verification)",
-)
-def reset_password(
-    data: schemas.ResetPasswordRequest,
-    db: Session = Depends(get_db),
-):
-    user = crud.get_user_by_username(db, data.username)
+@app.post(f"{API_V1}/auth/login", response_model=schemas.LoginResponse, tags=["Auth"])
+def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
+    user = crud.authenticate_user(db, payload.username, payload.password)
     if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    contexts = crud.get_user_context_memberships(db, user.id)
+    if not contexts:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User '{data.username}' not found.",
+            status_code=403,
+            detail="This account has no active work context. Contact an administrator.",
         )
-    if not crud.verify_password(data.old_password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password does not match.",
-        )
-    if len(data.new_password) < 4:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be at least 4 characters long.",
-        )
-    crud.update_user_password(db, user.id, data.new_password)
-    return {"message": f"Password updated successfully for user '{data.username}'."}
+    active = workflow.resolve_context(db, user)
+    return schemas.LoginResponse(
+        access_token=crud.create_access_token({"sub": str(user.id)}),
+        user=serializers.user(user, contexts),
+        contexts=[serializers.context(c) for c in contexts],
+        active_context=serializers.context(active) if active else None,
+    )
 
 
-# =========================================================
-# USERS & ROLES
-# =========================================================
+@app.get(f"{API_V1}/auth/me", response_model=schemas.UserResponse, tags=["Auth"])
+def me(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return serializers.user(current_user, crud.get_user_context_memberships(db, current_user.id))
 
-@app.post(
-    f"{API_V1}/users",
-    response_model=schemas.UserResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Users"],
-    summary="Create a user account (DS only)",
-)
-def create_user(
-    user: schemas.UserCreate,
+
+@app.get(f"{API_V1}/auth/contexts", response_model=List[schemas.WorkContextResponse], tags=["Auth"])
+def my_contexts(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [serializers.context(c) for c in crud.get_user_context_memberships(db, current_user.id)]
+
+
+@app.post(f"{API_V1}/auth/switch-context", response_model=schemas.WorkContextResponse, tags=["Auth"])
+def switch_context(
+    payload: schemas.WorkContextSwitchRequest,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
 ):
-    existing = crud.get_user_by_username(db, user.username)
-    if existing:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists.")
-    return crud.create_user(db, user)
+    membership = crud.validate_user_context(db, current_user.id, payload.context_membership_id)
+    if not membership:
+        raise HTTPException(status_code=403, detail="That work context is not available to you.")
+    return serializers.context(membership)
 
 
-@app.get(
-    f"{API_V1}/users",
-    response_model=List[schemas.UserResponse],
-    tags=["Users"],
-    summary="List all users",
-)
-def get_users(
+@app.post(f"{API_V1}/auth/change-password", tags=["Auth"])
+def change_password(
+    payload: schemas.ChangePasswordRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not crud.verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    crud.update_user_password(db, current_user.id, payload.new_password)
+    return {"detail": "Password updated."}
+
+
+# =========================================================
+# REFERENCE DATA
+# =========================================================
+
+@app.get(f"{API_V1}/users", response_model=List[schemas.UserResponse], tags=["Reference"])
+def list_users(
+    context_type: Optional[WorkContextType] = None,
+    department_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    return crud.get_users(db)
+    """Routing and assignment pickers use this.  Filtering by context_type is
+    the correct way to find 'employees of department X' - work contexts, not
+    the account's nominal role, decide who can receive work."""
+    if context_type:
+        users = crud.get_users_by_context(db, context_type, department_id)
+    else:
+        users = crud.get_users(db, include_inactive=False)
+    return [serializers.user(u) for u in users]
 
 
-# =========================================================
-# DEPARTMENTS
-# =========================================================
-
-@app.post(
-    f"{API_V1}/departments",
-    response_model=schemas.DepartmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Departments"],
-    summary="Create a department (DS only)",
-)
-def create_department(
-    dept: schemas.DepartmentCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
-):
-    return crud.create_department(db, dept)
-
-
-@app.get(
-    f"{API_V1}/departments",
-    response_model=List[schemas.DepartmentResponse],
-    tags=["Departments"],
-    summary="List all active departments",
-)
-def get_departments(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
+@app.get(f"{API_V1}/departments", response_model=List[schemas.DepartmentResponse], tags=["Reference"])
+def list_departments(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return crud.get_departments(db)
 
 
 @app.get(
     f"{API_V1}/departments/{{department_id}}/employees",
-    response_model=List[schemas.EmployeeResponse],
-    tags=["Departments"],
-    summary="Get employees in a department",
+    response_model=List[schemas.UserResponse],
+    tags=["Reference"],
 )
-def get_department_employees(
+def department_employees(
     department_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    dept = crud.get_department_by_id(db, department_id)
-    if not dept:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
-    return crud.get_employees_by_department(db, department_id)
+    return [
+        serializers.user(u)
+        for u in crud.get_users_by_context(db, WorkContextType.EMPLOYEE, department_id)
+    ]
 
 
-# =========================================================
-# EMPLOYEES
-# =========================================================
-
-@app.post(
-    f"{API_V1}/employees",
-    response_model=schemas.EmployeeResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Employees"],
-    summary="Create an employee record (DS only)",
-)
-def create_employee(
-    emp: schemas.EmployeeCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
-):
-    dept = crud.get_department_by_id(db, emp.department_id)
-    if not dept:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
-    return crud.create_employee(db, emp)
-
-
-@app.get(
-    f"{API_V1}/employees",
-    response_model=List[schemas.EmployeeResponse],
-    tags=["Employees"],
-    summary="List all active employees",
-)
-def get_employees(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
+@app.get(f"{API_V1}/employees", response_model=List[schemas.EmployeeResponse], tags=["Reference"])
+def list_employee_directory(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return crud.get_employees(db)
 
 
+@app.get(f"{API_V1}/workflow/vocabulary", tags=["Reference"])
+def workflow_vocabulary(current_user: models.User = Depends(get_current_user)):
+    """Stage vocabulary so the UI never has to hardcode stage names."""
+    return {
+        "branch_stages": {
+            bt.value: [
+                {"value": s.value, "label": workflow.branch_stage_label(s)}
+                for s in stages
+            ]
+            for bt, stages in workflow.BRANCH_STAGES.items()
+        },
+        "work_stages": [
+            {"value": s.value, "label": workflow.work_stage_label(s)} for s in WorkStage
+        ],
+        "worker_selectable_stages": [
+            {"value": s.value, "label": workflow.work_stage_label(s)}
+            for s in workflow.WORKER_SELECTABLE_STAGES
+        ],
+        "lifecycles": [
+            {"value": v, "label": label} for v, label in workflow.LIFECYCLE_LABELS.items()
+        ],
+    }
+
+
 # =========================================================
-# INTAKE & MAIL INGESTION
+# INTAKE
 # =========================================================
 
-@app.get(
-    f"{API_V1}/intake",
-    response_model=List[schemas.IntakeResponse],
-    tags=["Intake"],
-    summary="DS: Get incoming mail/intake items",
-)
-def get_intake_items(
+@app.get(f"{API_V1}/intake", response_model=List[schemas.IntakeResponse], tags=["Intake"])
+def list_intake(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Intake is handled in the DS context.")
     return crud.get_incoming_messages(db)
 
 
-@app.post(
-    f"{API_V1}/intake/sync-outlook",
-    response_model=schemas.OutlookSyncResponse,
-    tags=["Intake"],
-    summary="DS: Synchronize incoming emails from Director Secretary Outlook mailbox",
-)
-def sync_outlook_mailbox(
+@app.post(f"{API_V1}/intake/sync-outlook", tags=["Intake"])
+def sync_outlook(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Mailbox sync is a DS action.")
     from mail.service import mail_service
-    result = mail_service.sync_ds_mailbox(db)
-    return result
+    return mail_service.sync_ds_mailbox(db)
 
 
 @app.post(
     f"{API_V1}/intake/manual-upload",
-    response_model=schemas.DocumentResponse,
+    response_model=schemas.DocumentDetailResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Intake"],
-    summary="DS: Manual document upload via intake pipeline",
 )
-async def manual_intake_upload(
+async def manual_upload(
     title: str = Form(...),
     received_date: str = Form(...),
-    mode: str = Form(default="Manual Upload"),
+    mode: str = Form(default="MANUAL_UPLOAD"),
     priority: str = Form(default="MEDIUM"),
+    subject: Optional[str] = Form(default=None),
     description: Optional[str] = Form(default=None),
     source: Optional[str] = Form(default="Manual Intake"),
+    sender_name: Optional[str] = Form(default=None),
+    sender_reference: Optional[str] = Form(default=None),
+    deadline: Optional[str] = Form(default=None),
     ocr_text: Optional[str] = Form(default=None),
     confidence: Optional[str] = Form(default=None),
     suggested_department_id: Optional[str] = Form(default=None),
-    suggested_department_name: Optional[str] = Form(default=None),
     suggested_employee_id: Optional[str] = Form(default=None),
-    suggested_employee_name: Optional[str] = Form(default=None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    # Parse routing parameters
-    sugg_dept_id = int(suggested_department_id) if (suggested_department_id and str(suggested_department_id).strip().isdigit()) else None
-    sugg_emp_id = int(suggested_employee_id) if (suggested_employee_id and str(suggested_employee_id).strip().isdigit()) else None
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Only the DS can register documents.")
+
+    contents = await file.read()
+    _validate_upload(file, contents)
+
+    dept_hint = int(suggested_department_id) if (suggested_department_id or "").strip().isdigit() else None
+    emp_hint = int(suggested_employee_id) if (suggested_employee_id or "").strip().isdigit() else None
     parsed_conf = None
     if confidence:
         try:
             c = float(confidence.strip())
-            parsed_conf = (c / 100.0) if c > 1.0 else c
+            parsed_conf = c / 100.0 if c > 1.0 else c
         except ValueError:
             parsed_conf = None
 
-    # 1. Create canonical document directly in Documents repository (Manual upload does NOT create an unmanaged inbox item)
-    parsed_date = _parse_flexible_date(received_date)
-    doc_create = schemas.DocumentCreate(
-        title=title,
-        description=description,
-        received_date=parsed_date,
-        source=source,
-        mode=mode,
-        priority=Priority(priority),
-        suggested_department_id=sugg_dept_id,
-        suggested_employee_id=sugg_emp_id,
-        ocr_text=ocr_text,
-        confidence=parsed_conf,
-        source_message_id=None
+    doc = crud.create_document(
+        db,
+        schemas.DocumentCreate(
+            title=title,
+            subject=subject,
+            description=description,
+            received_date=_parse_flexible_date(received_date),
+            deadline=_optional_date(deadline),
+            source=source,
+            sender_name=sender_name,
+            sender_reference=sender_reference,
+            mode=mode,
+            priority=Priority(priority),
+        ),
+        created_by=current_user.id,
+        context_id=ctx.id,
     )
-    doc = crud.create_document(db, doc_create, created_by=current_user.id)
-
-    # 2. Read and save file attachment with checksum
-    contents = await file.read()
-    checksum = crud.compute_checksum(contents)
-
-    dest_dir = UPLOAD_DIR / str(datetime.utcnow().year) / str(doc.doc_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / Path(file.filename).name
-
-    with open(dest_path, "wb") as f:
-        f.write(contents)
-
-    storage_key = str(dest_path.relative_to(UPLOAD_DIR))
 
     crud.create_attachment(
         db=db,
@@ -744,1018 +529,936 @@ async def manual_intake_upload(
         progress_update_id=None,
         uploaded_by=current_user.id,
         file_name=file.filename,
-        storage_key=storage_key,
+        storage_key=_store_upload(doc.doc_id, file.filename, contents),
         file_type=file.content_type,
         file_size=len(contents),
-        checksum=checksum,
+        checksum=crud.compute_checksum(contents),
         attachment_type=AttachmentType.ORIGINAL,
-        source_message_id=None
+        context_id=ctx.id,
     )
 
-    # 3. Automatically trigger OCR extraction (preserving client-side scan text and suggested routing)
-    crud.trigger_ocr_processing(
-        db,
-        doc.doc_id,
+    intelligence.trigger_ocr_processing(
+        db, doc.doc_id,
         intake_ocr_text=ocr_text,
         intake_ocr_confidence=parsed_conf,
-        preferred_dept_id=sugg_dept_id,
-        preferred_emp_id=sugg_emp_id
+        preferred_dept_id=dept_hint,
+        preferred_emp_id=emp_hint,
     )
 
-    # Broadcast event
     await crud.event_manager.broadcast("DOCUMENT_CREATED", document_id=doc.doc_id, user_id=current_user.id)
-
     db.refresh(doc)
-    return doc
+    return serializers.document_detail(db, doc)
 
 
 @app.post(
-    f"{API_V1}/intake/{{id}}/process",
-    response_model=schemas.DocumentResponse,
+    f"{API_V1}/intake/{{message_id}}/process",
+    response_model=schemas.DocumentDetailResponse,
     tags=["Intake"],
-    summary="DS: Process incoming mail item into canonical document",
 )
 async def process_intake(
-    id: int,
-    proc_req: schemas.IntakeProcessRequest,
+    message_id: int,
+    payload: schemas.IntakeProcessRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    doc = crud.process_intake_to_document(db, id, proc_req, current_user)
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Only the DS can process intake.")
+    doc = crud.process_intake_to_document(db, message_id, payload, current_user, ctx.id)
     if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Intake item not found.")
-
-    # process_intake_to_document triggers OCR with intake parameters
+        raise HTTPException(status_code=404, detail="Intake item not found.")
+    intelligence.trigger_ocr_processing(db, doc.doc_id)
     await crud.event_manager.broadcast("DOCUMENT_CREATED", document_id=doc.doc_id, user_id=current_user.id)
-    return doc
+    db.refresh(doc)
+    return serializers.document_detail(db, doc)
 
 
 # =========================================================
 # DOCUMENTS
 # =========================================================
 
+@app.get(f"{API_V1}/documents", response_model=List[schemas.DocumentListResponse], tags=["Documents"])
+def list_documents(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    docs = workflow.documents_for_context(db, current_user, _context_id(ctx))
+    return serializers.documents_with_my_work(db, docs, current_user.id, _context_id(ctx))
+
+
+@app.get(f"{API_V1}/documents/inbox", response_model=List[schemas.DocumentListResponse], tags=["Documents"])
+def inbox(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """What the active context must act on now."""
+    docs = workflow.inbox_for_context(db, current_user, _context_id(ctx))
+    return serializers.documents_with_my_work(db, docs, current_user.id, _context_id(ctx))
+
+
 @app.post(
     f"{API_V1}/documents",
-    response_model=schemas.DocumentResponse,
+    response_model=schemas.DocumentDetailResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Documents"],
-    summary="DS: Register a new document",
 )
-async def create_document(
-    doc: schemas.DocumentCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
-):
-    db_doc = crud.create_document(db, doc, created_by=current_user.id)
-    crud.trigger_ocr_processing(db, db_doc.doc_id)
-    await crud.event_manager.broadcast("DOCUMENT_CREATED", document_id=db_doc.doc_id, user_id=current_user.id)
-    return db_doc
-
-
-@app.get(
-    f"{API_V1}/documents",
-    response_model=List[schemas.DocumentListResponse],
-    tags=["Documents"],
-    summary="Get documents accessible to current user",
-)
-def get_documents(
+def create_document(
+    payload: schemas.DocumentCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    # Resolving active_context here is intentional even before CRUD receives
-    # context-aware scoping. It guarantees that every document-list request
-    # validates X-Work-Context-Id before data is returned.
-    return crud.get_accessible_documents_for_user(
-        db, current_user,
-        context_id=active_context.id if active_context else None,
-    )
-
-
-@app.get(
-    f"{API_V1}/documents/inbox",
-    response_model=List[schemas.DocumentListResponse],
-    tags=["Documents"],
-    summary="Get role-scoped inbox (DS, Director, HOD, Employee)",
-)
-def get_inbox(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    # Validate the selected work context for this request.
-    return crud.get_inbox(
-        db, current_user,
-        context_id=active_context.id if active_context else None,
-    )
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Only the DS can register documents.")
+    doc = crud.create_document(db, payload, created_by=current_user.id, context_id=ctx.id)
+    return serializers.document_detail(db, doc)
 
 
 @app.get(
     f"{API_V1}/documents/{{document_id}}",
-    response_model=schemas.DocumentResponse,
+    response_model=schemas.DocumentDetailResponse,
     tags=["Documents"],
-    summary="Get a single document by ID (Authorized)",
 )
 def get_document(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    return _get_authorized_doc_or_404(db, document_id, current_user, active_context)
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    return serializers.document_detail(db, doc)
 
 
-# =========================================================
-# WORKFLOW TRANSITIONS & CONCURRENCY
-# =========================================================
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/route",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="DS: Route document to Director / HOD / Employee",
+@app.patch(
+    f"{API_V1}/documents/{{document_id}}",
+    response_model=schemas.DocumentDetailResponse,
+    tags=["Documents"],
 )
-async def route_document(
+def update_document(
     document_id: int,
-    route_req: schemas.RouteRequest,
+    payload: schemas.DocumentUpdate,
     db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    result = crud.route_document(db, document_id, route_req, current_user)
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Conflict: Document state has been modified concurrently or invalid parameters.",
-        )
-
-    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/branches",
-    response_model=List[schemas.BranchResponse],
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="DS: Create one or multiple canonical routing branches for a document",
-)
-async def create_document_branches(
-    document_id: int,
-    body: schemas.MultiBranchRouteRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
+    """DS corrects document details, including anything OCR mis-read."""
     try:
-        context_id = active_context.id if active_context else None
-        branches = crud.create_canonical_branches(
-            db=db,
-            document_id=document_id,
-            branches=body.branches,
-            current_user=current_user,
-            context_id=context_id,
-            expected_version=body.expected_version
-        )
-    except ValueError as ex:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
-
-    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
-    return branches
+        doc = crud.update_document_metadata(db, document_id, payload, current_user, _context_id(ctx))
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.document_detail(db, doc)
 
 
-@app.get(
-    f"{API_V1}/documents/{{document_id}}/branches",
-    response_model=List[schemas.BranchResponse],
-    tags=["Documents — Workflow"],
-    summary="Get all canonical routing branches for a document",
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/register",
+    response_model=schemas.DocumentDetailResponse,
+    tags=["Documents"],
 )
-def get_document_branches(
+def register_document(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    return crud.get_document_branches(db, document_id)
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/branches/{{routing_id}}/assign",
-    response_model=schemas.AssignmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="HOD/DS: Assign operational responsibility for a canonical branch",
-)
-async def assign_branch_employee(
-    document_id: int,
-    routing_id: int,
-    body: schemas.AssignmentRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.HOD, WorkContextType.DS, WorkContextType.ADMIN)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
     try:
-        context_id = active_context.id if active_context else None
-        assignment = crud.assign_branch_employee(
-            db=db,
-            document_id=document_id,
-            routing_id=routing_id,
-            assign_req=body,
-            current_user=current_user,
-            context_id=context_id
+        doc = workflow.register_document(
+            db, document_id=document_id, actor=current_user, context_id=_context_id(ctx)
         )
-    except ValueError as ex:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
-
-    await crud.event_manager.broadcast("ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id)
-    return assignment
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/director-review",
-    response_model=schemas.DirectorReviewResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="Director: Submit explicit review decision (CONTINUE or CLOSE)",
-)
-async def submit_director_review(
-    document_id: int,
-    body: schemas.DirectorReviewRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    try:
-        context_id = active_context.id if active_context else None
-        review = crud.submit_director_review(
-            db=db,
-            document_id=document_id,
-            review_req=body,
-            current_user=current_user,
-            context_id=context_id
-        )
-    except ValueError as ex:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
-
-    await crud.event_manager.broadcast("DIRECTOR_REVIEW_COMPLETED", document_id=document_id, user_id=current_user.id)
-    return review
-
-
-@app.put(
-    f"{API_V1}/documents/{{document_id}}/director-remark",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="Director: Save/edit Director remark",
-)
-async def save_director_remark(
-    document_id: int,
-    body: schemas.DirectorRemarkUpdate,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    result = crud.save_director_remark(db, document_id, body.director_remark, current_user, body.expected_version)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
-    await crud.event_manager.broadcast("REMARK_UPDATED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/return-to-ds",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="Director: Return document to DS",
-)
-async def return_to_ds(
-    document_id: int,
-    body: schemas.ReturnToDSRequest,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DIRECTOR)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    ds_user_id = doc.created_by
-    result = crud.return_to_ds(db, document_id, ds_user_id, body.remarks, current_user, body.expected_version)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
-    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.put(
-    f"{API_V1}/documents/{{document_id}}/hod-remark",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="HOD: Save/edit HOD remark",
-)
-async def save_hod_remark(
-    document_id: int,
-    body: schemas.HODRemarkUpdate,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    result = crud.save_hod_remark(db, document_id, body.hod_remark, current_user, body.expected_version)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
-    await crud.event_manager.broadcast("REMARK_UPDATED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/hod-assign-team",
-    response_model=schemas.HODTeamAssignmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="HOD: Assign a departmental work item to one or more employees",
-)
-async def hod_assign_team(
-    document_id: int,
-    body: schemas.HODTeamAssignmentRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    try:
-        assignment = crud.create_hod_team_assignment(
-            db=db,
-            doc_id=document_id,
-            request=body,
-            current_user=current_user,
-            context_id=active_context.id if active_context else None,
-        )
-    except ValueError as ex:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
-
-    if not assignment:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Concurrency conflict, invalid document, or unauthorized departmental assignment.",
-        )
-
-    await crud.event_manager.broadcast(
-        "ASSIGNMENT_CREATED",
-        document_id=document_id,
-        user_id=current_user.id,
-    )
-    return assignment
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/ds-assign-team",
-    response_model=schemas.HODTeamAssignmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Workflow"],
-    summary="DS: Create a team assignment, including cross-department members",
-)
-async def ds_assign_team(
-    document_id: int,
-    body: schemas.DSTeamAssignmentRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.DS, WorkContextType.ADMIN)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-    try:
-        assignment = crud.create_hod_team_assignment(
-            db=db,
-            doc_id=document_id,
-            request=body,
-            current_user=current_user,
-            context_id=active_context.id if active_context else None,
-        )
-    except ValueError as ex:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ex))
-
-    if not assignment:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Concurrency conflict, invalid document, or unauthorized team assignment.",
-        )
-
-    await crud.event_manager.broadcast(
-        "TEAM_ASSIGNMENT_CREATED", document_id=document_id, user_id=current_user.id
-    )
-    return assignment
-
-
-
-
-
-
-
-
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/assignments/{{assignment_id}}/complete",
-    response_model=schemas.AssignmentResponse,
-    tags=["Documents — Assignments"],
-    summary="Employee/TSO: Complete own work assignment",
-)
-async def complete_assignment(
-    document_id: int,
-    assignment_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_context_types(WorkContextType.EMPLOYEE, WorkContextType.TSO)),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(_get_authorized_doc_or_404(db, document_id, current_user, active_context))
-    result = crud.complete_work_assignment(db, document_id, assignment_id, current_user, active_context.id if active_context else None)
-    if not result:
-        raise HTTPException(status_code=400, detail="Assignment cannot be completed.")
-    await crud.event_manager.broadcast("ASSIGNMENT_COMPLETED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/progress",
-    response_model=schemas.ProgressResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Documents — Progress"],
-    summary="Employee: Submit progress update",
-)
-async def submit_progress(
-    document_id: int,
-    prog: schemas.ProgressCreate,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.EMPLOYEE, WorkContextType.TSO)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    result = crud.create_progress_update(
-        db, document_id, prog, current_user,
-        context_id=active_context.id if active_context else None
-    )
-    if not result:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    await crud.event_manager.broadcast("PROGRESS_SUBMITTED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/progress/{{progress_id}}/hod-validate",
-    response_model=schemas.ProgressResponse,
-    tags=["Documents — Progress"],
-    summary="HOD: Review, approve, or request correction on employee progress update",
-)
-async def hod_validate_progress(
-    document_id: int,
-    progress_id: int,
-    val_req: schemas.HODValidationRequest,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.HOD)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    result = crud.hod_validate_progress_update(
-        db,
-        doc_id=document_id,
-        progress_id=progress_id,
-        action=val_req.action,
-        note=val_req.note,
-        current_user=current_user,
-        context_id=active_context.id if active_context else None
-    )
-    if not result:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not validate progress update. Check IDs and action.")
-
-    await crud.event_manager.broadcast("PROGRESS_SUBMITTED", document_id=document_id, user_id=current_user.id)
-    return result
-
-
-@app.get(
-    f"{API_V1}/documents/{{document_id}}/progress",
-    response_model=List[schemas.ProgressResponse],
-    tags=["Documents — Progress"],
-    summary="Get all progress updates for a document",
-)
-def get_progress(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    return crud.get_progress_updates(db, document_id)
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/follow-up",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="DS: Forward progress follow-up to Director",
-)
-async def follow_up_to_director(
-    document_id: int,
-    body: schemas.FollowUpRequest,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    directors = crud.get_users_by_role(db, UserRole.DIRECTOR)
-    if not directors:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No active Director found.")
-
-    result = crud.follow_up_to_director(db, document_id, directors[0], body.remarks, current_user, body.expected_version)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
-    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
-    return result
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.document_detail(db, doc)
 
 
 @app.post(
     f"{API_V1}/documents/{{document_id}}/close",
-    response_model=schemas.DocumentResponse,
-    tags=["Documents — Workflow"],
-    summary="DS: Close a document",
+    response_model=schemas.DocumentDetailResponse,
+    tags=["Documents"],
 )
 async def close_document(
     document_id: int,
-    body: schemas.CloseRequest,
+    payload: schemas.CloseRequest,
     db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    if doc.status == models.DocumentStatus.CLOSED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document is already closed.")
-
+    """Only the DS closes a document, and only when the DS decides the work is
+    finished.  No Director approval is required."""
     try:
-        result = crud.close_document(db, document_id, body.remarks, current_user, body.expected_version)
-    except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-
-    if not result:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrency conflict or document not found.")
-
+        doc = workflow.close_document(
+            db,
+            document_id=document_id,
+            actor=current_user,
+            context_id=_context_id(ctx),
+            remark=payload.remark,
+            force=payload.force,
+            expected_version=payload.expected_version,
+        )
+    except Exception as exc:
+        raise _handle(exc)
     await crud.event_manager.broadcast("DOCUMENT_CLOSED", document_id=document_id, user_id=current_user.id)
-    return result
+    return serializers.document_detail(db, doc)
 
 
-# =========================================================
-# REMARK HISTORY
-# =========================================================
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/reopen",
+    response_model=schemas.DocumentDetailResponse,
+    tags=["Documents"],
+)
+def reopen_document(
+    document_id: int,
+    payload: schemas.ReopenRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    try:
+        doc = workflow.reopen_document(
+            db, document_id=document_id, actor=current_user,
+            context_id=_context_id(ctx), reason=payload.reason,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.document_detail(db, doc)
+
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/history",
+    response_model=List[schemas.WorkflowEventResponse],
+    tags=["Documents"],
+)
+def document_history(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.event(e) for e in workflow.document_history(db, document_id)]
+
+
+@app.get(f"{API_V1}/history", response_model=List[schemas.WorkflowEventResponse], tags=["Documents"])
+def all_history(
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    return [
+        serializers.event(e)
+        for e in workflow.visible_history(db, current_user, _context_id(ctx), limit)
+    ]
+
 
 @app.get(
     f"{API_V1}/documents/{{document_id}}/remarks",
-    response_model=List[schemas.DocumentRemarkResponse],
-    tags=["Documents — Workflow"],
-    summary="Get remark edit history for a document",
+    response_model=List[schemas.RemarkResponse],
+    tags=["Documents"],
 )
-def get_document_remarks(
+def document_remarks(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    return crud.get_document_remarks(db, document_id)
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.remark(r) for r in doc.remarks]
 
 
 # =========================================================
-# OCR PIPELINE & VERIFICATION
+# BRANCHES (routing)
+# =========================================================
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/branches",
+    response_model=List[schemas.BranchResponse],
+    tags=["Branches"],
+)
+def list_branches(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.branch(b) for b in doc.branches]
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/branches",
+    response_model=List[schemas.BranchResponse],
+    status_code=status.HTTP_201_CREATED,
+    tags=["Branches"],
+)
+async def route_document(
+    document_id: int,
+    payload: schemas.RouteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """DS routing.  Send one target or many at once - to the Director, to HODs,
+    to employees directly and to TSO - and they all become independent
+    workstreams that coexist and progress at their own pace."""
+    try:
+        branches = workflow.open_branches(
+            db,
+            document_id=document_id,
+            requests=[b.model_dump() for b in payload.branches],
+            actor=current_user,
+            context_id=_context_id(ctx),
+            expected_version=payload.expected_version,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    await crud.event_manager.broadcast("DOCUMENT_ROUTED", document_id=document_id, user_id=current_user.id)
+    return [serializers.branch(b) for b in branches]
+
+
+@app.post(
+    f"{API_V1}/branches/{{branch_id}}/work-items",
+    response_model=List[schemas.WorkItemResponse],
+    status_code=status.HTTP_201_CREATED,
+    tags=["Branches"],
+)
+async def assign_work(
+    branch_id: int,
+    payload: schemas.BranchAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """HOD (or DS) assigns people.  One work item is created per person, each
+    with its own stage, deadline and progress trail.  `team_name` only groups
+    them for display."""
+    try:
+        items = workflow.assign_branch_work(
+            db,
+            branch_id=branch_id,
+            assignee_user_ids=payload.assignee_user_ids,
+            actor=current_user,
+            context_id=_context_id(ctx),
+            instructions=payload.instructions,
+            deadline=payload.deadline,
+            requires_validation=payload.requires_validation,
+            team_name=payload.team_name,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    if items:
+        await crud.event_manager.broadcast(
+            "WORK_ASSIGNED", document_id=items[0].document_id, user_id=current_user.id
+        )
+    return [serializers.work_item(i) for i in items]
+
+
+@app.post(
+    f"{API_V1}/branches/{{branch_id}}/remark",
+    response_model=schemas.RemarkResponse,
+    tags=["Branches"],
+)
+def branch_remark(
+    branch_id: int,
+    payload: schemas.BranchRemarkRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    try:
+        remark = workflow.add_branch_remark(
+            db, branch_id=branch_id, remark_text=payload.remark_text,
+            actor=current_user, context_id=_context_id(ctx),
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.remark(remark)
+
+
+@app.post(
+    f"{API_V1}/branches/{{branch_id}}/close",
+    response_model=schemas.BranchResponse,
+    tags=["Branches"],
+)
+def close_branch(
+    branch_id: int,
+    payload: schemas.BranchCloseRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """Ends one workstream.  Other branches on the document keep running and
+    the document itself stays open."""
+    try:
+        branch = workflow.close_branch(
+            db, branch_id=branch_id, actor=current_user,
+            context_id=_context_id(ctx), reason=payload.reason,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.branch(branch)
+
+
+# =========================================================
+# DIRECTOR REVIEW
 # =========================================================
 
 @app.post(
-    f"{API_V1}/documents/{{document_id}}/process-ocr",
-    tags=["OCR"],
-    summary="Start / run asynchronous OCR extraction",
+    f"{API_V1}/branches/{{branch_id}}/director-review/start",
+    response_model=schemas.BranchResponse,
+    tags=["Director"],
 )
-async def process_ocr(
-    document_id: int,
+def start_review(
+    branch_id: int,
     db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    ocr_result = crud.trigger_ocr_processing(db, document_id)
-    if not ocr_result:
-        raise HTTPException(status_code=404, detail="Document not found.")
+    try:
+        branch = workflow.start_director_review(
+            db, branch_id=branch_id, actor=current_user, context_id=_context_id(ctx)
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.branch(branch)
 
-    await crud.event_manager.broadcast("OCR_COMPLETED", document_id=document_id, user_id=current_user.id)
-    return {"message": "OCR processing completed", "ocr_status": ocr_result.ocr_status.value, "confidence": ocr_result.confidence}
+
+@app.post(
+    f"{API_V1}/branches/{{branch_id}}/director-review",
+    response_model=schemas.DirectorReviewResponse,
+    tags=["Director"],
+)
+async def submit_director_review(
+    branch_id: int,
+    payload: schemas.DirectorReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """The Director records a remark and hands the document back to the DS.
+    There is no decision field: the Director does not close documents and does
+    not stop work on other branches."""
+    try:
+        review = workflow.submit_director_review(
+            db,
+            branch_id=branch_id,
+            remark_text=payload.remark_text,
+            actor=current_user,
+            context_id=_context_id(ctx),
+            expected_version=payload.expected_version,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    await crud.event_manager.broadcast(
+        "DIRECTOR_REMARK", document_id=review.document_id, user_id=current_user.id
+    )
+    # Refresh routing intelligence now that a new Director remark exists.
+    try:
+        intelligence.generate_routing_suggestion(db, review.document_id, include_director_remark=True)
+    except Exception:
+        pass
+    return serializers.director_review(review)
 
 
 @app.get(
-    f"{API_V1}/documents/{{document_id}}/ocr",
-    response_model=schemas.OCRResponse,
-    tags=["OCR"],
-    summary="Get OCR text and extracted structured fields",
+    f"{API_V1}/documents/{{document_id}}/director-reviews",
+    response_model=List[schemas.DirectorReviewResponse],
+    tags=["Director"],
 )
-def get_ocr_details(
+def list_director_reviews(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    ocr = crud.get_document_ocr(db, document_id)
-    fields = db.query(models.DocumentExtractedField).filter(models.DocumentExtractedField.document_id == document_id).all()
+    """Every review ever made on this document, oldest first.  None replaces
+    another."""
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.director_review(r) for r in doc.director_reviews]
 
-    if not ocr:
-        return schemas.OCRResponse(document_id=document_id, ocr_status=doc.ocr_status, extracted_fields=[])
 
-    return schemas.OCRResponse(
-        id=ocr.id,
-        document_id=document_id,
-        ocr_status=ocr.ocr_status,
-        ocr_engine=ocr.ocr_engine,
-        confidence=ocr.confidence,
-        extracted_text=ocr.extracted_text,
-        processed_at=ocr.processed_at,
-        error_message=ocr.error_message,
-        extracted_fields=fields
+# =========================================================
+# WORK ITEMS (one person's work)
+# =========================================================
+
+@app.get(f"{API_V1}/work-items/mine", response_model=List[schemas.WorkItemResponse], tags=["Work"])
+def my_work_items(
+    include_finished: bool = False,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """The caller's own task list for the hat they are currently wearing."""
+    items = workflow.work_items_for_context(db, current_user, _context_id(ctx), include_finished)
+    return [serializers.work_item(i) for i in items]
+
+
+@app.get(f"{API_V1}/work-items/department", response_model=List[schemas.WorkItemResponse], tags=["Work"])
+def department_work_items(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """For an HOD: every individual's work across their department's
+    workstreams, so each person's contribution stays visible."""
+    items = workflow.branch_work_items_for_context(db, current_user, _context_id(ctx))
+    return [serializers.work_item(i) for i in items]
+
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/work-items",
+    response_model=List[schemas.WorkItemResponse],
+    tags=["Work"],
+)
+def document_work_items(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.work_item(i) for i in doc.work_items]
+
+
+@app.get(f"{API_V1}/work-items/{{work_item_id}}", response_model=schemas.WorkItemResponse, tags=["Work"])
+def get_work_item(
+    work_item_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    item = db.query(models.WorkItem).filter(models.WorkItem.id == work_item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found.")
+    _authorized_document(db, item.document_id, current_user, ctx)
+    return serializers.work_item(item)
+
+
+@app.patch(
+    f"{API_V1}/work-items/{{work_item_id}}/stage",
+    response_model=schemas.WorkItemResponse,
+    tags=["Work"],
+)
+async def set_work_stage(
+    work_item_id: int,
+    payload: schemas.WorkStageUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """The worker moves their own work through its stages.  Affects nobody
+    else's work item."""
+    try:
+        item = workflow.update_work_stage(
+            db, work_item_id=work_item_id, new_stage=payload.stage,
+            actor=current_user, context_id=_context_id(ctx), note=payload.note,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    await crud.event_manager.broadcast(
+        "WORK_STAGE_CHANGED", document_id=item.document_id, user_id=current_user.id
     )
+    return serializers.work_item(item)
+
+
+@app.post(
+    f"{API_V1}/work-items/{{work_item_id}}/progress",
+    response_model=schemas.ProgressResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Work"],
+)
+async def add_progress(
+    work_item_id: int,
+    payload: schemas.ProgressCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """Free-text progress written by the person doing the work.  Stored as
+    written - never converted to a number or merged with anyone else's."""
+    try:
+        update = workflow.submit_progress(
+            db, work_item_id=work_item_id, description=payload.description,
+            actor=current_user, context_id=_context_id(ctx), new_stage=payload.new_stage,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    await crud.event_manager.broadcast(
+        "PROGRESS_UPDATED", document_id=update.document_id, user_id=current_user.id
+    )
+    return serializers.progress(update)
+
+
+@app.post(
+    f"{API_V1}/work-items/{{work_item_id}}/progress-with-file",
+    response_model=schemas.ProgressResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Work"],
+)
+async def add_progress_with_attachment(
+    work_item_id: int,
+    description: str = Form(...),
+    new_stage: Optional[str] = Form(default=None),
+    file: Optional[UploadFile] = File(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """Progress plus a supporting document in one step, so the file stays tied
+    to the update it belongs to."""
+    try:
+        update = workflow.submit_progress(
+            db, work_item_id=work_item_id, description=description,
+            actor=current_user, context_id=_context_id(ctx),
+            new_stage=WorkStage(new_stage) if new_stage else None,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+
+    if file is not None and file.filename:
+        contents = await file.read()
+        _validate_upload(file, contents)
+        crud.create_attachment(
+            db=db,
+            doc_id=update.document_id,
+            progress_update_id=update.id,
+            uploaded_by=current_user.id,
+            file_name=file.filename,
+            storage_key=_store_upload(update.document_id, file.filename, contents),
+            file_type=file.content_type,
+            file_size=len(contents),
+            checksum=crud.compute_checksum(contents),
+            attachment_type=AttachmentType.PROGRESS_ATTACHMENT,
+            context_id=_context_id(ctx),
+        )
+        db.refresh(update)
+
+    await crud.event_manager.broadcast(
+        "PROGRESS_UPDATED", document_id=update.document_id, user_id=current_user.id
+    )
+    return serializers.progress(update)
+
+
+@app.post(
+    f"{API_V1}/work-items/{{work_item_id}}/submit",
+    response_model=schemas.WorkItemResponse,
+    tags=["Work"],
+)
+async def submit_work(
+    work_item_id: int,
+    payload: schemas.WorkSubmitRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """Hand in this person's work.  Goes to the HOD if validation is required,
+    otherwise completes.  Neither closes the document."""
+    try:
+        item = workflow.submit_work(
+            db, work_item_id=work_item_id, actor=current_user,
+            context_id=_context_id(ctx), note=payload.note,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    await crud.event_manager.broadcast(
+        "WORK_SUBMITTED", document_id=item.document_id, user_id=current_user.id
+    )
+    return serializers.work_item(item)
+
+
+@app.post(
+    f"{API_V1}/work-items/{{work_item_id}}/review",
+    response_model=schemas.WorkReviewResponse,
+    tags=["Work"],
+)
+async def review_work(
+    work_item_id: int,
+    payload: schemas.WorkReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """HOD accepts or returns ONE person's work.  Accepting completes that
+    person's item only - it never closes the branch's other work, and never
+    closes the document."""
+    try:
+        review = workflow.review_work_item(
+            db, work_item_id=work_item_id, outcome=payload.outcome,
+            actor=current_user, context_id=_context_id(ctx), note=payload.note,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return serializers.work_review(review)
+
+
+# =========================================================
+# ATTACHMENTS
+# =========================================================
+
+@app.get(
+    f"{API_V1}/documents/{{document_id}}/attachments",
+    response_model=List[schemas.AttachmentResponse],
+    tags=["Attachments"],
+)
+def list_attachments(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _authorized_document(db, document_id, current_user, ctx)
+    return [serializers.attachment(a) for a in crud.get_attachments(db, document_id)]
+
+
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/attachments",
+    response_model=schemas.AttachmentResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Attachments"],
+)
+async def upload_attachment(
+    document_id: int,
+    file: UploadFile = File(...),
+    attachment_type: str = Form(default="SUPPORTING_DOCUMENT"),
+    progress_update_id: Optional[int] = Form(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _authorized_document(db, document_id, current_user, ctx)
+    contents = await file.read()
+    _validate_upload(file, contents)
+    att = crud.create_attachment(
+        db=db,
+        doc_id=document_id,
+        progress_update_id=progress_update_id,
+        uploaded_by=current_user.id,
+        file_name=file.filename,
+        storage_key=_store_upload(document_id, file.filename, contents),
+        file_type=file.content_type,
+        file_size=len(contents),
+        checksum=crud.compute_checksum(contents),
+        attachment_type=AttachmentType(attachment_type),
+        context_id=_context_id(ctx),
+    )
+    return serializers.attachment(att)
+
+
+@app.get(f"{API_V1}/attachments/{{attachment_id}}/download", tags=["Attachments"])
+def download_attachment(
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    att = crud.get_attachment(db, attachment_id)
+    if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    if att.document_id:
+        _authorized_document(db, att.document_id, current_user, ctx)
+
+    for base in (UPLOAD_DIR, Path(__file__).parent / "uploads", _PROJECT_ROOT / "uploads"):
+        candidate = Path(base) / att.storage_key
+        if candidate.exists():
+            return FileResponse(
+                path=str(candidate),
+                filename=att.file_name,
+                media_type=att.file_type or "application/octet-stream",
+            )
+    raise HTTPException(status_code=404, detail="Stored file is missing from disk.")
+
+
+# =========================================================
+# OCR & ROUTING INTELLIGENCE (assistive only)
+# =========================================================
+
+@app.get(f"{API_V1}/documents/{{document_id}}/ocr", response_model=schemas.OCRResponse, tags=["OCR"])
+def get_ocr(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    doc = _authorized_document(db, document_id, current_user, ctx)
+    record = intelligence.get_document_ocr(db, document_id)
+    fields = [
+        schemas.ExtractedFieldResponse(
+            id=f.id, document_id=f.document_id, field_name=f.field_name,
+            extracted_value=f.extracted_value, verified_value=f.verified_value,
+            effective_value=f.effective_value, confidence=f.confidence,
+            source_page=f.source_page, verified_by=f.verified_by, verified_at=f.verified_at,
+        )
+        for f in doc.extracted_fields
+    ]
+    if not record:
+        return schemas.OCRResponse(document_id=document_id, ocr_status=doc.ocr_status, fields=fields)
+    return schemas.OCRResponse(
+        id=record.id, document_id=document_id, extracted_text=record.extracted_text,
+        ocr_status=record.ocr_status, ocr_engine=record.ocr_engine, confidence=record.confidence,
+        processed_at=record.processed_at, error_message=record.error_message, fields=fields,
+    )
+
+
+@app.post(f"{API_V1}/documents/{{document_id}}/ocr/run", response_model=schemas.OCRResponse, tags=["OCR"])
+def run_ocr(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Document processing is a DS action.")
+    _authorized_document(db, document_id, current_user, ctx)
+    intelligence.reanalyze_document_ocr(db, document_id)
+    return get_ocr(document_id, db, current_user, ctx)
 
 
 @app.post(
     f"{API_V1}/documents/{{document_id}}/verify-field",
     response_model=schemas.ExtractedFieldResponse,
     tags=["OCR"],
-    summary="DS: Verify/edit an extracted OCR field",
 )
-def verify_ocr_field(
+def verify_field(
     document_id: int,
-    req: schemas.FieldVerifyRequest,
+    payload: schemas.FieldVerifyRequest,
     db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    field = crud.verify_extracted_field(db, document_id, req.field_name, req.verified_value, current_user)
-    return field
-
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/reanalyze",
-    tags=["OCR"],
-    summary="DS: Re-analyze document without overwriting verified fields",
-)
-async def reanalyze_ocr(
-    document_id: int,
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    ocr_result = crud.reanalyze_document_ocr(db, document_id)
-    await crud.event_manager.broadcast("OCR_COMPLETED", document_id=document_id, user_id=current_user.id)
-    return {"message": "Re-analysis completed. Verified fields were preserved.", "confidence": ocr_result.confidence}
-
-
-# =========================================================
-# ROUTING INTELLIGENCE & ADVISORY SUGGESTIONS
-# =========================================================
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/analyze-routing",
-    response_model=schemas.RoutingSuggestionResponse,
-    tags=["Routing Intelligence"],
-    summary="Generate advisory routing suggestions based on OCR & Director remarks",
-)
-def analyze_routing(
-    document_id: int,
-    body: schemas.RoutingAnalyzeRequest = schemas.RoutingAnalyzeRequest(),
-    db: Session = Depends(get_db),
-current_user: models.User = Depends(require_context_types(WorkContextType.DS)),
-active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    suggestion = crud.generate_routing_suggestion(db, document_id, body.include_director_remark)
-    if not suggestion:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    dept_name = suggestion.suggested_department.name if suggestion.suggested_department else None
-    emp_name = suggestion.suggested_employee.full_name if suggestion.suggested_employee else None
-
-    return schemas.RoutingSuggestionResponse(
-        id=suggestion.id,
-        document_id=suggestion.document_id,
-        suggested_department_id=suggestion.suggested_department_id,
-        suggested_department_name=dept_name,
-        suggested_employee_id=suggestion.suggested_employee_id,
-        suggested_employee_name=emp_name,
-        routing_confidence=suggestion.routing_confidence,
-        routing_reason=suggestion.routing_reason,
-        routing_source=suggestion.routing_source,
-        is_director_instruction=suggestion.is_director_instruction,
-        generated_at=suggestion.generated_at,
-        confirmed_by=suggestion.confirmed_by,
-        confirmed_at=suggestion.confirmed_at
+    """The DS corrects an extracted value.  The original is kept for
+    provenance; the verified value is what the system trusts."""
+    if not ctx or ctx.context_type != WorkContextType.DS:
+        raise HTTPException(status_code=403, detail="Only the DS verifies extracted fields.")
+    _authorized_document(db, document_id, current_user, ctx)
+    field = intelligence.verify_extracted_field(
+        db, document_id, payload.field_name, payload.verified_value, current_user
+    )
+    return schemas.ExtractedFieldResponse(
+        id=field.id, document_id=field.document_id, field_name=field.field_name,
+        extracted_value=field.extracted_value, verified_value=field.verified_value,
+        effective_value=field.effective_value, confidence=field.confidence,
+        source_page=field.source_page, verified_by=field.verified_by, verified_at=field.verified_at,
     )
 
 
 @app.get(
     f"{API_V1}/documents/{{document_id}}/routing-suggestion",
-    response_model=schemas.RoutingSuggestionResponse,
-    tags=["Routing Intelligence"],
-    summary="Get current routing suggestion for a document",
+    response_model=Optional[schemas.RoutingSuggestionResponse],
+    tags=["OCR"],
 )
-def get_routing_suggestion_endpoint(
+def routing_suggestion(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    suggestion = crud.get_routing_suggestion(db, document_id)
+    _authorized_document(db, document_id, current_user, ctx)
+    suggestion = intelligence.get_routing_suggestion(db, document_id)
     if not suggestion:
-        suggestion = crud.generate_routing_suggestion(db, document_id)
-
-    dept_name = suggestion.suggested_department.name if suggestion.suggested_department else None
-    emp_name = suggestion.suggested_employee.full_name if suggestion.suggested_employee else None
-
+        return None
     return schemas.RoutingSuggestionResponse(
-        id=suggestion.id,
-        document_id=suggestion.document_id,
+        id=suggestion.id, document_id=suggestion.document_id,
         suggested_department_id=suggestion.suggested_department_id,
-        suggested_department_name=dept_name,
+        suggested_department_name=suggestion.suggested_department_name,
         suggested_employee_id=suggestion.suggested_employee_id,
-        suggested_employee_name=emp_name,
+        suggested_employee_name=suggestion.suggested_employee_name,
         routing_confidence=suggestion.routing_confidence,
         routing_reason=suggestion.routing_reason,
         routing_source=suggestion.routing_source,
-        is_director_instruction=suggestion.is_director_instruction,
+        is_director_instruction=bool(suggestion.is_director_instruction),
         generated_at=suggestion.generated_at,
-        confirmed_by=suggestion.confirmed_by,
-        confirmed_at=suggestion.confirmed_at
     )
-
-
-# =========================================================
-# ATTACHMENTS & SECURE DOWNLOAD
-# =========================================================
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/attachments",
-    response_model=schemas.AttachmentResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Attachments"],
-    summary="Upload an attachment for a document",
-)
-async def upload_attachment(
-    document_id: int,
-    file: UploadFile = File(...),
-    progress_update_id: Optional[int] = Form(default=None),
-    attachment_type: str = Form(default="SUPPORTING_DOCUMENT"),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    doc = _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    _assert_not_closed(doc)
-
-    file_ext = Path(file.filename or "").suffix.lower()
-    is_valid_type = (file.content_type in ALLOWED_TYPES) or (file_ext in ALLOWED_EXTENSIONS)
-    if not is_valid_type:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type '{file.content_type}' ({file_ext}) is not allowed.",
-        )
-
-
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File exceeds 20 MB limit.")
-
-    checksum = crud.compute_checksum(contents)
-
-    dest_dir = UPLOAD_DIR / str(datetime.utcnow().year) / str(document_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / Path(file.filename).name
-
-    counter = 1
-    stem = Path(file.filename).stem
-    suffix = Path(file.filename).suffix
-    while dest_path.exists():
-        dest_path = dest_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-
-    with open(dest_path, "wb") as f:
-        f.write(contents)
-
-    storage_key = str(dest_path.relative_to(UPLOAD_DIR))
-
-    att_type_enum = AttachmentType.PROGRESS_ATTACHMENT if progress_update_id else AttachmentType(attachment_type)
-
-    attachment = crud.create_attachment(
-        db=db,
-        doc_id=document_id,
-        progress_update_id=progress_update_id,
-        uploaded_by=current_user.id,
-        file_name=file.filename,
-        storage_key=storage_key,
-        file_type=file.content_type,
-        file_size=len(contents),
-        checksum=checksum,
-        attachment_type=att_type_enum,
-    )
-
-    await crud.event_manager.broadcast("ATTACHMENT_ADDED", document_id=document_id, user_id=current_user.id)
-    return attachment
-
-
-@app.get(
-    f"{API_V1}/documents/{{document_id}}/attachments",
-    response_model=List[schemas.AttachmentResponse],
-    tags=["Attachments"],
-    summary="List all attachments for a document",
-)
-def get_document_attachments(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    return crud.get_attachments(db, document_id)
-
-
-@app.get(
-    f"{API_V1}/attachments/{{attachment_id}}",
-    response_model=schemas.AttachmentResponse,
-    tags=["Attachments"],
-    summary="Get attachment metadata",
-)
-def get_attachment(
-    attachment_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    att = crud.get_attachment(db, attachment_id)
-    if not att:
-        raise HTTPException(status_code=404, detail="Attachment not found.")
-    _get_authorized_doc_or_404(db, att.document_id, current_user, active_context)
-    return att
-
-
-@app.get(
-    f"{API_V1}/attachments/{{attachment_id}}/download",
-    tags=["Attachments"],
-    summary="Authorized file download",
-)
-def download_attachment(
-    attachment_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    att = crud.get_attachment(db, attachment_id)
-    if not att:
-        raise HTTPException(status_code=404, detail="Attachment not found.")
-
-    # Strict authorization check against parent document
-    _get_authorized_doc_or_404(db, att.document_id, current_user, active_context)
-
-    file_path = UPLOAD_DIR / att.storage_key
-    if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on server storage.")
-
-    return FileResponse(
-        path=str(file_path),
-        filename=att.file_name,
-        media_type=att.file_type or "application/octet-stream",
-    )
-
-
-# =========================================================
-# DOCUMENT HISTORY
-# =========================================================
-
-@app.get(
-    f"{API_V1}/documents/history/all",
-    response_model=List[schemas.WorkflowHistoryResponse],
-    tags=["Documents"],
-    summary="Get all workflow history events accessible to current user",
-)
-def get_all_document_history(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    return crud.get_all_workflow_history(db, current_user)
-
-
-@app.get(
-    f"{API_V1}/documents/{{document_id}}/history",
-    response_model=List[schemas.WorkflowHistoryResponse],
-    tags=["Documents"],
-    summary="Get workflow history for a document",
-)
-def get_document_history(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    return crud.get_document_history(db, document_id)
-
-
-# =========================================================
-# REMINDERS & DEADLINE ESCALATION
-# =========================================================
-
-@app.post(
-    f"{API_V1}/documents/{{document_id}}/remind",
-    response_model=schemas.ReminderSendResponse,
-    tags=["Reminders"],
-    summary="DS / System: Dispatch an official action reminder to the current responsible workflow user",
-)
-def send_document_action_reminder(
-    document_id: int,
-    body: Optional[schemas.ReminderSendRequest] = None,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-    active_context: Optional[models.WorkContextMembership] = Depends(get_current_work_context),
-):
-    _get_authorized_doc_or_404(db, document_id, current_user, active_context)
-    custom_msg = body.message if body else None
-    result = crud.send_document_reminder(
-        db=db,
-        doc_id=document_id,
-        current_user=current_user,
-        custom_message=custom_msg
-    )
-    if result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message"))
-    return schemas.ReminderSendResponse(**result)
-
-
-@app.get(
-    f"{API_V1}/reminders",
-    response_model=List[schemas.ReminderResponse],
-    tags=["Reminders"],
-    summary="Get action/deadline reminders for current user",
-)
-def get_user_reminders(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    return crud.get_reminders(db, current_user.id)
 
 
 @app.post(
-    f"{API_V1}/reminders/check",
-    response_model=schemas.ReminderCheckResponse,
-    tags=["Reminders"],
-    summary="Trigger reminder generation & escalation scan",
+    f"{API_V1}/documents/{{document_id}}/analyze-routing",
+    response_model=Optional[schemas.RoutingSuggestionResponse],
+    tags=["OCR"],
 )
-def trigger_reminder_check(
+def analyze_routing(
+    document_id: int,
+    payload: schemas.RoutingAnalyzeRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.DS)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    created = crud.generate_reminders(db)
-    return schemas.ReminderCheckResponse(reminders_created=len(created), reminders=created)
+    _authorized_document(db, document_id, current_user, ctx)
+    intelligence.generate_routing_suggestion(
+        db, document_id, include_director_remark=payload.include_director_remark
+    )
+    return routing_suggestion(document_id, db, current_user, ctx)
 
 
-@app.patch(
-    f"{API_V1}/reminders/{{reminder_id}}/read",
-    response_model=schemas.ReminderResponse,
-    tags=["Reminders"],
-    summary="Mark a reminder as read",
+# =========================================================
+# NOTIFICATIONS & REMINDERS
+# =========================================================
+
+@app.get(f"{API_V1}/notifications", response_model=List[schemas.NotificationResponse], tags=["Notifications"])
+def list_notifications(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    return [
+        serializers.notification(n)
+        for n in crud.get_notifications(db, current_user.id, _context_id(ctx))
+    ]
+
+
+@app.get(
+    f"{API_V1}/notifications/unread",
+    response_model=List[schemas.NotificationResponse],
+    tags=["Notifications"],
 )
-def mark_reminder_read_endpoint(
+def unread_notifications(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    return [
+        serializers.notification(n)
+        for n in crud.get_unread_notifications(db, current_user.id, _context_id(ctx))
+    ]
+
+
+@app.patch(f"{API_V1}/notifications/{{notification_id}}/read", tags=["Notifications"])
+def read_notification(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    note = crud.mark_notification_read(db, notification_id, current_user.id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    return {"detail": "Marked as read."}
+
+
+@app.patch(f"{API_V1}/notifications/read-all", tags=["Notifications"])
+def read_all_notifications(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    return {"updated": crud.mark_all_notifications_read(db, current_user.id, _context_id(ctx))}
+
+
+@app.get(f"{API_V1}/reminders", response_model=List[schemas.ReminderResponse], tags=["Reminders"])
+def list_reminders(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return [serializers.reminder(r) for r in crud.get_reminders(db, current_user.id)]
+
+
+@app.post(f"{API_V1}/reminders/check", response_model=schemas.ReminderCheckResponse, tags=["Reminders"])
+def check_reminders(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Raise reminders for work items that are due soon or overdue.  Reminders
+    are per work item so each person hears about their own deadline."""
+    created = workflow.generate_deadline_reminders(db)
+    return schemas.ReminderCheckResponse(
+        generated=len(created), reminders=[serializers.reminder(r) for r in created]
+    )
+
+
+@app.patch(f"{API_V1}/reminders/{{reminder_id}}/read", tags=["Reminders"])
+def read_reminder(
     reminder_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -1763,695 +1466,294 @@ def mark_reminder_read_endpoint(
     rem = crud.mark_reminder_read(db, reminder_id, current_user.id)
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found.")
-    return rem
+    return {"detail": "Marked as read."}
 
 
-# =========================================================
-# NOTIFICATIONS
-# =========================================================
-
-@app.get(
-    f"{API_V1}/notifications",
-    response_model=List[schemas.NotificationResponse],
-    tags=["Notifications"],
-    summary="Get all notifications for current user",
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/remind",
+    response_model=schemas.ReminderSendResponse,
+    tags=["Reminders"],
 )
-def get_notifications(
+def send_reminder(
+    document_id: int,
+    payload: schemas.ReminderSendRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    return crud.get_notifications(db, current_user.id)
-
-
-@app.get(
-    f"{API_V1}/notifications/unread",
-    response_model=List[schemas.NotificationResponse],
-    tags=["Notifications"],
-    summary="Get unread notifications for current user",
-)
-def get_unread_notifications(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    return crud.get_unread_notifications(db, current_user.id)
-
-
-@app.patch(
-    f"{API_V1}/notifications/{{notification_id}}/read",
-    response_model=schemas.NotificationResponse,
-    tags=["Notifications"],
-    summary="Mark a notification as read",
-)
-def mark_notification_read(
-    notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    notif = crud.mark_notification_read(db, notification_id, current_user.id)
-    if not notif:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
-    return notif
-
-
-@app.patch(
-    f"{API_V1}/notifications/read-all",
-    tags=["Notifications"],
-    summary="Mark all notifications as read",
-)
-def mark_all_notifications_read(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    count = crud.mark_all_notifications_read(db, current_user.id)
-    return {"message": f"{count} notification(s) marked as read."}
+    try:
+        sent = crud.send_manual_reminder(
+            db, document_id, current_user, _context_id(ctx),
+            payload.work_item_id, payload.recipient_user_id, payload.message,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+    return schemas.ReminderSendResponse(sent=sent, detail=f"Reminder sent to {sent} recipient(s).")
 
 
 # =========================================================
 # DASHBOARD
 # =========================================================
 
-@app.get(
-    f"{API_V1}/dashboard",
-    response_model=schemas.DashboardResponse,
-    tags=["Dashboard"],
-    summary="Get role-specific dashboard statistics",
-)
-def get_dashboard(
+@app.get(f"{API_V1}/dashboard", response_model=schemas.DashboardResponse, tags=["Dashboard"])
+def dashboard(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    return crud.get_dashboard_stats(db, current_user)
+    return serializers.dashboard(
+        db, workflow.dashboard_for_context(db, current_user, _context_id(ctx))
+    )
 
 
 # =========================================================
-# ADMINISTRATOR SUITE ENDPOINTS
+# ADMINISTRATION
 # =========================================================
-@app.get(
-    f"{API_V1}/admin/users",
-    tags=["Admin"],
-    summary="Admin: List all system users",
-)
-def admin_list_users(
+
+def _require_admin(ctx: Optional[models.WorkContextMembership]) -> models.WorkContextMembership:
+    if not ctx or ctx.context_type != WorkContextType.ADMIN:
+        raise HTTPException(status_code=403, detail="Administration requires the Admin context.")
+    return ctx
+
+
+@app.get(f"{API_V1}/admin/users", response_model=List[schemas.UserResponse], tags=["Admin"])
+def admin_users(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    """
-    Admin: Return all users with profile information and their
-    canonical work-context memberships.
+    _require_admin(ctx)
+    return [
+        serializers.user(u, crud.get_user_context_memberships(db, u.id))
+        for u in crud.get_users(db)
+    ]
 
-    Department name is resolved from Department using department_id.
-    User does not expose a department_name field directly.
-    """
 
-    users = crud.get_admin_users(db)
+@app.post(
+    f"{API_V1}/admin/users",
+    response_model=schemas.UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Admin"],
+)
+def admin_create_user(
+    payload: schemas.AdminUserCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _require_admin(ctx)
+    try:
+        user = crud.create_admin_user(db, payload, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return serializers.user(user)
 
-    res = []
 
-    for u in users:
-        # --------------------------------------------------------------
-        # Resolve user's primary department.
-        #
-        # User stores department_id, while Department stores the
-        # human-readable name.
-        # --------------------------------------------------------------
-        department_name = None
+@app.put(f"{API_V1}/admin/users/{{user_id}}", response_model=schemas.UserResponse, tags=["Admin"])
+def admin_update_user(
+    user_id: int,
+    payload: schemas.AdminUserUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _require_admin(ctx)
+    user = crud.update_admin_user(db, user_id, payload, current_user.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return serializers.user(user, crud.get_user_context_memberships(db, user.id))
 
-        if u.department_id is not None:
-            department = crud.get_department_by_id(
-                db,
-                u.department_id,
-            )
 
-            if department:
-                department_name = department.name
+@app.post(f"{API_V1}/admin/users/{{user_id}}/reset-password", tags=["Admin"])
+def admin_reset_password(
+    user_id: int,
+    payload: schemas.AdminPasswordResetRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _require_admin(ctx)
+    if not crud.reset_user_password(db, user_id, payload.new_password, current_user.id):
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"detail": "Password reset."}
 
-        # --------------------------------------------------------------
-        # Normalize managed departments.
-        #
-        # Older records may contain either:
-        #   - JSON array string
-        #   - single string
-        #   - NULL
-        # --------------------------------------------------------------
-        managed_departments = u.managed_depts
 
-        try:
-            import json
+@app.post(f"{API_V1}/admin/users/{{user_id}}/toggle-active", tags=["Admin"])
+def admin_toggle_active(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _require_admin(ctx)
+    result = crud.toggle_user_active(db, user_id, current_user.id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"is_active": result}
 
-            if (
-                managed_departments
-                and isinstance(managed_departments, str)
-                and managed_departments.startswith("[")
-            ):
-                managed_list = json.loads(
-                    managed_departments
-                )
-            else:
-                managed_list = (
-                    [managed_departments]
-                    if managed_departments
-                    else []
-                )
-
-        except Exception:
-            managed_list = (
-                [managed_departments]
-                if managed_departments
-                else []
-            )
-
-        # Make sure the response always contains a list.
-        if not isinstance(managed_list, list):
-            managed_list = [managed_list]
-
-        # --------------------------------------------------------------
-        # Canonical work-context memberships.
-        # --------------------------------------------------------------
-        context_rows = []
-
-        memberships = crud.get_user_context_memberships(
-            db,
-            u.id,
-        )
-
-        for membership in memberships:
-            # Resolve department name from department_id.
-            context_department_name = None
-
-            if membership.department_id is not None:
-                context_department = (
-                    crud.get_department_by_id(
-                        db,
-                        membership.department_id,
-                    )
-                )
-
-                if context_department:
-                    context_department_name = (
-                        context_department.name
-                    )
-
-            context_rows.append(
-                {
-                    "id": membership.id,
-                    "user_id": membership.user_id,
-                    "context_type": (
-                        membership.context_type.value
-                        if hasattr(
-                            membership.context_type,
-                            "value",
-                        )
-                        else str(
-                            membership.context_type
-                        )
-                    ),
-                    "department_id": membership.department_id,
-                    "department_name": context_department_name,
-                    "is_active": membership.is_active,
-                    "created_at": (
-                        str(membership.created_at)
-                        if membership.created_at
-                        else None
-                    ),
-                    "updated_at": (
-                        str(membership.updated_at)
-                        if membership.updated_at
-                        else None
-                    ),
-                }
-            )
-
-        # --------------------------------------------------------------
-        # Return normalized Admin user record.
-        # --------------------------------------------------------------
-        res.append(
-            {
-                "id": u.id,
-                "username": u.username,
-                "full_name": u.full_name,
-                "role": (
-                    u.role.value
-                    if hasattr(u.role, "value")
-                    else str(u.role)
-                ),
-                "employee_code": u.employee_code,
-                "designation": u.designation,
-
-                # User does not have department_name.
-                "department": department_name,
-                "department_id": u.department_id,
-
-                "managed_depts": managed_list,
-
-                "email": u.email,
-                "outlook_email": u.outlook_email,
-                "gov_email": u.gov_email,
-
-                "is_active": u.is_active,
-
-                "context_memberships": context_rows,
-
-                # Keep the first active membership as the displayed
-                # active context fallback for the Admin UI.
-                "active_context_id": (
-                    next(
-                        (
-                            row["id"]
-                            for row in context_rows
-                            if row["is_active"]
-                        ),
-                        None,
-                    )
-                ),
-
-                "created_at": (
-                    str(u.created_at)
-                    if u.created_at
-                    else None
-                ),
-            }
-        )
-
-    return res
 
 @app.get(
     f"{API_V1}/admin/users/{{user_id}}/contexts",
-    response_model=List[schemas.WorkContextMembershipResponse],
+    response_model=List[schemas.WorkContextResponse],
     tags=["Admin"],
-    summary="Admin: Get all active work contexts for a user",
 )
-def admin_get_user_contexts(
+def admin_user_contexts(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    """Return the canonical active work-context memberships for one user."""
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
-
-    return crud.get_user_context_memberships(db, user_id)
+    _require_admin(ctx)
+    return [serializers.context(c) for c in crud.get_user_context_memberships(db, user_id)]
 
 
 @app.post(
     f"{API_V1}/admin/users/{{user_id}}/contexts",
-    response_model=schemas.WorkContextMembershipResponse,
+    response_model=schemas.WorkContextResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Admin"],
-    summary="Admin: Add a canonical work context to a user",
 )
-def admin_add_user_context(
+def admin_grant_context(
     user_id: int,
-    body: schemas.WorkContextMembershipCreate,
+    payload: schemas.WorkContextCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    """
-    Add one canonical operational context to a user.
-
-    Context membership is the source of operational identity.  This endpoint
-    deliberately does not replace the user's other memberships, so a person
-    may legitimately have multiple contexts such as:
-        EMPLOYEE • FCTD
-        HOD      • PSTD
-
-    Department is required for HOD/EMPLOYEE contexts and is not accepted for
-    global contexts such as ADMIN/DS/DIRECTOR/TSO.
-    """
-    if body.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Path user_id and body user_id must match.",
-        )
-
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot add an active work context to an inactive user.",
-        )
-
-    context_type = body.context_type
-    department_required = {
-        WorkContextType.HOD,
-        WorkContextType.EMPLOYEE,
-    }
-    department_forbidden = {
-        WorkContextType.ADMIN,
-        WorkContextType.DS,
-        WorkContextType.DIRECTOR,
-        WorkContextType.TSO,
-    }
-
-    if context_type in department_required and body.department_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Department ID is required for {context_type.value} context.",
-        )
-
-    if context_type in department_forbidden and body.department_id is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Department ID must be empty for {context_type.value} context.",
-        )
-
-    if body.department_id is not None:
-        dept = crud.get_department_by_id(db, body.department_id)
-        if not dept or not dept.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Selected department does not exist or is inactive.",
-            )
-
-    # Prevent duplicate active logical memberships. TSO is handled specially
-    # by crud.create_work_context_membership(), which enforces the single
-    # active TSO rule.
-    if context_type != WorkContextType.TSO and body.is_active:
-        existing = (
-            db.query(models.WorkContextMembership)
-            .filter(
-                models.WorkContextMembership.user_id == user_id,
-                models.WorkContextMembership.context_type == context_type,
-                models.WorkContextMembership.department_id == body.department_id,
-                models.WorkContextMembership.is_active == True,
-            )
-            .first()
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This active work context already exists for the user.",
-            )
-
+    """Give a user another hat, e.g. HOD-Engineering on top of
+    Employee-Product."""
+    _require_admin(ctx)
+    payload.user_id = user_id
     try:
-        membership = crud.create_work_context_membership(db, body)
+        membership = crud.create_work_context_membership(db, payload, current_user.id)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-
-    crud.log_audit_event(
-        db=db,
-        user_id=current_user.id,
-        action="WORK_CONTEXT_ADDED",
-        entity_type="WorkContextMembership",
-        entity_id=membership.id,
-        description=(
-            f"Admin added {membership.context_type.value if hasattr(membership.context_type, 'value') else membership.context_type} "
-            f"context for user '{user.username}'"
-            + (
-                f" in department '{membership.department_name}'"
-                if membership.department_name
-                else ""
-            )
-        ),
-    )
-
-    return membership
+        raise HTTPException(status_code=400, detail=str(exc))
+    return serializers.context(membership)
 
 
-@app.delete(
-    f"{API_V1}/admin/users/{{user_id}}/contexts/{{context_id}}",
-    response_model=schemas.WorkContextMembershipResponse,
-    tags=["Admin"],
-    summary="Admin: Deactivate a user's work context",
-)
-def admin_deactivate_user_context(
+@app.delete(f"{API_V1}/admin/users/{{user_id}}/contexts/{{context_id}}", tags=["Admin"])
+def admin_revoke_context(
     user_id: int,
     context_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    """Deactivate one canonical work-context membership without deleting it."""
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
-
-    membership = crud.get_context_membership(db, context_id)
-    if not membership or membership.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Work context membership not found for this user.",
-        )
-
-    if not membership.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Work context membership is already inactive.",
-        )
-
-    # Do not allow an Admin to remove the only active context of the user.
-    active_memberships = crud.get_user_context_memberships(db, user_id)
-    if len(active_memberships) <= 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A user must retain at least one active work context.",
-        )
-
+    _require_admin(ctx)
     try:
-        result = crud.deactivate_work_context_membership(db, context_id)
+        membership = crud.deactivate_work_context_membership(db, context_id, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not membership:
+        raise HTTPException(status_code=404, detail="Work context not found.")
+    return {"detail": "Work context revoked."}
+
+
+@app.get(f"{API_V1}/admin/tso", response_model=Optional[schemas.WorkContextResponse], tags=["Admin"])
+def admin_get_tso(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    """The organisation designates exactly one TSO at a time."""
+    _require_admin(ctx)
+    tso = crud.get_single_active_tso(db)
+    return serializers.context(tso) if tso else None
+
+
+@app.post(f"{API_V1}/admin/tso/{{user_id}}/activate", response_model=schemas.WorkContextResponse, tags=["Admin"])
+def admin_set_tso(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    _require_admin(ctx)
+    try:
+        membership = crud.set_active_tso(db, user_id, current_user.id)
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Work context membership not found.",
-        )
-
-    crud.log_audit_event(
-        db=db,
-        user_id=current_user.id,
-        action="WORK_CONTEXT_DEACTIVATED",
-        entity_type="WorkContextMembership",
-        entity_id=context_id,
-        description=(
-            f"Admin deactivated work context {context_id} "
-            f"for user '{user.username}'."
-        ),
-    )
-
-    return result
+        raise _handle(exc)
+    return serializers.context(membership)
 
 
-@app.get(
-    f"{API_V1}/admin/tso",
-    response_model=Optional[schemas.WorkContextMembershipResponse],
-    tags=["Admin"],
-    summary="Admin: Get the current active TSO",
-)
-def admin_get_active_tso(
+@app.get(f"{API_V1}/admin/departments", response_model=List[schemas.DepartmentResponse], tags=["Admin"])
+def admin_departments(
+    include_inactive: bool = True,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    return crud.get_single_active_tso(db)
-
-
-@app.post(
-    f"{API_V1}/admin/tso/{{user_id}}/activate",
-    response_model=schemas.WorkContextMembershipResponse,
-    tags=["Admin"],
-    summary="Admin: Assign and activate a user as the single active TSO",
-)
-def admin_activate_tso(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
-):
-    try:
-        membership = crud.set_active_tso(db, user_id)
-        return membership
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post(
-    f"{API_V1}/admin/users",
-    tags=["Admin"],
-    summary="Admin: Create a new user",
-)
-def admin_create_user(
-    body: dict,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
-):
-    try:
-        user = crud.create_admin_user(db, body, performed_by_user_id=current_user.id)
-        return {"message": f"User {user.username} created successfully.", "id": user.id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.put(
-    f"{API_V1}/admin/users/{{user_id}}",
-    tags=["Admin"],
-    summary="Admin: Update an existing user",
-)
-def admin_update_user(
-    user_id: int,
-    body: dict,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
-):
-    user = crud.update_admin_user(db, user_id, body, performed_by_user_id=current_user.id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"message": f"User {user.username} updated successfully."}
-
-
-@app.post(
-    f"{API_V1}/admin/users/{{user_id}}/reset-password",
-    tags=["Admin"],
-    summary="Admin: Reset password for a user",
-)
-def admin_reset_password(
-    user_id: int,
-    body: dict,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
-):
-    new_pwd = body.get("new_password") or "cdtrs@123"
-    ok = crud.reset_user_password(db, user_id, new_pwd, performed_by_user_id=current_user.id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"message": "Password reset successfully."}
-
-
-@app.post(
-    f"{API_V1}/admin/users/{{user_id}}/toggle-active",
-    tags=["Admin"],
-    summary="Admin: Toggle user active status",
-)
-def admin_toggle_user_active(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
-):
-    res = crud.toggle_user_active(db, user_id, performed_by_user_id=current_user.id)
-    if res is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"is_active": res, "message": f"User active status toggled to {res}."}
-
-
-@app.get(
-    f"{API_V1}/admin/departments",
-    tags=["Admin"],
-    summary="Admin: List all departments",
-)
-def admin_list_departments(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN, UserRole.DS, UserRole.DIRECTOR, UserRole.HOD, UserRole.TSO, UserRole.EMPLOYEE)),
-):
-    depts = crud.get_all_departments(db, include_inactive=True)
-    return [
-        {
-            "id": d.id,
-            "name": d.name,
-            "code": d.code,
-            "is_active": d.is_active,
-            "created_at": str(d.created_at) if d.created_at else None
-        }
-        for d in depts
-    ]
+    _require_admin(ctx)
+    return crud.get_departments(db, include_inactive=include_inactive)
 
 
 @app.post(
     f"{API_V1}/admin/departments",
+    response_model=schemas.DepartmentResponse,
+    status_code=status.HTTP_201_CREATED,
     tags=["Admin"],
-    summary="Admin: Create a new department",
 )
 def admin_create_department(
-    body: dict,
+    payload: schemas.DepartmentCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
+    _require_admin(ctx)
     try:
-        dept = crud.create_admin_department(db, body, performed_by_user_id=current_user.id)
-        return {"message": f"Department {dept.name} created successfully.", "id": dept.id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return crud.create_admin_department(db, payload, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.put(
-    f"{API_V1}/admin/departments/{{dept_id}}",
-    tags=["Admin"],
-    summary="Admin: Update department details",
-)
+@app.put(f"{API_V1}/admin/departments/{{dept_id}}", response_model=schemas.DepartmentResponse, tags=["Admin"])
 def admin_update_department(
     dept_id: int,
-    body: dict,
+    payload: dict,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    dept = crud.update_admin_department(db, dept_id, body, performed_by_user_id=current_user.id)
+    _require_admin(ctx)
+    dept = crud.update_admin_department(db, dept_id, payload, current_user.id)
     if not dept:
-        raise HTTPException(status_code=404, detail="Department not found")
-    return {"message": f"Department {dept.name} updated successfully."}
+        raise HTTPException(status_code=404, detail="Department not found.")
+    return dept
 
 
-@app.get(
-    f"{API_V1}/admin/settings",
-    tags=["Admin"],
-    summary="Admin: Get system configuration settings",
-)
-def admin_get_settings(
+@app.get(f"{API_V1}/admin/settings", tags=["Admin"])
+def admin_settings(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
+    _require_admin(ctx)
     return crud.get_system_settings(db)
 
 
-@app.post(
-    f"{API_V1}/admin/settings",
-    tags=["Admin"],
-    summary="Admin: Update system configuration settings",
-)
-def admin_update_settings(
-    body: dict,
+@app.post(f"{API_V1}/admin/settings", tags=["Admin"])
+def admin_update_setting(
+    payload: schemas.SystemSettingUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    for k, v in body.items():
-        crud.update_system_setting(db, key=k, value=str(v), performed_by_user_id=current_user.id)
-    return {"message": "Settings updated successfully."}
+    _require_admin(ctx)
+    setting = crud.update_system_setting(
+        db, payload.key, payload.value, payload.description, current_user.id
+    )
+    return {"key": setting.key, "value": setting.value}
 
 
-@app.get(
-    f"{API_V1}/admin/audit-logs",
-    tags=["Admin"],
-    summary="Admin: Inspect admin-only audit logs",
-)
-def admin_get_audit_logs(
-    limit: int = 100,
+@app.get(f"{API_V1}/admin/audit-logs", response_model=List[schemas.AuditLogResponse], tags=["Admin"])
+def admin_audit_logs(
+    limit: int = 200,
     offset: int = 0,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(UserRole.ADMIN)),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
 ):
-    # Only returns entries where the acting user has the ADMIN role
-    logs = crud.get_admin_audit_logs(db, limit=limit, offset=offset)
-    return [
-        {
-            "id": l.id,
-            "user_id": l.user_id,
-            "username": l.user.username if l.user else "unknown",
-            "action": l.action,
-            "entity_type": l.entity_type,
-            "entity_id": l.entity_id,
-            "description": l.description,
-            "created_at": str(l.created_at) if l.created_at else None
-        }
-        for l in logs
-    ]
+    """Administrative and configuration activity only.  Document workflow
+    activity lives in the document's own history."""
+    _require_admin(ctx)
+    return crud.get_audit_logs(db, limit, offset)

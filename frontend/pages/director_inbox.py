@@ -1,12 +1,22 @@
+"""Director inbox.
+
+Documents where a review has been requested from the Director.  The Director
+reads the document, the work done so far and every earlier remark, then writes
+a remark and the document returns to the DS.
+
+The Director does not close documents and does not approve them: closure is
+the DS's decision, and a document can come back here as many times as the DS
+needs.
+"""
+
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -15,240 +25,229 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from components.document_viewer import DocumentViewer
+from components.routing_dialogs import DirectorReviewDialog
+from core.context.context_manager import context_manager
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum
 from services.document_service import document_service
+from services.routing_service import routing_service
 
 
 class DirectorInboxPage(QWidget):
-    """
-    Director Executive Review Inbox.
-    Contains documents routed to the Director by the Director Secretary (DS),
-    with full search and filter choices including Initial Reviews, Follow-ups, and Reviewed Archive.
-    """
 
     view_requested = Signal(object, str)
+
+
+    HEADERS = [
+        "Reference", "Title / Subject", "Priority", "Review Round",
+        "Work So Far", "Requested", "Deadline",
+    ]
 
     def __init__(self):
         super().__init__()
         self.documents: List[DocumentModel] = []
-        self._displayed_docs: List[DocumentModel] = []
-        self.setup_ui()
-        self.load_inbox()
-        from services.event_bus import event_bus
-        event_bus.data_changed.connect(self.load_inbox)
+        self.viewer: Optional[DocumentViewer] = None
+        self._build()
+        self._connect_events()
+
+    def _connect_events(self) -> None:
+        try:
+            from services.event_bus import event_bus
+            event_bus.document_updated.connect(self._on_workflow_changed)
+        except Exception:
+            pass
+        try:
+            context_manager.active_context_changed.connect(self._on_workflow_changed)
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.load_inbox()
+        self.load()
 
-    def setup_ui(self):
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(30, 25, 30, 30)
-        main_layout.setSpacing(14)
+    # ------------------------------------------------------------------
 
-        # --------------------------------
-        # HEADER
-        # --------------------------------
-        title = QLabel("Director Review Inbox")
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 22, 28, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("Director Review")
         title.setObjectName("pageTitle")
+        layout.addWidget(title)
 
-        subtitle = QLabel("Executive review queue for incoming documents and employee progress follow-ups routed by Director Secretary.")
-        subtitle.setObjectName("pageSubtitle")
+        self.subtitle = QLabel()
+        self.subtitle.setObjectName("pageSubtitle")
+        self.subtitle.setWordWrap(True)
+        layout.addWidget(self.subtitle)
 
-        main_layout.addWidget(title)
-        main_layout.addWidget(subtitle)
+        controls = QHBoxLayout()
+        controls.addStretch()
 
-        # --------------------------------
-        # SEARCH & FILTER BAR
-        # --------------------------------
-        filter_layout = QHBoxLayout()
-        filter_layout.setSpacing(10)
+        open_btn = QPushButton("Open & Read")
+        open_btn.setStyleSheet(
+            "background-color: #F8FAFC; color: #0F172A; border: 1px solid #CBD5E1; "
+            "font-weight: 600; padding: 7px 15px; border-radius: 4px;"
+        )
+        open_btn.clicked.connect(self.open_document)
+        controls.addWidget(open_btn)
 
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 Search by title, reference, origin, department, priority...")
-        self.search_input.setStyleSheet("padding: 7px 12px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
-        self.search_input.textChanged.connect(self.apply_filter)
+        review_btn = QPushButton("Write Review Remark")
+        review_btn.setStyleSheet(
+            "background-color: #7C3AED; color: white; font-weight: 600; "
+            "padding: 7px 15px; border-radius: 4px;"
+        )
+        review_btn.clicked.connect(self.write_review)
+        controls.addWidget(review_btn)
+        layout.addLayout(controls)
 
-        self.category_filter = QComboBox()
-        self.category_filter.addItems([
-            "All Active Reviews",
-            "Initial Reviews",
-            "Progress Follow-ups",
-            "Reviewed & Returned to DS",
-            "All Documents (Active & History)"
-        ])
-        self.category_filter.setStyleSheet("padding: 6px 10px; border: 1px solid #CBD5E1; border-radius: 5px; font-size: 12px;")
-        self.category_filter.currentIndexChanged.connect(self.apply_filter)
-
-        clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet("background-color: #F1F5F9; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 4px; font-weight: 600;")
-        clear_btn.clicked.connect(self._clear_filters)
-
-        filter_layout.addWidget(self.search_input, 2)
-        filter_layout.addWidget(self.category_filter, 1)
-        filter_layout.addWidget(clear_btn)
-
-        main_layout.addLayout(filter_layout)
-
-        # --------------------------------
-        # TABLE
-        # --------------------------------
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels([
-            "Reference No",
-            "Title / Subject",
-            "Review Type",
-            "Priority",
-            "Source / Origin",
-            "Deadline",
-            "Status"
-        ])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.doubleClicked.connect(self.review_document)
+        self.table.setColumnCount(len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.doubleClicked.connect(self.open_document)
 
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-
-        main_layout.addWidget(self.table)
-
-        # --------------------------------
-        # ACTIONS
-        # --------------------------------
-        action_layout = QHBoxLayout()
-        action_layout.addStretch()
-
-        self.review_btn = QPushButton("Open / Review Document")
-        self.review_btn.setStyleSheet("background-color: #0F172A; color: white; font-weight: 600; padding: 8px 22px; border-radius: 5px;")
-        self.review_btn.clicked.connect(self.review_document)
-        action_layout.addWidget(self.review_btn)
-
-        main_layout.addLayout(action_layout)
-        self.setLayout(main_layout)
-
-    # ====================================
-    # LOAD INBOX & FAST FILTERING
-    # ====================================
-
-    def load_inbox(self):
-        """Loads all accessible documents for Director."""
-        self.documents = document_service.get_documents() or []
-        self.apply_filter()
-
-    def set_filters(self, category: Optional[str] = None, priority: Optional[str] = None, search: Optional[str] = None):
-        """Programmatic filter setter used by dashboard navigation."""
-        if category:
-            for i in range(self.category_filter.count()):
-                if category.lower() in self.category_filter.itemText(i).lower():
-                    self.category_filter.setCurrentIndex(i)
-                    break
-        if search:
-            self.search_input.setText(search)
-        elif priority:
-            self.search_input.setText(priority)
-        self.apply_filter()
-
-    def _clear_filters(self):
-        self.search_input.clear()
-        self.category_filter.setCurrentIndex(0)
-
-
-    def apply_filter(self):
-        cat = self.category_filter.currentText()
-        query = self.search_input.text().strip().lower()
-        filtered = []
-
-        for doc in self.documents:
-            is_active_dir = doc.status in (
-                DocumentStatusEnum.UNDER_DIRECTOR_REVIEW.value,
-                "Under Director Review",
-                "UNDER_DIRECTOR_REVIEW",
+        for col in range(len(self.HEADERS)):
+            header.setSectionResizeMode(
+                col,
+                QHeaderView.ResizeMode.Stretch if col in (1, 4)
+                else QHeaderView.ResizeMode.ResizeToContents,
             )
-            has_remark = bool(doc.director_remark)
-            is_returned = bool(
-                (has_remark or doc.status in (DocumentStatusEnum.RETURNED_TO_DS.value, "Director Review Completed"))
-                and not is_active_dir
+        layout.addWidget(self.table, 1)
+
+        self.empty_note = QLabel()
+        self.empty_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_note.setStyleSheet("color: #94A3B8; font-size: 12px; padding: 18px;")
+        self.empty_note.setVisible(False)
+        layout.addWidget(self.empty_note)
+
+    # ------------------------------------------------------------------
+
+    def load(self) -> None:
+        try:
+            self.documents = document_service.get_inbox()
+        except Exception as exc:
+            self.documents = []
+            QMessageBox.warning(self, "Director Review", f"Could not load documents.\n{exc}")
+
+        self.subtitle.setText(
+            f"{len(self.documents)} document(s) awaiting your review. "
+            "Read the work done so far, then record a remark - the document returns to the DS, "
+            "who decides whether more work is needed or it can be closed."
+        )
+
+        self.table.setRowCount(len(self.documents))
+        for row, doc in enumerate(self.documents):
+            branch = doc.open_director_branch
+            round_no = len(doc.director_reviews) + 1
+            work_summary = (
+                "; ".join(s.cell_text for s in doc.branch_summaries
+                          if s.branch_type != "DIRECTOR")
+                or "No work routed yet"
             )
-            is_progress = bool(
-                doc.status in (DocumentStatusEnum.PROGRESS_UPDATED.value, DocumentStatusEnum.IN_PROGRESS.value)
-                or getattr(doc, "has_progress_updates", False)
-            )
+            self._set(row, 0, doc.reference)
+            self._set(row, 1, doc.subject or doc.title)
+            self._set(row, 2, str(doc.priority).title(), color=doc.priority_color, bold=True)
+            self._set(row, 3, f"Review #{round_no}", color="#7C3AED", bold=True)
+            self._set(row, 4, work_summary, tooltip=work_summary)
+            self._set(row, 5, branch.opened_at if branch else "-")
+            self._set(row, 6, doc.deadline_display, color=doc.deadline_color,
+                      bold=doc.deadline_state in ("overdue", "due_soon"))
 
-            # Determine Review Type badge
-            if is_progress:
-                review_type = "Progress Follow-up"
-            elif is_returned:
-                review_type = "Reviewed & Returned"
-            else:
-                review_type = "Initial Review"
+        self.empty_note.setVisible(not self.documents)
+        self.empty_note.setText("No documents are currently awaiting your review.")
 
-            # Category filter logic
-            if cat == "All Active Reviews" and not is_active_dir:
-                continue
-            if cat == "Initial Reviews" and not (is_active_dir and not is_progress):
-                continue
-            if cat == "Progress Follow-ups" and not (is_active_dir and is_progress):
-                continue
-            if cat == "Reviewed & Returned to DS" and not is_returned:
-                continue
-            if cat == "All Documents (Active & History)":
-                # Include both active review and documents director has reviewed
-                if not (is_active_dir or is_returned or has_remark):
-                    continue
+    def _set(self, row, col, text, color=None, bold=False, tooltip=None) -> None:
+        cell = QTableWidgetItem(str(text or "-"))
+        cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        cell.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if color:
+            cell.setForeground(QBrush(QColor(color)))
+        if bold:
+            font = cell.font()
+            font.setBold(True)
+            cell.setFont(font)
+        if tooltip:
+            cell.setToolTip(tooltip)
+        self.table.setItem(row, col, cell)
 
-            # Search text filter
-            if query:
-                ref = str(doc.reference or "").lower()
-                title = str(doc.title or "").lower()
-                source = str(doc.source or "").lower()
-                dept = str(doc.suggested_department_name or "").lower()
-                prio = str(doc.priority or "").lower()
-                remark = str(doc.director_remark or "").lower()
+    # ------------------------------------------------------------------
 
-                if not (query in ref or query in title or query in source or query in dept or query in prio or query in remark):
-                    continue
-
-            filtered.append((doc, review_type))
-
-        self.table.setRowCount(len(filtered))
-        self._displayed_docs = [item[0] for item in filtered]
-
-        for row, (doc, r_type) in enumerate(filtered):
-            self.table.setItem(row, 0, QTableWidgetItem(doc.reference or "-"))
-            self.table.setItem(row, 1, QTableWidgetItem(doc.title or "Untitled"))
-
-            type_item = QTableWidgetItem(r_type)
-            if r_type == "Progress Follow-up":
-                type_item.setForeground(Qt.blue)
-            elif r_type == "Reviewed & Returned":
-                type_item.setForeground(Qt.darkGreen)
-            else:
-                type_item.setForeground(Qt.darkMagenta)
-            self.table.setItem(row, 2, type_item)
-
-            self.table.setItem(row, 3, QTableWidgetItem(doc.priority or "-"))
-            self.table.setItem(row, 4, QTableWidgetItem(doc.source or "-"))
-            self.table.setItem(row, 5, QTableWidgetItem(doc.deadline or "-"))
-            self.table.setItem(row, 6, QTableWidgetItem(doc.status or "-"))
-
-    # ====================================
-    # VIEW / REVIEW DOCUMENT
-    # ====================================
-
-    def review_document(self):
+    def selected_document(self) -> Optional[DocumentModel]:
         row = self.table.currentRow()
-        if row < 0 or row >= len(getattr(self, "_displayed_docs", [])):
-            QMessageBox.information(self, "Selection Required", "Please select a document from the queue to review.")
-            return
+        if 0 <= row < len(self.documents):
+            return self.documents[row]
+        QMessageBox.information(self, "Director Review", "Select a document first.")
+        return None
 
-        selected_doc = self._displayed_docs[row]
-        self.view_requested.emit(selected_doc, "Director")
+    def open_document(self) -> None:
+        doc = self.selected_document()
+        if not doc:
+            return
+        full = document_service.get_document(doc.id) or doc
+        branch = full.open_director_branch
+        if branch:
+            try:
+                routing_service.start_director_review(branch.id)
+            except Exception:
+                pass
+        self._show_document(full, "DIRECTOR")
+
+    def write_review(self) -> None:
+        doc = self.selected_document()
+        if not doc:
+            return
+        full = document_service.get_document(doc.id) or doc
+        branch = full.open_director_branch
+        if not branch:
+            QMessageBox.information(
+                self, "Director Review",
+                "No review is currently requested from you on this document.",
+            )
+            return
+        try:
+            routing_service.start_director_review(branch.id)
+        except Exception:
+            pass
+
+        dialog = DirectorReviewDialog(full, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        try:
+            routing_service.submit_director_review(branch.id, dialog.get_text(), full.version)
+        except Exception as exc:
+            QMessageBox.warning(self, "Director Review", str(exc))
+            return
+        QMessageBox.information(
+            self, "Review recorded",
+            "Your remark is saved and the document has returned to the DS. "
+            "It can come back to you again later if the DS requests another review.",
+        )
+        self.load()
+
+    def load_inbox(self) -> None:
+        self.load()
+
+    def load_documents(self) -> None:
+        self.load()
+
+    def _show_document(self, doc, role: str) -> None:
+        """Hand the document to the application shell when one is hosting this
+        page; otherwise open it in its own window."""
+        from services.document_service import document_service as _docs
+
+        full = _docs.get_document(doc.id) or doc
+        self.view_requested.emit(full, role)
+        
+
+    def _on_workflow_changed(self, *_) -> None:
+        """Bound method, not a lambda: Qt disconnects this when the
+        widget is destroyed, so a stale page never reloads itself."""
+        self.load()

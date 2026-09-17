@@ -1,7 +1,18 @@
-from datetime import datetime, timedelta
+"""Documents page - redesigned document/workstream overview.
+
+The page keeps the existing CDTRS visual language but replaces the dense
+multi-column table with expandable document cards.  Each document shows its
+lifecycle, priority, workstream count, deadline and last update at a glance.
+Expanding a document reveals branch-specific stages, individual people/work
+items, written progress updates and supporting attachments.
+
+There is deliberately no percentage/combined-progress display.
+"""
+
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -11,1242 +22,1049 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QStackedWidget,
     QSizePolicy,
+    QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from components.document_table import DocumentTable
-from components.state_widgets import EmptyStateWidget
+from core.context.context_manager import context_manager
 from models.document import DocumentModel
-from models.enums import DocumentStatusEnum, PriorityEnum, RoleEnum
+from services.auth_service import auth_service
 from services.document_service import document_service
 
 
 class DocumentsPage(QWidget):
-    """
-    Central Registered Documents Management Page for CDTRS.
-
-    Provides:
-        - Document search
-        - Status filtering
-        - Priority filtering
-        - Deadline filtering
-        - Department filtering
-        - Backend-powered department list
-        - Document selection and viewing
-        - DS action reminders
-
-    Operational routing is NOT stored on DocumentModel through
-    legacy fields such as current_stage, current_owner_id,
-    target_department_id/name, or assigned_employee_id/name.
-
-    Canonical routing/ownership is represented by:
-        DocumentDepartmentRouting
-            -> WorkAssignment
-                -> ProgressUpdate
-    """
-
     view_requested = Signal(object, str)
 
     def __init__(self, user_role: str = "DS"):
         super().__init__()
+        self.user_role = user_role
+        self.documents: List[DocumentModel] = []
+        self._expanded_ids = set()
+        self._build()
+        self._connect_events()
 
-        self.user_role = RoleEnum.normalize(user_role)
-        self.selected_document: Optional[DocumentModel] = None
-        self.all_documents: List[DocumentModel] = []
+    # ------------------------------------------------------------------
 
-        self.setup_ui()
+    def _connect_events(self) -> None:
+        try:
+            from services.event_bus import event_bus
+            event_bus.document_updated.connect(self._on_workflow_changed)
+        except Exception:
+            pass
 
-        # Populate department dropdown from live backend.
-        self._load_department_filter()
-
-        self.load_documents()
-
-        from services.event_bus import event_bus
-
-        event_bus.data_changed.connect(self.load_documents)
-
-    # =========================================================
-    # LIFECYCLE
-    # =========================================================
+        try:
+            context_manager.active_context_changed.connect(
+                self._on_workflow_changed
+            )
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
-
-        if not getattr(self, "_preserve_filters_once", False):
-            self.load_documents()
-        else:
-            self._preserve_filters_once = False
-
-    # =========================================================
-    # UI
-    # =========================================================
-
-    def setup_ui(self):
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(34, 28, 34, 30)
-        main_layout.setSpacing(18)
-
-        # Header
-        header = QHBoxLayout()
-        title_block = QVBoxLayout()
-        title_block.setSpacing(4)
-
-        title = QLabel("Registered Documents")
-        title.setObjectName("pageTitle")
-        subtitle = QLabel(
-            "Search, monitor, and manage documents moving through the organisation's workflow."
-        )
-        subtitle.setObjectName("pageSubtitle")
-        subtitle.setWordWrap(True)
-        title_block.addWidget(title)
-        title_block.addWidget(subtitle)
-
-        self.document_count_label = QLabel("0 documents")
-        self.document_count_label.setObjectName("documentCount")
-        header.addLayout(title_block, 1)
-        header.addWidget(self.document_count_label, 0, Qt.AlignTop)
-        main_layout.addLayout(header)
-
-        # Compact register status strip.
-        # Documents is a management/listing workspace, so it intentionally
-        # does not repeat the Dashboard's large operational KPI cards.
-        register_strip = QFrame()
-        register_strip.setObjectName("registerStrip")
-
-        register_layout = QHBoxLayout(register_strip)
-        register_layout.setContentsMargins(14, 9, 14, 9)
-        register_layout.setSpacing(0)
-
-        self.register_total_label = QLabel("0 documents")
-        self.register_total_label.setObjectName("registerMetric")
-
-        self.register_active_label = QLabel("0 active")
-        self.register_active_label.setObjectName("registerMetric")
-
-        self.register_high_label = QLabel("0 high priority")
-        self.register_high_label.setObjectName("registerMetric")
-
-        self.register_overdue_label = QLabel("0 overdue")
-        self.register_overdue_label.setObjectName("registerMetric")
-
-        for widget in (
-            self.register_total_label,
-            self.register_active_label,
-            self.register_high_label,
-            self.register_overdue_label,
-        ):
-            register_layout.addWidget(widget)
-            register_layout.addSpacing(18)
-
-        register_layout.addStretch()
-
-        register_note = QLabel(
-            "Double-click any row to open the document workflow"
-        )
-        register_note.setObjectName("registerNote")
-        register_layout.addWidget(register_note)
-
-        main_layout.addWidget(register_strip)
-
-        # Filter panel
-        filter_card = QFrame()
-        filter_card.setObjectName("filterCard")
-        filter_outer = QVBoxLayout(filter_card)
-        filter_outer.setContentsMargins(16, 14, 16, 14)
-        filter_outer.setSpacing(10)
-
-        filter_heading = QHBoxLayout()
-        filter_title = QLabel("Find a document")
-        filter_title.setObjectName("filterTitle")
-        filter_hint = QLabel("Use search and filters to narrow the list")
-        filter_hint.setObjectName("filterHint")
-        filter_heading.addWidget(filter_title)
-        filter_heading.addWidget(filter_hint)
-        filter_heading.addStretch()
-        filter_outer.addLayout(filter_heading)
-
-        filter_layout = QHBoxLayout()
-        filter_layout.setSpacing(9)
-        self.search_input = QLineEdit()
-        self.search_input.setObjectName("documentSearch")
-        self.search_input.setPlaceholderText("🔍  Search by title, reference number, or source...")
-        self.search_input.setMinimumHeight(42)
-        self.search_input.textChanged.connect(self.apply_filters)
-
-        self.status_filter = self._create_filter_combo([
-            "All Status",
-            "Received",
-            "Under Director Review",
-            "Director Review Completed",
-            "Returned to DS",
-            "Under HOD Processing",
-            "Assigned for Execution",
-            "In Progress",
-            "Progress Updated",
-            "Closed",
-        ])
-        
-        self.status_filter.currentIndexChanged.connect(self.apply_filters)
-        self.priority_filter = self._create_filter_combo([
-            "All Priorities", "High Priority", "Medium Priority", "Low Priority"
-        ])
-        self.priority_filter.currentIndexChanged.connect(self.apply_filters)
-        self.deadline_filter = self._create_filter_combo([
-            "All Deadlines", "Due Within 7 Days", "Overdue"
-        ])
-        self.deadline_filter.currentIndexChanged.connect(self.apply_filters)
-        self.department_filter = self._create_filter_combo(["All Departments"])
-        self.department_filter.currentIndexChanged.connect(self.apply_filters)
-
-        clear_button = QPushButton("Reset")
-        clear_button.setObjectName("secondaryButton")
-        clear_button.setMinimumHeight(42)
-        clear_button.setMinimumWidth(78)
-        clear_button.clicked.connect(self.clear_filters)
-
-        filter_layout.addWidget(self.search_input, 3)
-        filter_layout.addWidget(self.status_filter, 1)
-        filter_layout.addWidget(self.priority_filter, 1)
-        filter_layout.addWidget(self.deadline_filter, 1)
-        filter_layout.addWidget(self.department_filter, 1)
-        filter_layout.addWidget(clear_button)
-        filter_outer.addLayout(filter_layout)
-        main_layout.addWidget(filter_card)
-
-        # Table container
-        table_card = QFrame()
-        table_card.setObjectName("tableCard")
-        table_layout = QVBoxLayout(table_card)
-        table_layout.setContentsMargins(0, 0, 0, 0)
-        table_layout.setSpacing(0)
-
-        table_header = QHBoxLayout()
-        table_header.setContentsMargins(16, 12, 16, 10)
-        table_title = QLabel("Document Register")
-        table_title.setObjectName("tableTitle")
-        self.result_label = QLabel("Showing 0 documents")
-        self.result_label.setObjectName("resultLabel")
-        table_header.addWidget(table_title)
-        table_header.addStretch()
-        table_header.addWidget(self.result_label)
-        table_layout.addLayout(table_header)
-
-        self.content_stack = QStackedWidget()
-        self.table = DocumentTable()
-        self.table.document_selected.connect(self.on_document_selected)
-        # Double-click is intentionally available to every role.
-        # view_document() delegates to MainWindow with the active role/context.
-        self.table.doubleClicked.connect(self.view_document)
-        self.empty_widget = EmptyStateWidget(
-            title="No registered documents found",
-            message="No documents match the current filters, or no dispatches have been registered yet."
-        )
-        self.content_stack.addWidget(self.table)
-        self.content_stack.addWidget(self.empty_widget)
-        table_layout.addWidget(self.content_stack, 1)
-        main_layout.addWidget(table_card, 1)
-
-        # Bottom actions
-        action_card = QFrame()
-        action_card.setObjectName("actionCard")
-        action_layout = QHBoxLayout(action_card)
-        action_layout.setContentsMargins(14, 10, 14, 10)
-        action_hint = QLabel("Select a document to view its complete workflow details.")
-        action_hint.setObjectName("actionHint")
-        action_layout.addWidget(action_hint)
-        action_layout.addStretch()
-
-        if self.user_role in (RoleEnum.DS.value, "DS", "Master"):
-            self.remind_button = QPushButton("⏰  Send Action Reminder")
-            self.remind_button.setObjectName("secondaryButton")
-            self.remind_button.setMinimumHeight(40)
-            self.remind_button.clicked.connect(self.send_reminder)
-            action_layout.addWidget(self.remind_button)
-
-        self.view_button = QPushButton("View Document Details  →")
-        self.view_button.setObjectName("primaryButton")
-        self.view_button.setMinimumHeight(40)
-        self.view_button.setMinimumWidth(190)
-        self.view_button.setEnabled(False)
-        self.view_button.clicked.connect(self.view_document)
-        action_layout.addWidget(self.view_button)
-        main_layout.addWidget(action_card)
-
-        self.setLayout(main_layout)
-        self.setStyleSheet(self.styleSheet() + """
-            QLabel#documentCount {
-                color: #334155;
-                background: #FFFFFF;
-                border: 1px solid #DCE3EC;
-                border-radius: 16px;
-                padding: 7px 13px;
-                font-weight: 700;
-            }
-
-            QFrame#registerStrip {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-            }
-
-            QLabel#registerMetric {
-                color: #334155;
-                font-size: 12px;
-                font-weight: 700;
-            }
-
-            QLabel#registerNote {
-                color: #94A3B8;
-                font-size: 11px;
-            }
-
-            QFrame#filterCard {
-                background: #F8FAFC;
-                border: 1px solid #E2E8F0;
-                border-radius: 9px;
-            }
-
-            QFrame#tableCard {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 9px;
-            }
-
-            QFrame#actionCard {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 9px;
-            }
-
-            QLabel#filterTitle,
-            QLabel#tableTitle {
-                color: #0F172A;
-                font-size: 14px;
-                font-weight: 700;
-            }
-
-            QLabel#filterHint,
-            QLabel#resultLabel,
-            QLabel#actionHint {
-                color: #64748B;
-                font-size: 12px;
-            }
-
-            QLineEdit#documentSearch,
-            QComboBox {
-                min-height: 40px;
-                background: #FFFFFF;
-                color: #0F172A;
-                border: 1px solid #CBD5E1;
-                border-radius: 7px;
-                padding: 0 10px;
-            }
-
-            QLineEdit#documentSearch:focus,
-            QComboBox:focus {
-                border: 1px solid #64748B;
-            }
-
-            QPushButton#secondaryButton {
-                background: #FFFFFF;
-                color: #0F172A;
-                border: 1px solid #CBD5E1;
-                border-radius: 7px;
-                padding: 0 14px;
-                font-weight: 600;
-            }
-
-            QPushButton#secondaryButton:hover {
-                background: #F1F5F9;
-            }
-
-            QPushButton#primaryButton {
-                background: #0F172A;
-                color: #FFFFFF;
-                border: 1px solid #0F172A;
-                border-radius: 7px;
-                padding: 0 16px;
-                font-weight: 700;
-            }
-
-            QPushButton#primaryButton:hover {
-                background: #1E293B;
-            }
-
-            QPushButton#primaryButton:disabled {
-                background: #CBD5E1;
-                border-color: #CBD5E1;
-                color: #FFFFFF;
-            }
-        """)
-
-    def _create_filter_combo(self, items):
-        combo = QComboBox()
-        combo.addItems(items)
-        combo.setMinimumHeight(42)
-        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        return combo
-
-    def _create_summary_card(self, label, value, hint):
-        card = QFrame()
-        card.setObjectName("summaryCard")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(15, 12, 15, 12)
-        layout.setSpacing(2)
-        label_widget = QLabel(label)
-        label_widget.setStyleSheet("color:#64748B; font-size:10px; font-weight:700;")
-        value_widget = QLabel(value)
-        value_widget.setStyleSheet("color:#0F172A; font-size:22px; font-weight:800;")
-        hint_widget = QLabel(hint)
-        hint_widget.setStyleSheet("color:#94A3B8; font-size:10px;")
-        hint_widget.setWordWrap(True)
-        layout.addWidget(label_widget)
-        layout.addWidget(value_widget)
-        layout.addWidget(hint_widget)
-        card._value_widget = value_widget
-        return card
-
-    def _refresh_summary(self, documents):
-        """Refresh the compact register metrics."""
-        total = len(documents)
-        high = 0
-        active = 0
-        overdue = 0
-        today = datetime.now().date()
-
-        for document in documents:
-            priority = str(
-                getattr(document, "priority", "") or ""
-            ).lower()
-            status = str(
-                getattr(document, "status", "") or ""
-            ).lower()
-
-            if priority in ("high", "red"):
-                high += 1
-
-            if status not in (
-                "closed",
-                "director review completed",
-            ):
-                active += 1
-
-            deadline = getattr(document, "deadline", None)
-            parsed = self._parse_date(deadline) if deadline else None
-
-            if (
-                parsed
-                and parsed < today
-                and status != "closed"
-            ):
-                overdue += 1
-
-        self.register_total_label.setText(
-            f"{total} document{'s' if total != 1 else ''}"
-        )
-        self.register_active_label.setText(f"{active} active")
-        self.register_high_label.setText(f"{high} high priority")
-        self.register_overdue_label.setText(f"{overdue} overdue")
-
-        self.document_count_label.setText(
-            f"{total} document{'s' if total != 1 else ''}"
-        )
-
-    # =========================================================
-    # DOCUMENT LOADING
-    # =========================================================
-
-    def load_documents(self):
-        try:
-            self.all_documents = (
-                document_service.get_documents()
-            )
-        except Exception as exc:
-            self.all_documents = []
-
-            QMessageBox.warning(
-                self,
-                "Unable to Load Documents",
-                f"Could not load registered documents.\n\n{exc}",
-            )
-
-        self.apply_filters()
-
-    # =========================================================
-    # DEPARTMENT FILTER
-    # =========================================================
-
-    def _load_department_filter(self):
-        """
-        Populates the department filter from the live backend.
-        """
-
-        from repositories.provider import get_repository
-
-        self.department_filter.blockSignals(True)
-
-        current_text = (
-            self.department_filter.currentText()
-        )
-
-        self.department_filter.clear()
-        self.department_filter.addItem(
-            "All Departments"
-        )
-
-        try:
-            repo = get_repository()
-            departments = repo.get_departments()
-
-            for dept in departments:
-                if dept.name:
-                    self.department_filter.addItem(
-                        dept.name
-                    )
-
-        except Exception:
-            # Backend may be temporarily unavailable.
-            # Keep the default "All Departments" option.
-            pass
-
-        idx = self.department_filter.findText(
-            current_text
-        )
-
-        if idx >= 0:
-            self.department_filter.setCurrentIndex(idx)
-        else:
-            self.department_filter.setCurrentIndex(0)
-
-        self.department_filter.blockSignals(False)
-
-    # =========================================================
-    # CANONICAL ROUTING DISPLAY / FILTER HELPERS
-    # =========================================================
-
-    @staticmethod
-    def _value(obj, *names, default=None):
-        """Read a value from either a dict payload or model object."""
-        for name in names:
-            if isinstance(obj, dict):
-                value = obj.get(name)
-            else:
-                value = getattr(obj, name, None)
-
-            if value is not None and value != "":
-                return value
-
-        return default
-
-    @classmethod
-    def _active_branches(cls, document):
-        branches = (
-            cls._value(
-                document,
-                "department_routings",
-                "routing_branches",
-                "branches",
-                default=[],
-            )
-            or []
-        )
-
-        if isinstance(branches, dict):
-            branches = [branches]
-
-        return [
-            branch
-            for branch in branches
-            if cls._value(branch, "is_active", default=True) is not False
-        ]
-
-    @classmethod
-    def _active_assignments(cls, document):
-        assignments = cls._value(
-            document,
-            "work_assignments",
-            default=[],
-        ) or []
-
-        if isinstance(assignments, dict):
-            assignments = [assignments]
-
-        return [
-            assignment
-            for assignment in assignments
-            if cls._value(
-                assignment,
-                "is_active",
-                default=True,
-            ) is not False
-        ]
-
-    @classmethod
-    def _routing_department_names(cls, document):
-        names = []
-
-        for branch in cls._active_branches(document):
-            branch_type = str(
-                cls._value(
-                    branch,
-                    "branch_type",
-                    "route_type",
-                    default="",
-                )
-            ).upper()
-
-            if branch_type != "DEPARTMENT_HOD":
-                continue
-
-            department = cls._value(
-                branch,
-                "department_name",
-                default=None,
-            )
-
-            if isinstance(department, dict):
-                department = (
-                    department.get("name")
-                    or department.get("department_name")
-                )
-
-            if not department:
-                department_obj = cls._value(
-                    branch,
-                    "department",
-                    default=None,
-                )
-                if isinstance(department_obj, dict):
-                    department = (
-                        department_obj.get("name")
-                        or department_obj.get("department_name")
-                    )
-                elif department_obj:
-                    department = str(department_obj)
-
-            if department and str(department) not in names:
-                names.append(str(department))
-
-        # WorkAssignment payloads can also carry the department.
-        for assignment in cls._active_assignments(document):
-            department = cls._value(
-                assignment,
-                "department_name",
-                default=None,
-            )
-
-            if not department:
-                department_obj = cls._value(
-                    assignment,
-                    "department",
-                    default=None,
-                )
-                if isinstance(department_obj, dict):
-                    department = (
-                        department_obj.get("name")
-                        or department_obj.get("department_name")
-                    )
-                elif department_obj:
-                    department = str(department_obj)
-
-            if department and str(department) not in names:
-                names.append(str(department))
-
-        return names
-
-    @classmethod
-    def _routing_search_text(cls, document):
-        """Build searchable text from canonical routing/assignment data."""
-        parts = []
-
-        for branch in cls._active_branches(document):
-            for key in (
-                "branch_type",
-                "route_type",
-                "department_name",
-                "target_user_name",
-                "employee_name",
-            ):
-                value = cls._value(branch, key)
-                if value:
-                    if isinstance(value, dict):
-                        value = (
-                            value.get("name")
-                            or value.get("department_name")
-                            or value.get("full_name")
-                        )
-                    if value:
-                        parts.append(str(value))
-
-        for assignment in cls._active_assignments(document):
-            for key in (
-                "department_name",
-                "assigned_to_name",
-                "assigned_to_user_name",
-                "employee_name",
-                "team_name",
-            ):
-                value = cls._value(assignment, key)
-                if value:
-                    parts.append(str(value))
-
-            members = cls._value(
-                assignment,
-                "members",
-                default=[],
-            ) or []
-
-            if isinstance(members, dict):
-                members = [members]
-
-            for member in members:
-                name = cls._value(
-                    member,
-                    "user_name",
-                    "employee_name",
-                    "name",
-                    "full_name",
-                )
-                if name:
-                    parts.append(str(name))
-
-        return " ".join(parts).lower()
-
-    # =========================================================
-    # FILTERING
-    # =========================================================
-
-    def apply_filters(self):
-        search_query = (
-            self.search_input.text()
-            .strip()
-            .lower()
-        )
-
-        status_sel = (
-            self.status_filter.currentText()
-        )
-
-        prio_sel = (
-            self.priority_filter.currentText()
-        )
-
-        deadline_sel = (
-            self.deadline_filter.currentText()
-        )
-
-        dept_sel = (
-            self.department_filter.currentText()
-        )
-
-        filtered = list(self.all_documents)
-        self._refresh_summary(self.all_documents)
-
-        # --------------------------------
-        # 1. SEARCH
-        # --------------------------------
-
-        if search_query:
-            filtered = [
-                document
-                for document in filtered
-                if search_query
-                in (
-                    str(
-                        getattr(document, "title", "")
-                        or getattr(document, "subject", "")
-                        or ""
-                    )
-                ).lower()
-                or search_query
-                in str(
-                    getattr(document, "reference", "")
-                    or ""
-                ).lower()
-                or search_query
-                in str(
-                    getattr(document, "source", "")
-                    or ""
-                ).lower()
-                or search_query
-                in self._routing_search_text(document)
-            ]
-
-        # --------------------------------
-        # 2. STATUS
-        # --------------------------------
-
-        if status_sel != "All Status":
-            filtered = [
-                document
-                for document in filtered
-                if (
-                    document.status or ""
-                ).lower()
-                == status_sel.lower()
-            ]
-
-        # --------------------------------
-        # 3. PRIORITY
-        # --------------------------------
-
-        if prio_sel == "High Priority":
-            filtered = [
-                document
-                for document in filtered
-                if (
-                    document.priority or ""
-                ).lower()
-                in (
-                    "high",
-                    "red",
-                )
-            ]
-
-        elif prio_sel == "Medium Priority":
-            filtered = [
-                document
-                for document in filtered
-                if (
-                    document.priority or ""
-                ).lower()
-                in (
-                    "medium",
-                    "orange",
-                    "yellow",
-                )
-            ]
-
-        elif prio_sel == "Low Priority":
-            filtered = [
-                document
-                for document in filtered
-                if (
-                    document.priority or ""
-                ).lower()
-                in (
-                    "low",
-                    "green",
-                )
-            ]
-
-        # --------------------------------
-        # 4. DEPARTMENT
-        # --------------------------------
-        #
-        # Department is a document metadata/filter field.
-        # It is NOT derived from the removed legacy
-        # target_department_name field.
-        #
-        # Actual operational routing is represented by
-        # document.work_assignments / routing branches.
-        # --------------------------------
-
-        if dept_sel != "All Departments":
-            wanted_department = dept_sel.strip().lower()
-
-            filtered = [
-                document
-                for document in filtered
-                if any(
-                    wanted_department == name.lower()
-                    for name in self._routing_department_names(
-                        document
-                    )
-                )
-            ]
-
-        # --------------------------------
-        # 5. DEADLINE
-        # --------------------------------
-
-        if deadline_sel != "All Deadlines":
-
-            today = datetime.now().date()
-
-            due_soon_cutoff = (
-                today + timedelta(days=7)
-            )
-
-            if deadline_sel == "Due Within 7 Days":
-
-                filtered = [
-                    document
-                    for document in filtered
-                    if (
-                        document.deadline
-                        and self._parse_date(
-                            document.deadline
-                        )
-                        and today
-                        <= self._parse_date(
-                            document.deadline
-                        )
-                        <= due_soon_cutoff
-                        and (
-                            document.status or ""
-                        ).lower()
-                        != "closed"
-                    )
-                ]
-
-            elif deadline_sel == "Overdue":
-
-                filtered = [
-                    document
-                    for document in filtered
-                    if (
-                        document.deadline
-                        and self._parse_date(
-                            document.deadline
-                        )
-                        and self._parse_date(
-                            document.deadline
-                        )
-                        < today
-                        and (
-                            document.status or ""
-                        ).lower()
-                        != "closed"
-                    )
-                ]
-
-        # --------------------------------
-        # UPDATE CONTENT
-        # --------------------------------
-
-        self.result_label.setText(f"Showing {len(filtered)} of {len(self.all_documents)}")
-
-        if not filtered:
-
-            self.content_stack.setCurrentWidget(
-                self.empty_widget
-            )
-
-            self.selected_document = None
-            self.view_button.setEnabled(False)
-
-        else:
-
-            self.content_stack.setCurrentWidget(
-                self.table
-            )
-
-            self.table.load_documents(
-                filtered
-            )
-
-            # Loading a list is not the same as selecting a document.
-            # Keep the action disabled until a row is selected.
-            self.selected_document = None
-            self.view_button.setEnabled(False)
-
-    # =========================================================
-    # DATE PARSING
-    # =========================================================
-
-    def _parse_date(
-        self,
-        date_str: str,
-    ):
-        if not date_str:
-            return None
-
-        cleaned = (
-            str(date_str)
-            .strip()
-            .split()[0]
-        )
-
-        formats = (
-            "%Y-%m-%d",
-            "%d/%m/%Y",
-            "%d-%m-%Y",
-            "%Y/%m/%d",
-            "%m/%d/%Y",
-            "%m-%d-%Y",
-        )
-
-        for fmt in formats:
-            try:
-                return datetime.strptime(
-                    cleaned,
-                    fmt,
-                ).date()
-
-            except Exception:
-                pass
-
-        return None
-
-    # =========================================================
-    # FILTER STATE
-    # =========================================================
-
-    def set_filters(
-        self,
-        status: Optional[str] = None,
-        priority: Optional[str] = None,
-        deadline: Optional[str] = None,
-        department: Optional[str] = None,
-        search: Optional[str] = None,
-    ):
-        """
-        Pre-selects filter dropdowns and applies filtering.
-        """
-
-        self._preserve_filters_once = True
-
-        self.all_documents = (
-            document_service.get_documents()
-        )
-
-        # --------------------------------
-        # STATUS
-        # --------------------------------
-
-        if status:
-            idx = self.status_filter.findText(
-                status,
-                Qt.MatchContains,
-            )
-
-            if idx >= 0:
-                self.status_filter.setCurrentIndex(
-                    idx
-                )
-
-        else:
-            self.status_filter.setCurrentIndex(0)
-
-        # --------------------------------
-        # PRIORITY
-        # --------------------------------
-
-        if priority:
-            idx = self.priority_filter.findText(
-                priority,
-                Qt.MatchContains,
-            )
-
-            if idx >= 0:
-                self.priority_filter.setCurrentIndex(
-                    idx
-                )
-
-        else:
-            self.priority_filter.setCurrentIndex(0)
-
-        # --------------------------------
-        # DEADLINE
-        # --------------------------------
-
-        if deadline:
-            idx = self.deadline_filter.findText(
-                deadline,
-                Qt.MatchContains,
-            )
-
-            if idx >= 0:
-                self.deadline_filter.setCurrentIndex(
-                    idx
-                )
-
-        else:
-            self.deadline_filter.setCurrentIndex(0)
-
-        # --------------------------------
-        # DEPARTMENT
-        # --------------------------------
-
-        if department:
-            idx = self.department_filter.findText(
-                department,
-                Qt.MatchContains,
-            )
-
-            if idx >= 0:
-                self.department_filter.setCurrentIndex(
-                    idx
-                )
-
-        else:
-            self.department_filter.setCurrentIndex(0)
-
-        # --------------------------------
-        # SEARCH
-        # --------------------------------
-
-        if search is not None:
-            self.search_input.setText(search)
-        else:
-            self.search_input.clear()
-
-        self.apply_filters()
-
-    def clear_filters(self):
-        self.search_input.clear()
-
-        self.status_filter.setCurrentIndex(0)
-        self.priority_filter.setCurrentIndex(0)
-        self.deadline_filter.setCurrentIndex(0)
-        self.department_filter.setCurrentIndex(0)
-
         self.load_documents()
 
-    # =========================================================
-    # DOCUMENT SELECTION
-    # =========================================================
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
 
-    def on_document_selected(
-        self,
-        document,
-    ):
-        self.selected_document = document
-        if hasattr(self, "view_button"):
-            self.view_button.setEnabled(document is not None)
+    def _build(self) -> None:
+        self.setObjectName("documentsPage")
 
-    def view_document(self, *args):
-        """
-        Open the selected document for the current user.
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 22, 28, 24)
+        layout.setSpacing(12)
 
-        This is intentionally role-agnostic.  The page emits the selected
-        DocumentModel plus the active role/context to MainWindow, which remains
-        responsible for opening the appropriate document-details workflow.
+        self.title = QLabel("Documents")
+        self.title.setObjectName("pageTitle")
+        layout.addWidget(self.title)
 
-        ``*args`` is accepted because Qt's double-click signal can provide
-        row/column information depending on the table implementation.
-        """
-        document = None
+        self.subtitle = QLabel()
+        self.subtitle.setObjectName("pageSubtitle")
+        self.subtitle.setWordWrap(True)
+        layout.addWidget(self.subtitle)
 
-        # Prefer the table's canonical selection API.
-        try:
-            document = self.table.get_selected_document()
-        except Exception:
-            document = None
+        # Summary cards
+        self.summary_row = QHBoxLayout()
+        self.summary_row.setSpacing(10)
+        layout.addLayout(self.summary_row)
 
-        # Fall back to the last selected document.
-        if document is None:
-            document = self.selected_document
+        # Search / filters
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
 
-        if document is None:
-            QMessageBox.information(
-                self,
-                "No Document Selected",
-                "Please select a document to open its details.",
-            )
-            return
-
-        self.selected_document = document
-
-        # Keep the action button state in sync.
-        if hasattr(self, "view_button"):
-            self.view_button.setEnabled(True)
-
-        # MainWindow/navigation owns the actual role-specific details page.
-        self.view_requested.emit(document, self.user_role)
-
-    # =========================================================
-    # ACTION REMINDER
-    # =========================================================
-
-    def send_reminder(self):
-        document = (
-            self.table.get_selected_document()
-            or self.selected_document
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(
+            "Search documents, reference, sender or people..."
         )
+        self.search.setMinimumHeight(38)
+        self.search.textChanged.connect(self.apply_filters)
+        filters.addWidget(self.search, 3)
 
-        if not document:
-            QMessageBox.information(
-                self,
-                "No Selection",
-                "Please select a document to send "
-                "a deadline reminder.",
-            )
-            return
-
-        if isinstance(
-            document,
-            DocumentModel,
+        self.lifecycle_filter = QComboBox()
+        self.lifecycle_filter.addItem("All lifecycles", None)
+        for value, label in (
+            ("RECEIVED", "Received"),
+            ("REGISTERED", "Registered"),
+            ("IN_REVIEW", "Under Director Review"),
+            ("IN_WORK", "In Work"),
+            ("WITH_DS", "With DS"),
+            ("CLOSED", "Closed"),
         ):
-            reference = (
-                document.reference
-                or "Document"
+            self.lifecycle_filter.addItem(label, value)
+        self.lifecycle_filter.currentIndexChanged.connect(self.apply_filters)
+        filters.addWidget(self.lifecycle_filter, 1)
+
+        self.priority_filter = QComboBox()
+        self.priority_filter.addItem("All priorities", None)
+        for value in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            self.priority_filter.addItem(value.title(), value)
+        self.priority_filter.currentIndexChanged.connect(self.apply_filters)
+        filters.addWidget(self.priority_filter, 1)
+
+        self.deadline_filter = QComboBox()
+        self.deadline_filter.addItem("Any deadline", None)
+        self.deadline_filter.addItem("Overdue", "overdue")
+        self.deadline_filter.addItem("Due soon", "due_soon")
+        self.deadline_filter.currentIndexChanged.connect(self.apply_filters)
+        filters.addWidget(self.deadline_filter, 1)
+
+        self.mine_only = QComboBox()
+        self.mine_only.addItem("All documents", False)
+        self.mine_only.addItem("Only where I have open work", True)
+        self.mine_only.currentIndexChanged.connect(self.apply_filters)
+        filters.addWidget(self.mine_only, 1)
+
+        clear = QPushButton("Clear")
+        clear.setMinimumHeight(38)
+        clear.clicked.connect(self.clear_filters)
+        filters.addWidget(clear)
+
+        refresh = QPushButton("Refresh")
+        refresh.setMinimumHeight(38)
+        refresh.setStyleSheet(
+            "QPushButton { background-color: #0F172A; color: white; "
+            "font-weight: 600; padding: 6px 16px; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #1E293B; }"
+        )
+        refresh.clicked.connect(self.load_documents)
+        filters.addWidget(refresh)
+
+        layout.addLayout(filters)
+
+        # Result count / sorting row
+        result_row = QHBoxLayout()
+        result_row.setContentsMargins(2, 2, 2, 0)
+
+        self.result_count = QLabel("0 documents")
+        self.result_count.setStyleSheet(
+            "color: #475569; font-size: 12px; font-weight: 600;"
+        )
+        result_row.addWidget(self.result_count)
+        result_row.addStretch()
+
+        sort_label = QLabel("Sort by:")
+        sort_label.setStyleSheet("color: #64748B; font-size: 11px;")
+        result_row.addWidget(sort_label)
+
+        self.sort_filter = QComboBox()
+        self.sort_filter.addItem("Last Updated", "updated")
+        self.sort_filter.addItem("Deadline", "deadline")
+        self.sort_filter.addItem("Priority", "priority")
+        self.sort_filter.addItem("Reference", "reference")
+        self.sort_filter.setMinimumWidth(130)
+        self.sort_filter.currentIndexChanged.connect(self.apply_filters)
+        result_row.addWidget(self.sort_filter)
+
+        layout.addLayout(result_row)
+
+        # Scrollable document cards
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        self.card_container = QWidget()
+        self.card_layout = QVBoxLayout(self.card_container)
+        self.card_layout.setContentsMargins(0, 0, 6, 0)
+        self.card_layout.setSpacing(10)
+        self.card_layout.addStretch()
+
+        self.scroll.setWidget(self.card_container)
+        layout.addWidget(self.scroll, 1)
+
+        self.empty_note = QLabel()
+        self.empty_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_note.setStyleSheet(
+            "color: #94A3B8; font-size: 12px; padding: 22px;"
+        )
+        self.empty_note.setVisible(False)
+        layout.addWidget(self.empty_note)
+
+        hint = QLabel("Click a document to expand its workstreams, or use Open.")
+        hint.setStyleSheet("color: #94A3B8; font-size: 10px;")
+        layout.addWidget(hint)
+
+    # ------------------------------------------------------------------
+
+    def _summary_card(
+        self, label: str, value: str, hint: str, color: str
+    ) -> QFrame:
+        card = QFrame()
+        card.setObjectName("summaryCard")
+        card.setStyleSheet(
+            "QFrame#summaryCard { background: #FFFFFF; "
+            "border: 1px solid #E2E8F0; border-radius: 9px; }"
+        )
+
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(14, 10, 14, 10)
+        inner.setSpacing(2)
+
+        value_label = QLabel(value)
+        value_label.setStyleSheet(
+            f"font-size: 20px; font-weight: 700; color: {color};"
+        )
+        inner.addWidget(value_label)
+
+        name = QLabel(label)
+        name.setStyleSheet(
+            "color: #0F172A; font-size: 11px; font-weight: 700;"
+        )
+        inner.addWidget(name)
+
+        sub = QLabel(hint)
+        sub.setStyleSheet("color: #94A3B8; font-size: 9px;")
+        inner.addWidget(sub)
+
+        return card
+
+    def _refresh_summary(self, documents: List[DocumentModel]) -> None:
+        while self.summary_row.count():
+            item = self.summary_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        open_docs = [d for d in documents if not d.is_closed]
+        open_streams = sum(d.active_branch_count for d in documents)
+        open_items = sum(d.open_work_item_count for d in documents)
+        overdue = sum(
+            1 for d in open_docs if d.deadline_state == "overdue"
+        )
+
+        cards = [
+            ("Open Documents", str(len(open_docs)), "not yet closed", "#0369A1"),
+            ("Open Workstreams", str(open_streams), "across all documents", "#1D4ED8"),
+            ("Open Work Items", str(open_items), "individual assignments", "#B45309"),
+            ("Overdue", str(overdue), "past their deadline", "#B91C1C"),
+            ("Closed", str(len(documents) - len(open_docs)), "closed by DS", "#166534"),
+        ]
+
+        for label, value, hint, color in cards:
+            self.summary_row.addWidget(
+                self._summary_card(label, value, hint, color)
             )
 
-            document_id = document.id
+        self.summary_row.addStretch()
 
-            status_str = (
-                document.status or ""
-            ).lower()
+    # ------------------------------------------------------------------
+    # Document cards
+    # ------------------------------------------------------------------
 
+    @staticmethod
+    def _badge(
+        text: str,
+        background: str,
+        foreground: str = "#0F172A",
+        border: Optional[str] = None,
+    ) -> QLabel:
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            "QLabel { "
+            f"background: {background}; color: {foreground}; "
+            "padding: 5px 10px; border-radius: 11px; "
+            f"border: 1px solid {border or background}; "
+            "font-size: 10px; font-weight: 700; }"
+        )
+        return label
+
+    def _priority_badge(self, doc: DocumentModel) -> QLabel:
+        priority = str(doc.priority or "MEDIUM").upper()
+        styles = {
+            "CRITICAL": ("#FEE2E2", "#B91C1C", "#FECACA"),
+            "HIGH": ("#FFEDD5", "#C2410C", "#FED7AA"),
+            "MEDIUM": ("#FEF3C7", "#B45309", "#FDE68A"),
+            "LOW": ("#DCFCE7", "#166534", "#BBF7D0"),
+        }
+        bg, fg, border = styles.get(
+            priority, ("#F1F5F9", "#475569", "#E2E8F0")
+        )
+        return self._badge(priority.title(), bg, fg, border)
+
+    def _lifecycle_badge(self, doc: DocumentModel) -> QLabel:
+        lifecycle = str(doc.lifecycle or "RECEIVED").upper()
+        styles = {
+            "RECEIVED": ("#F1F5F9", "#475569"),
+            "REGISTERED": ("#CCFBF1", "#0F766E"),
+            "IN_REVIEW": ("#EDE9FE", "#6D28D9"),
+            "IN_WORK": ("#DBEAFE", "#1D4ED8"),
+            "WITH_DS": ("#FEF3C7", "#B45309"),
+            "CLOSED": ("#DCFCE7", "#166534"),
+        }
+        bg, fg = styles.get(lifecycle, ("#F1F5F9", "#475569"))
+        return self._badge(doc.lifecycle_label or lifecycle.title(), bg, fg)
+
+    def _stage_badge(self, stage: str, active: bool = True) -> QLabel:
+        value = (stage or "Not specified").strip()
+        lower = value.lower()
+
+        if "complete" in lower or "closed" in lower:
+            bg, fg = "#DCFCE7", "#166534"
+        elif "return" in lower or "waiting" in lower or "overdue" in lower:
+            bg, fg = "#FEF3C7", "#92400E"
+        elif "review" in lower:
+            bg, fg = "#EDE9FE", "#6D28D9"
+        elif "progress" in lower or "work" in lower:
+            bg, fg = "#DBEAFE", "#1D4ED8"
+        elif not active:
+            bg, fg = "#F1F5F9", "#64748B"
         else:
-            reference = (
-                document.get(
-                    "reference",
-                    "Document",
-                )
-            )
+            bg, fg = "#F1F5F9", "#475569"
 
-            document_id = document.get("id")
+        return self._badge(value, bg, fg)
 
-            status_str = (
-                document.get(
-                    "status",
-                    "",
-                )
-                or ""
-            ).lower()
+    def _small_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            "color: #64748B; font-size: 10px; font-weight: 600;"
+        )
+        return label
 
-        from services.notification_service import (
-            notification_service,
+    def _value_label(self, text: str, bold: bool = False) -> QLabel:
+        label = QLabel(text or "—")
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            "color: #0F172A; "
+            f"font-size: 11px; font-weight: {'700' if bold else '500'};"
+        )
+        return label
+
+    def _document_card(self, doc: DocumentModel) -> QFrame:
+        expanded = doc.id in self._expanded_ids
+
+        card = QFrame()
+        card.setObjectName("documentCard")
+        card.setStyleSheet(
+            "QFrame#documentCard { background: #FFFFFF; "
+            "border: 1px solid #DCE5F0; border-radius: 10px; }"
+            "QFrame#documentCard:hover { border: 1px solid #93C5FD; }"
         )
 
-        recipient = (
-            notification_service.send_action_reminder(
-                document_id
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(9)
+
+        # Header row
+        header = QHBoxLayout()
+        header.setSpacing(10)
+
+        expand = QToolButton()
+        expand.setText("⌄" if expanded else "›")
+        expand.setCheckable(True)
+        expand.setChecked(expanded)
+        expand.setFixedSize(28, 28)
+        expand.setStyleSheet(
+            "QToolButton { border: none; color: #1D4ED8; "
+            "font-size: 22px; font-weight: 700; }"
+            "QToolButton:hover { background: #EFF6FF; border-radius: 14px; }"
+        )
+        expand.clicked.connect(
+            lambda checked, d=doc: self._toggle_document(d)
+        )
+        header.addWidget(expand)
+
+        icon = QLabel("▤")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet(
+            "color: #2563EB; font-size: 21px; font-weight: 700;"
+        )
+        header.addWidget(icon)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
+
+        ref = QLabel(doc.reference)
+        ref.setStyleSheet(
+            "color: #334155; font-size: 10px; font-weight: 700;"
+        )
+        title_box.addWidget(ref)
+
+        title = QLabel(doc.subject or doc.title or "Untitled document")
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            "color: #0F172A; font-size: 13px; font-weight: 700;"
+        )
+        title_box.addWidget(title)
+
+        meta_parts = []
+        if doc.source:
+            meta_parts.append(f"From: {doc.source}")
+        if doc.received_display:
+            meta_parts.append(f"Received: {doc.received_display}")
+
+        if meta_parts:
+            meta = QLabel("  •  ".join(meta_parts))
+            meta.setStyleSheet("color: #64748B; font-size: 9px;")
+            title_box.addWidget(meta)
+
+        header.addLayout(title_box, 4)
+
+        header.addWidget(self._priority_badge(doc))
+        header.addWidget(self._lifecycle_badge(doc))
+
+        stream_box = QVBoxLayout()
+        stream_box.setSpacing(0)
+        stream_count = QLabel(str(len(doc.branch_summaries)))
+        stream_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        stream_count.setStyleSheet(
+            "color: #1D4ED8; font-size: 15px; font-weight: 700;"
+        )
+        stream_box.addWidget(stream_count)
+
+        stream_label = QLabel(
+            "Workstream" if len(doc.branch_summaries) == 1 else "Workstreams"
+        )
+        stream_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        stream_label.setStyleSheet("color: #64748B; font-size: 9px;")
+        stream_box.addWidget(stream_label)
+
+        stream_widget = QWidget()
+        stream_widget.setLayout(stream_box)
+        header.addWidget(stream_widget)
+
+        deadline_box = QVBoxLayout()
+        deadline_box.setSpacing(1)
+
+        deadline_title = QLabel(
+            "Deadline" if doc.deadline else "Deadline"
+        )
+        deadline_title.setStyleSheet(
+            "color: #64748B; font-size: 9px; font-weight: 600;"
+        )
+        deadline_box.addWidget(deadline_title)
+
+        deadline = QLabel(doc.deadline_display if doc.deadline else "—")
+        deadline.setStyleSheet(
+            f"color: {doc.deadline_color if doc.deadline else '#475569'}; "
+            "font-size: 10px; font-weight: 700;"
+        )
+        deadline_box.addWidget(deadline)
+
+        if doc.deadline_label:
+            state = QLabel(doc.deadline_label)
+            state.setStyleSheet(
+                f"color: {doc.deadline_color}; font-size: 8px;"
             )
+            deadline_box.addWidget(state)
+
+        deadline_widget = QWidget()
+        deadline_widget.setLayout(deadline_box)
+        header.addWidget(deadline_widget)
+
+        updated_box = QVBoxLayout()
+        updated_box.setSpacing(1)
+
+        updated_label = QLabel("Last updated")
+        updated_label.setStyleSheet(
+            "color: #64748B; font-size: 9px; font-weight: 600;"
+        )
+        updated_box.addWidget(updated_label)
+
+        updated = QLabel(doc.updated_display or "—")
+        updated.setStyleSheet(
+            "color: #334155; font-size: 9px; font-weight: 600;"
+        )
+        updated_box.addWidget(updated)
+
+        updated_widget = QWidget()
+        updated_widget.setLayout(updated_box)
+        header.addWidget(updated_widget)
+
+        open_btn = QPushButton("Open")
+        open_btn.setFixedHeight(34)
+        open_btn.setMinimumWidth(76)
+        open_btn.setStyleSheet(
+            "QPushButton { background: #2563EB; color: white; "
+            "border: none; border-radius: 6px; padding: 5px 14px; "
+            "font-weight: 700; font-size: 10px; }"
+            "QPushButton:hover { background: #1D4ED8; }"
+        )
+        open_btn.clicked.connect(lambda _, d=doc: self.open_document(d))
+        header.addWidget(open_btn)
+
+        outer.addLayout(header)
+
+        if expanded:
+            outer.addWidget(self._expanded_document_content(doc))
+
+        return card
+
+    def _section_card(self, title: str) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("innerCard")
+        frame.setStyleSheet(
+            "QFrame#innerCard { background: #F8FAFC; "
+            "border: 1px solid #E2E8F0; border-radius: 8px; }"
         )
 
-        if not recipient:
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(7)
 
-            if status_str == "closed":
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            "color: #0F172A; font-size: 11px; font-weight: 700;"
+        )
+        layout.addWidget(heading)
 
-                QMessageBox.information(
-                    self,
-                    "Document Closed",
-                    (
-                        f"Document {reference} is finalized "
-                        "and closed. Action reminders cannot "
-                        "be sent for closed documents."
-                    ),
+        return frame
+
+    def _expanded_document_content(self, doc: DocumentModel) -> QWidget:
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(8, 2, 8, 2)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        # Document details
+        details = self._section_card("Document Details")
+        dl = details.layout()
+
+        detail_rows = [
+            ("Reference", doc.reference),
+            ("Title / Subject", doc.subject or doc.title),
+            ("Source", doc.source or "—"),
+            ("Sender", doc.sender_name or "—"),
+            ("Received", doc.received_display or "—"),
+            ("Priority", str(doc.priority or "—").title()),
+            ("Lifecycle", doc.lifecycle_label or doc.lifecycle),
+            ("Deadline", doc.deadline_display if doc.deadline else "—"),
+            ("Last update", doc.updated_display or "—"),
+        ]
+
+        for name, value in detail_rows:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            lab = QLabel(name)
+            lab.setFixedWidth(92)
+            lab.setStyleSheet("color: #64748B; font-size: 9px;")
+            val = self._value_label(value, bold=True)
+            row.addWidget(lab)
+            row.addWidget(val, 1)
+            dl.addLayout(row)
+
+        grid.addWidget(details, 0, 0)
+
+        # Workstreams
+        workstreams = self._section_card("Workstreams & Current Stage")
+        wl = workstreams.layout()
+
+        branches = list(doc.branch_summaries or [])
+        if not branches:
+            note = QLabel("No workstreams have been created yet.")
+            note.setStyleSheet("color: #94A3B8; font-size: 10px;")
+            wl.addWidget(note)
+        else:
+            for summary in branches:
+                branch_frame = QFrame()
+                branch_frame.setStyleSheet(
+                    "QFrame { background: white; border: 1px solid #E2E8F0; "
+                    "border-radius: 7px; }"
                 )
+                bl = QVBoxLayout(branch_frame)
+                bl.setContentsMargins(9, 8, 9, 8)
+                bl.setSpacing(4)
 
+                top = QHBoxLayout()
+                branch_name = QLabel(
+                    summary.label or summary.branch_type or "Workstream"
+                )
+                branch_name.setStyleSheet(
+                    "color: #0F172A; font-size: 10px; font-weight: 700;"
+                )
+                top.addWidget(branch_name)
+                top.addStretch()
+                top.addWidget(
+                    self._stage_badge(
+                        summary.stage_label or summary.stage,
+                        summary.is_active,
+                    )
+                )
+                bl.addLayout(top)
+
+                people = ", ".join(summary.people or [])
+                if people:
+                    p = QLabel(f"People: {people}")
+                    p.setWordWrap(True)
+                    p.setStyleSheet("color: #64748B; font-size: 9px;")
+                    bl.addWidget(p)
+
+                if summary.open_items or summary.total_items:
+                    count = QLabel(
+                        f"{summary.open_items} open work item"
+                        f"{'' if summary.open_items == 1 else 's'}"
+                        f"  •  {summary.total_items} total"
+                    )
+                    count.setStyleSheet(
+                        "color: #64748B; font-size: 8px;"
+                    )
+                    bl.addWidget(count)
+
+                wl.addWidget(branch_frame)
+
+        grid.addWidget(workstreams, 0, 1)
+
+        # People / individual work
+        people_card = self._section_card("People & Individual Work")
+        pl = people_card.layout()
+
+        work_items = list(doc.all_work_items or [])
+        if not work_items:
+            people = list(doc.people_involved or [])
+            if people:
+                for person in people:
+                    p = QLabel(f"• {person}")
+                    p.setStyleSheet(
+                        "color: #334155; font-size: 10px;"
+                    )
+                    pl.addWidget(p)
             else:
-
-                QMessageBox.warning(
-                    self,
-                    "No Recipient Available",
-                    (
-                        f"No downstream reminder recipient "
-                        f"is currently available for document "
-                        f"{reference}. Please route the document "
-                        "to a department or assign an employee first."
-                    ),
+                note = QLabel("No individual work items yet.")
+                note.setStyleSheet(
+                    "color: #94A3B8; font-size: 10px;"
                 )
+                pl.addWidget(note)
+        else:
+            for item in work_items:
+                person_frame = QFrame()
+                person_frame.setStyleSheet(
+                    "QFrame { background: white; border: 1px solid #E2E8F0; "
+                    "border-radius: 7px; }"
+                )
+                il = QVBoxLayout(person_frame)
+                il.setContentsMargins(9, 8, 9, 8)
+                il.setSpacing(4)
 
+                top = QHBoxLayout()
+
+                person_name = QLabel(
+                    item.assignee_name or "Unassigned"
+                )
+                person_name.setStyleSheet(
+                    "color: #0F172A; font-size: 10px; font-weight: 700;"
+                )
+                top.addWidget(person_name)
+                top.addStretch()
+                top.addWidget(
+                    self._stage_badge(
+                        item.stage_label or item.stage,
+                        item.is_active,
+                    )
+                )
+                il.addLayout(top)
+
+                role_parts = [
+                    x for x in (
+                        item.context_type,
+                        item.department_name,
+                        item.team_name,
+                    ) if x
+                ]
+                if role_parts:
+                    role = QLabel(" • ".join(role_parts))
+                    role.setWordWrap(True)
+                    role.setStyleSheet(
+                        "color: #64748B; font-size: 8px;"
+                    )
+                    il.addWidget(role)
+
+                if item.instructions:
+                    instructions = QLabel(
+                        f"Assignment: {item.instructions}"
+                    )
+                    instructions.setWordWrap(True)
+                    instructions.setStyleSheet(
+                        "color: #475569; font-size: 9px;"
+                    )
+                    il.addWidget(instructions)
+
+                if item.latest_progress_text:
+                    progress = QLabel(
+                        f"Latest progress: {item.latest_progress_text}"
+                    )
+                    progress.setWordWrap(True)
+                    progress.setStyleSheet(
+                        "color: #334155; font-size: 9px;"
+                    )
+                    il.addWidget(progress)
+
+                attachment_text = ""
+                if item.attachment_count:
+                    attachment_text = (
+                        f"Attachments: {item.attachment_count}"
+                    )
+
+                if attachment_text:
+                    attach = QLabel(f"📎 {attachment_text}")
+                    attach.setStyleSheet(
+                        "color: #1D4ED8; font-size: 8px; font-weight: 600;"
+                    )
+                    il.addWidget(attach)
+
+                if item.last_update_at:
+                    update = QLabel(
+                        f"Updated: {item.last_update_at}"
+                    )
+                    update.setStyleSheet(
+                        "color: #94A3B8; font-size: 8px;"
+                    )
+                    il.addWidget(update)
+
+                pl.addWidget(person_frame)
+
+        grid.addWidget(people_card, 0, 2)
+
+        # Recent Director remark / workflow information
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+
+        if doc.latest_director_remark:
+            remark = self._section_card("Latest Director Remark")
+            rl = remark.layout()
+
+            rtext = QLabel(doc.latest_director_remark)
+            rtext.setWordWrap(True)
+            rtext.setStyleSheet(
+                "color: #334155; font-size: 9px; line-height: 1.4;"
+            )
+            rl.addWidget(rtext)
+            bottom.addWidget(remark, 2)
+
+        history = self._section_card("Workflow Snapshot")
+        hl = history.layout()
+
+        history_items = list(doc.history or [])
+        if history_items:
+            for event in history_items[-4:][::-1]:
+                line = QFrame()
+                ll = QHBoxLayout(line)
+                ll.setContentsMargins(0, 2, 0, 2)
+                ll.setSpacing(6)
+
+                dot = QLabel("●")
+                dot.setStyleSheet("color: #2563EB; font-size: 7px;")
+                ll.addWidget(dot)
+
+                text = QLabel(
+                    f"{event.summary or event.event_type}  "
+                    f"— {event.actor_name or 'System'}"
+                )
+                text.setWordWrap(True)
+                text.setStyleSheet(
+                    "color: #475569; font-size: 8px;"
+                )
+                ll.addWidget(text, 1)
+                hl.addWidget(line)
+        else:
+            note = QLabel("No workflow history available.")
+            note.setStyleSheet("color: #94A3B8; font-size: 9px;")
+            hl.addWidget(note)
+
+        bottom.addWidget(history, 3)
+
+        bottom_widget = QWidget()
+        bottom_widget.setLayout(bottom)
+        grid.addWidget(bottom_widget, 1, 0, 1, 3)
+
+        # Action row
+        actions = QHBoxLayout()
+        actions.addStretch()
+
+        open_full = QPushButton("Open Full Document")
+        open_full.setMinimumHeight(34)
+        open_full.setStyleSheet(
+            "QPushButton { background: #0F172A; color: white; "
+            "border: none; border-radius: 6px; padding: 6px 15px; "
+            "font-weight: 700; font-size: 10px; }"
+            "QPushButton:hover { background: #1E293B; }"
+        )
+        open_full.clicked.connect(lambda _, d=doc: self.open_document(d))
+        actions.addWidget(open_full)
+
+        workflow_btn = QPushButton("View Workflow")
+        workflow_btn.setMinimumHeight(34)
+        workflow_btn.setStyleSheet(
+            "QPushButton { background: #EFF6FF; color: #1D4ED8; "
+            "border: 1px solid #BFDBFE; border-radius: 6px; "
+            "padding: 6px 15px; font-weight: 700; font-size: 10px; }"
+            "QPushButton:hover { background: #DBEAFE; }"
+        )
+        workflow_btn.clicked.connect(
+            lambda _, d=doc: self.open_document(d)
+        )
+        actions.addWidget(workflow_btn)
+
+        grid.addLayout(actions, 2, 0, 1, 3)
+
+        return content
+
+    def _toggle_document(self, doc: DocumentModel) -> None:
+        if doc.id in self._expanded_ids:
+            self._expanded_ids.remove(doc.id)
+        else:
+            self._expanded_ids.add(doc.id)
+        self.apply_filters()
+
+    # ------------------------------------------------------------------
+    # Loading / filtering
+    # ------------------------------------------------------------------
+
+    def load_documents(self) -> None:
+        try:
+            self.documents = document_service.get_documents()
+        except Exception as exc:
+            self.documents = []
+            QMessageBox.warning(
+                self, "Documents", f"Could not load documents.\n{exc}"
+            )
+
+        context_label = ""
+        try:
+            ctype = context_manager.active_context_type(self.user_role)
+            dept = context_manager.active_department_name()
+            context_label = f"{ctype}" + (f" - {dept}" if dept else "")
+        except Exception:
+            pass
+
+        self.subtitle.setText(
+            f"Working as: {context_label}. "
+            "Each document can contain multiple workstreams, with each "
+            "branch and individual work item at its own stage."
+            if context_label
+            else
+            "Each document can contain multiple workstreams, with each "
+            "branch and individual work item at its own stage."
+        )
+
+        self._refresh_summary(self.documents)
+        self.apply_filters()
+
+    def _sort_documents(
+        self, documents: List[DocumentModel]
+    ) -> List[DocumentModel]:
+        mode = self.sort_filter.currentData()
+
+        if mode == "deadline":
+            return sorted(
+                documents,
+                key=lambda d: (
+                    d.deadline is None,
+                    d.deadline or "9999-12-31",
+                ),
+            )
+
+        if mode == "priority":
+            order = {
+                "CRITICAL": 0,
+                "HIGH": 1,
+                "MEDIUM": 2,
+                "LOW": 3,
+            }
+            return sorted(
+                documents,
+                key=lambda d: order.get(
+                    str(d.priority).upper(), 9
+                ),
+            )
+
+        if mode == "reference":
+            return sorted(
+                documents,
+                key=lambda d: d.reference.lower()
+            )
+
+        return sorted(
+            documents,
+            key=lambda d: d.updated_at or "",
+            reverse=True,
+        )
+
+    def apply_filters(self) -> None:
+        text = self.search.text().strip().lower()
+        lifecycle = self.lifecycle_filter.currentData()
+        priority = self.priority_filter.currentData()
+        deadline = self.deadline_filter.currentData()
+        mine_only = bool(self.mine_only.currentData())
+
+        user = None
+        try:
+            user = auth_service.get_current_user()
+        except Exception:
+            pass
+
+        user_id = user.id if user else None
+        context_id = None
+
+        try:
+            context_id = context_manager.active_membership_id()
+        except Exception:
+            pass
+
+        results: List[DocumentModel] = []
+
+        for doc in self.documents:
+            if lifecycle and doc.lifecycle != lifecycle:
+                continue
+
+            if priority and str(doc.priority).upper() != priority:
+                continue
+
+            if deadline and doc.deadline_state != deadline:
+                continue
+
+            if mine_only:
+                mine = [
+                    w
+                    for w in doc.work_items_for_user(
+                        user_id, context_id
+                    )
+                    if not w.is_finished
+                ]
+                if not mine and not doc.my_work_items:
+                    continue
+
+            if text:
+                haystack = " ".join(
+                    filter(
+                        None,
+                        [
+                            doc.reference,
+                            doc.title,
+                            doc.subject,
+                            doc.sender_name,
+                            doc.source,
+                            " ".join(doc.people_involved),
+                            " ".join(doc.branch_stage_lines),
+                            " ".join(
+                                w.latest_progress_text or ""
+                                for w in doc.all_work_items
+                            ),
+                        ],
+                    )
+                ).lower()
+
+                if text not in haystack:
+                    continue
+
+            results.append(doc)
+
+        results = self._sort_documents(results)
+
+        # Rebuild cards.
+        while self.card_layout.count():
+            item = self.card_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        for doc in results:
+            self.card_layout.addWidget(self._document_card(doc))
+
+        self.card_layout.addStretch()
+
+        self.result_count.setText(
+            f"{len(results)} document{'s' if len(results) != 1 else ''} found"
+        )
+
+        self.empty_note.setVisible(not results)
+        self.scroll.setVisible(bool(results))
+
+        self.empty_note.setText(
+            "No documents match these filters."
+            if self.documents
+            else
+            "No documents are visible in this work context yet."
+        )
+
+    def clear_filters(self) -> None:
+        self.search.clear()
+        self.lifecycle_filter.setCurrentIndex(0)
+        self.priority_filter.setCurrentIndex(0)
+        self.deadline_filter.setCurrentIndex(0)
+        self.mine_only.setCurrentIndex(0)
+        self.sort_filter.setCurrentIndex(0)
+        self.apply_filters()
+
+    def set_filters(self, **filters) -> None:
+        """Compatibility helper used by MainWindow navigation."""
+        mapping = {
+            "lifecycle": self.lifecycle_filter,
+            "priority": self.priority_filter,
+            "deadline": self.deadline_filter,
+        }
+
+        if "search" in filters:
+            self.search.setText(str(filters["search"] or ""))
+
+        for key, combo in mapping.items():
+            if key not in filters:
+                continue
+            wanted = filters[key]
+            for index in range(combo.count()):
+                if combo.itemData(index) == wanted:
+                    combo.setCurrentIndex(index)
+                    break
+
+        self.apply_filters()
+
+    # ------------------------------------------------------------------
+    # Open document
+    # ------------------------------------------------------------------
+
+    def open_document(self, document: Optional[DocumentModel] = None) -> None:
+        doc = document
+
+        if doc is None:
+            QMessageBox.information(
+                self,
+                "Documents",
+                "Select or open a document first.",
+            )
             return
 
-        QMessageBox.information(
-            self,
-            "Action Reminder Dispatched",
-            (
-                "Official deadline reminder successfully "
-                f"dispatched to {recipient['user_name']} "
-                f"({recipient['role']}) for {reference}."
-            ),
-        )
-        
+        self._show_document(doc, self.user_role)
+
+    def view_document(self, *args) -> None:
+        self.open_document()
+
+    def on_document_selected(self, *args) -> None:
+        pass
+
+    def _show_document(self, doc, role: str) -> None:
+        """Hand the document to the application shell."""
+        from services.document_service import document_service as _docs
+
+        full = _docs.get_document(doc.id) or doc
+        self.view_requested.emit(full, role)
+
+    def _on_workflow_changed(self, *_) -> None:
+        self.load_documents()

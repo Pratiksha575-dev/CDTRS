@@ -1,235 +1,290 @@
 {
   "departments": [
-    { "name": "PSTD", "code": "PSTD" },
-    { "name": "FCTD", "code": "FCTD" },
-    { "name": "DS", "code": "DS" },
-    { "name": "ESFS", "code": "ESFS" },
-    { "name": "CEC", "code": "CEC" },
-    { "name": "CER", "code": "CER" },
-    { "name": "MBT", "code": "MBT" },
-    { "name": "P&TC", "code": "PTC" },
-    { "name": "PC", "code": "PC" },
-    { "name": "C&IT", "code": "CIT" },
-    { "name": "MMG_STORES", "code": "MMG_STORES" },
-    { "name": "TM", "code": "TM" },
-    { "name": "ADMIN", "code": "ADMIN" },
-    { "name": "ACCT", "code": "ACCT" },
-    { "name": "MISC", "code": "MISC" }
+    {
+      "name": "Product Strategy",
+      "code": "PROD"
+    },
+    {
+      "name": "Engineering & Innovation",
+      "code": "ENG"
+    },
+    {
+      "name": "Executive Office",
+      "code": "EXEC"
+    },
+    {
+      "name": "Enterprise Solutions",
+      "code": "ENT"
+    },
+    {
+      "name": "Customer Experience",
+      "code": "CX"
+    },
+    {
+      "name": "Corporate Research",
+      "code": "CR"
+    },
+    {
+      "name": "Market & Business Transformation",
+      "code": "MBT"
+    },
+    {
+      "name": "Partnerships & Technology",
+      "code": "PTN"
+    },
+    {
+      "name": "Product Consulting",
+      "code": "CONS"
+    },
+    {
+      "name": "Information Technology",
+      "code": "TECH"
+    },
+    {
+      "name": "Operations & Procurement",
+      "code": "OPS"
+    },
+    {
+      "name": "Talent Management",
+      "code": "TALENT"
+    },
+    {
+      "name": "Corporate Administration",
+      "code": "CORP"
+    },
+    {
+      "name": "Finance & Accounts",
+      "code": "FIN"
+    },
+    {
+      "name": "Business Support",
+      "code": "SUPPORT"
+    }
   ],
-
   "system_users": [
     {
-      "username": "admin",
+      "username": "corp",
       "employee_code": "ADM-001",
       "role": "ADMIN",
       "full_name": "System Administrator",
-      "email": "admin@cdtrs.gov.in",
-      "outlook_email": "admin@outlook.com",
-      "gov_email": "admin@nic.in",
-      "department": "ADMIN",
-      "managed_depts": ["*"],
+      "email": "admin@novacore.example",
+      "outlook_email": "admin@novacore.example",
+      "department": "CORP",
+      "managed_depts": [
+        "*"
+      ],
       "designation": "System & Network Administrator",
       "default_password": "cdtrs@admin",
       "contexts": [
         {
           "context": "ADMIN",
-          "department_code": "ADMIN"
+          "department_code": "CORP"
         }
       ]
     },
-
     {
       "username": "director",
       "employee_code": "DIR-001",
       "role": "DIRECTOR",
       "full_name": "Executive Director",
-      "email": "director@cdtrs.gov.in",
-      "outlook_email": "director@outlook.com",
-      "gov_email": "director@nic.in",
-      "department": "DS",
-      "managed_depts": ["*"],
-      "designation": "Executive Director / Outstanding Scientist",
+      "email": "director@novacore.example",
+      "outlook_email": "director@novacore.example",
+      "department": "EXEC",
+      "managed_depts": [
+        "*"
+      ],
+      "designation": "Executive Director",
       "default_password": "cdtrs@director",
       "contexts": [
         {
           "context": "DIRECTOR",
-          "department_code": "DS"
+          "department_code": "EXEC"
         }
       ]
     },
-
     {
-      "username": "ds_user",
-      "employee_code": "DS-001",
+      "username": "exec_user",
+      "employee_code": "EXEC-001",
       "role": "DS",
       "full_name": "Director Secretary",
-      "email": "ds.office@cdtrs.gov.in",
-      "outlook_email": "ds.office@outlook.com",
-      "gov_email": "ds.office@nic.in",
-      "department": "DS",
-      "managed_depts": ["DS"],
-      "designation": "Principal Private Secretary (PPS) to Director",
+      "email": "ds.office@novacore.example",
+      "outlook_email": "ds.office@novacore.example",
+      "department": "EXEC",
+      "managed_depts": [
+        "EXEC"
+      ],
+      "designation": "Executive Assistant to Executive Director",
       "default_password": "cdtrs@ds",
       "contexts": [
         {
           "context": "DS",
-          "department_code": "DS"
+          "department_code": "EXEC"
         }
       ]
     },
-
     {
       "username": "tso_user",
-      "employee_code": "TSO-FCTD-001",
+      "employee_code": "TSO-ENG-001",
       "role": "TSO",
       "full_name": "Technical Staff Officer",
-      "email": "tso.director@cdtrs.gov.in",
-      "outlook_email": "tso.director@outlook.com",
-      "gov_email": "tso.director@nic.in",
-      "department": "FCTD",
-      "managed_depts": ["DS", "FCTD"],
-      "designation": "TSO to Director / Scientist 'E' (FCTD)",
+      "email": "tso.director@novacore.example",
+      "outlook_email": "tso.director@novacore.example",
+      "department": "ENG",
+      "managed_depts": [
+        "EXEC",
+        "ENG"
+      ],
+      "designation": "Executive Office Technical Coordinator",
       "default_password": "cdtrs@tso",
       "contexts": [
         {
           "context": "TSO",
-          "department_code": "DS"
+          "department_code": "EXEC"
         },
         {
           "context": "EMPLOYEE",
-          "department_code": "FCTD"
+          "department_code": "ENG"
         }
       ]
     },
-
     {
-      "username": "hod_pstd",
-      "employee_code": "HOD-PSTD-001",
+      "username": "hod_prod",
+      "employee_code": "HOD-PROD-001",
       "role": "HOD",
       "full_name": "Dr. A. K. Verma",
-      "email": "hod.pstd@cdtrs.gov.in",
-      "outlook_email": "hod.pstd@outlook.com",
-      "gov_email": "hod.pstd@nic.in",
-      "department": "PSTD",
-      "managed_depts": ["PSTD", "ESFS"],
-      "designation": "Scientist 'G' / Head of Division (PSTD & ESFS)",
+      "email": "hod.pstd@novacore.example",
+      "outlook_email": "hod.pstd@novacore.example",
+      "department": "PROD",
+      "managed_depts": [
+        "PROD",
+        "ENT"
+      ],
+      "designation": "Senior Department Head (PSTD & ESFS)",
       "default_password": "cdtrs@hod",
       "contexts": [
         {
           "context": "HOD",
-          "department_code": "PSTD"
+          "department_code": "PROD"
         },
         {
           "context": "HOD",
-          "department_code": "ESFS"
+          "department_code": "ENT"
         }
       ]
     },
-
     {
-      "username": "hod_fctd",
-      "employee_code": "HOD-FCTD-001",
+      "username": "hod_eng",
+      "employee_code": "HOD-ENG-001",
       "role": "HOD",
       "full_name": "Dr. S. R. Kulkarni",
-      "email": "hod.fctd@cdtrs.gov.in",
-      "outlook_email": "hod.fctd@outlook.com",
-      "gov_email": "hod.fctd@nic.in",
-      "department": "FCTD",
-      "managed_depts": ["FCTD", "CEC"],
-      "designation": "Scientist 'G' / Head of Division (FCTD & CEC)",
+      "email": "hod.fctd@novacore.example",
+      "outlook_email": "hod.fctd@novacore.example",
+      "department": "ENG",
+      "managed_depts": [
+        "ENG",
+        "CX"
+      ],
+      "designation": "Senior Department Head (FCTD & CEC)",
       "default_password": "cdtrs@hod",
       "contexts": [
         {
           "context": "HOD",
-          "department_code": "FCTD"
+          "department_code": "ENG"
         },
         {
           "context": "HOD",
-          "department_code": "CEC"
+          "department_code": "CX"
         }
       ]
     },
-
     {
       "username": "hod_cit",
       "employee_code": "HOD-CIT-001",
       "role": "HOD",
       "full_name": "Dr. Manish Tandon",
-      "email": "hod.cit@cdtrs.gov.in",
-      "outlook_email": "hod.cit@outlook.com",
-      "gov_email": "hod.cit@nic.in",
-      "department": "C&IT",
-      "managed_depts": ["C&IT", "TM"],
-      "designation": "Scientist 'F' / Head C&IT & Technology Management",
+      "email": "hod.cit@novacore.example",
+      "outlook_email": "hod.cit@novacore.example",
+      "department": "TECH",
+      "managed_depts": [
+        "TECH",
+        "TALENT"
+      ],
+      "designation": "Senior Technology & Operations Head",
       "default_password": "cdtrs@hod",
       "contexts": [
         {
           "context": "HOD",
-          "department_code": "CIT"
+          "department_code": "TECH"
         },
         {
           "context": "HOD",
-          "department_code": "TM"
+          "department_code": "TALENT"
         }
       ]
     },
-
     {
-      "username": "hod_admin",
+      "username": "hod_corp",
       "employee_code": "HOD-ADM-001",
       "role": "HOD",
       "full_name": "Shri R. C. Meena",
-      "email": "hod.admin@cdtrs.gov.in",
-      "outlook_email": "hod.admin@outlook.com",
-      "gov_email": "hod.admin@nic.in",
-      "department": "ADMIN",
-      "managed_depts": ["ADMIN", "ACCT", "MISC", "MMG_STORES"],
-      "designation": "Senior Administrative Officer / Head Admin",
+      "email": "hod.admin@novacore.example",
+      "outlook_email": "hod.admin@novacore.example",
+      "department": "CORP",
+      "managed_depts": [
+        "CORP",
+        "FIN",
+        "SUPPORT",
+        "OPS"
+      ],
+      "designation": "Corporate Administration Head",
       "default_password": "cdtrs@hod",
       "contexts": [
         {
           "context": "HOD",
-          "department_code": "ADMIN"
+          "department_code": "CORP"
         },
         {
           "context": "HOD",
-          "department_code": "ACCT"
+          "department_code": "FIN"
         },
         {
           "context": "HOD",
-          "department_code": "MISC"
+          "department_code": "SUPPORT"
         },
         {
           "context": "HOD",
-          "department_code": "MMG_STORES"
+          "department_code": "OPS"
         }
       ]
     },
-
     {
       "username": "hod_ptc",
       "employee_code": "HOD-PTC-001",
       "role": "HOD",
       "full_name": "Dr. Vandana Rao",
-      "email": "hod.ptc@cdtrs.gov.in",
-      "outlook_email": "hod.ptc@outlook.com",
-      "gov_email": "hod.ptc@nic.in",
-      "department": "P&TC",
-      "managed_depts": ["P&TC", "PC", "CER", "MBT"],
-      "designation": "Scientist 'G' / Head P&TC, PC & Research",
+      "email": "hod.ptc@novacore.example",
+      "outlook_email": "hod.ptc@novacore.example",
+      "department": "PTN",
+      "managed_depts": [
+        "PTN",
+        "CONS",
+        "CR",
+        "MBT"
+      ],
+      "designation": "Senior Product & Research Head",
       "default_password": "cdtrs@hod",
       "contexts": [
         {
           "context": "HOD",
-          "department_code": "PTC"
+          "department_code": "PTN"
         },
         {
           "context": "HOD",
-          "department_code": "PC"
+          "department_code": "CONS"
         },
         {
           "context": "HOD",
-          "department_code": "CER"
+          "department_code": "CR"
         },
         {
           "context": "HOD",
@@ -238,180 +293,176 @@
       ]
     }
   ],
-
   "employees": [
     {
-      "employee_code": "EMP-PSTD-001",
+      "employee_code": "EMP-PROD-001",
       "username": "emp_anil",
       "full_name": "Anil Kumar",
-      "department": "PSTD",
+      "department": "PROD",
       "managed_depts": [],
-      "designation": "Senior Technical Officer (Power Systems)",
-      "email": "anil.kumar@cdtrs.gov.in",
-      "outlook_email": "anil.kumar@outlook.com",
-      "gov_email": "anil.kumar@nic.in",
+      "designation": "Senior Technical Officer",
+      "email": "anil.kumar@novacore.example",
+      "outlook_email": "anil.kumar@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "PSTD"
+          "department_code": "PROD"
         }
       ]
     },
-
     {
-      "employee_code": "EMP-PSTD-002",
+      "employee_code": "EMP-PROD-002",
       "username": "emp_vikram",
       "full_name": "Vikram Malhotra",
-      "department": "PSTD",
-      "managed_depts": ["ESFS"],
-      "designation": "Technical Officer / Power Electronics",
-      "email": "vikram.malhotra@cdtrs.gov.in",
-      "outlook_email": "vikram.malhotra@outlook.com",
-      "gov_email": "vikram.malhotra@nic.in",
+      "department": "PROD",
+      "managed_depts": [
+        "ENT"
+      ],
+      "designation": "Technical Officer",
+      "email": "vikram.malhotra@novacore.example",
+      "outlook_email": "vikram.malhotra@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "PSTD"
+          "department_code": "PROD"
         },
         {
           "context": "HOD",
-          "department_code": "ESFS"
+          "department_code": "ENT"
         }
       ]
     },
-
     {
-      "employee_code": "EMP-FCTD-002",
+      "employee_code": "EMP-ENG-002",
       "username": "emp_sneha",
       "full_name": "Sneha Deshmukh",
-      "department": "FCTD",
-      "managed_depts": ["CEC"],
-      "designation": "Scientist 'D' (Electrochemical Systems)",
-      "email": "sneha.deshmukh@cdtrs.gov.in",
-      "outlook_email": "sneha.deshmukh@outlook.com",
-      "gov_email": "sneha.deshmukh@nic.in",
+      "department": "ENG",
+      "managed_depts": [
+        "CX"
+      ],
+      "designation": "Senior Engineering Specialist",
+      "email": "sneha.deshmukh@novacore.example",
+      "outlook_email": "sneha.deshmukh@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "FCTD"
+          "department_code": "ENG"
         },
         {
           "context": "HOD",
-          "department_code": "CEC"
+          "department_code": "CX"
         }
       ]
     },
-
     {
-      "employee_code": "EMP-FCTD-003",
+      "employee_code": "EMP-ENG-003",
       "username": "emp_rahul",
       "full_name": "Rahul Sharma",
-      "department": "FCTD",
-      "managed_depts": ["PSTD"],
-      "designation": "Scientist 'C' (Fuel Cells)",
-      "email": "rahul.sharma@cdtrs.gov.in",
-      "outlook_email": "rahul.sharma@outlook.com",
-      "gov_email": "rahul.sharma@nic.in",
+      "department": "ENG",
+      "managed_depts": [
+        "PROD"
+      ],
+      "designation": "Engineering Specialist",
+      "email": "rahul.sharma@novacore.example",
+      "outlook_email": "rahul.sharma@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "FCTD"
+          "department_code": "ENG"
         },
         {
           "context": "HOD",
-          "department_code": "PSTD"
+          "department_code": "PROD"
         }
       ]
     },
-
     {
       "employee_code": "EMP-CIT-001",
       "username": "emp_sunil",
       "full_name": "Sunil Gupta",
-      "department": "C&IT",
-      "managed_depts": ["TM"],
+      "department": "TECH",
+      "managed_depts": [
+        "TALENT"
+      ],
       "designation": "Network & Systems Engineer",
-      "email": "sunil.gupta@cdtrs.gov.in",
-      "outlook_email": "sunil.gupta@outlook.com",
-      "gov_email": "sunil.gupta@nic.in",
+      "email": "sunil.gupta@novacore.example",
+      "outlook_email": "sunil.gupta@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "CIT"
+          "department_code": "TECH"
         },
         {
           "context": "HOD",
-          "department_code": "TM"
+          "department_code": "TALENT"
         }
       ]
     },
-
     {
       "employee_code": "EMP-ADM-001",
       "username": "emp_pooja",
       "full_name": "Pooja Nair",
-      "department": "ADMIN",
-      "managed_depts": ["ACCT"],
+      "department": "CORP",
+      "managed_depts": [
+        "FIN"
+      ],
       "designation": "Assistant Administrative Officer",
-      "email": "pooja.nair@cdtrs.gov.in",
-      "outlook_email": "pooja.nair@outlook.com",
-      "gov_email": "pooja.nair@nic.in",
+      "email": "pooja.nair@novacore.example",
+      "outlook_email": "pooja.nair@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "ADMIN"
+          "department_code": "CORP"
         },
         {
           "context": "HOD",
-          "department_code": "ACCT"
+          "department_code": "FIN"
         }
       ]
     },
-
     {
-      "employee_code": "EMP-ACCT-001",
+      "employee_code": "EMP-FIN-001",
       "username": "emp_kamble",
       "full_name": "Kamble M. M.",
-      "department": "ACCT",
+      "department": "FIN",
       "managed_depts": [],
       "designation": "Senior Accounts Officer",
-      "email": "kamble.mm@cdtrs.gov.in",
-      "outlook_email": "kamble.mm@outlook.com",
-      "gov_email": "kamble.mm@nic.in",
+      "email": "kamble.mm@novacore.example",
+      "outlook_email": "kamble.mm@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "ACCT"
+          "department_code": "FIN"
         }
       ]
     },
-
     {
       "employee_code": "EMP-MMG-001",
       "username": "emp_rajesh",
       "full_name": "Rajesh Varma",
-      "department": "MMG_STORES",
-      "managed_depts": ["MISC"],
+      "department": "OPS",
+      "managed_depts": [
+        "SUPPORT"
+      ],
       "designation": "Stores & Material Management Officer",
-      "email": "rajesh.varma@cdtrs.gov.in",
-      "outlook_email": "rajesh.varma@outlook.com",
-      "gov_email": "rajesh.varma@nic.in",
+      "email": "rajesh.varma@novacore.example",
+      "outlook_email": "rajesh.varma@novacore.example",
       "default_password": "cdtrs@emp",
       "contexts": [
         {
           "context": "EMPLOYEE",
-          "department_code": "MMG_STORES"
+          "department_code": "OPS"
         },
         {
           "context": "HOD",
-          "department_code": "MISC"
+          "department_code": "SUPPORT"
         }
       ]
     }

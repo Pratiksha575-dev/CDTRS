@@ -1,101 +1,104 @@
 class Endpoints:
-    """
-    Centralized registry of backend API endpoint paths for CDTRS V2.
-    All paths are relative to the client base_url (/api/v1).
+    """Backend API paths, relative to the client base_url (/api/v1).
+
+    The shape mirrors the workflow model: documents carry a lifecycle,
+    branches are independent workstreams, and work items are one person's
+    work.
     """
 
-    # --- Authentication ---
+    # --- Authentication & work contexts ---
     AUTH_LOGIN = "/auth/login"
     AUTH_ME = "/auth/me"
-    AUTH_LOGOUT = "/auth/logout"
     AUTH_CHANGE_PASSWORD = "/auth/change-password"
-    AUTH_RESET_PASSWORD = "/auth/reset-password"
     AUTH_CONTEXTS = "/auth/contexts"
     AUTH_SWITCH_CONTEXT = "/auth/switch-context"
 
-    # --- Users & Departments ---
+    # --- Reference data ---
     USERS_LIST = "/users"
-    USER_DETAIL = lambda user_id: f"/users/{user_id}"
     DEPARTMENTS_LIST = "/departments"
-    DEPARTMENT_EMPLOYEES = lambda dept_id: f"/departments/{dept_id}/employees"
+    DEPARTMENT_EMPLOYEES = staticmethod(lambda dept_id: f"/departments/{dept_id}/employees")
     EMPLOYEES_LIST = "/employees"
-    ADMIN_TSO = "/admin/tso"
-    ADMIN_ACTIVATE_TSO = lambda user_id: f"/admin/tso/{user_id}/activate"
+    WORKFLOW_VOCABULARY = "/workflow/vocabulary"
 
-    # --- Mail & Intake Pipeline ---
+    # --- Intake ---
     INTAKE_LIST = "/intake"
     INTAKE_SYNC_OUTLOOK = "/intake/sync-outlook"
     INTAKE_MANUAL_UPLOAD = "/intake/manual-upload"
-    INTAKE_PROCESS = lambda intake_id: f"/intake/{intake_id}/process"
+    INTAKE_PROCESS = staticmethod(lambda intake_id: f"/intake/{intake_id}/process")
 
-    # --- Documents Lifecycle ---
-    DOCUMENTS_INBOX = "/documents/inbox"
+    # --- Documents ---
     DOCUMENTS_LIST = "/documents"
+    DOCUMENTS_INBOX = "/documents/inbox"
     DOCUMENT_CREATE = "/documents"
-    DOCUMENT_DETAIL = lambda doc_id: f"/documents/{doc_id}"
-    DOCUMENT_STATUS = lambda doc_id: f"/documents/{doc_id}/status"
-    DOCUMENT_CLOSE = lambda doc_id: f"/documents/{doc_id}/close"
-    DOCUMENT_REMIND = lambda doc_id: f"/documents/{doc_id}/remind"
+    DOCUMENT_DETAIL = staticmethod(lambda doc_id: f"/documents/{doc_id}")
+    DOCUMENT_UPDATE = staticmethod(lambda doc_id: f"/documents/{doc_id}")
+    DOCUMENT_REGISTER = staticmethod(lambda doc_id: f"/documents/{doc_id}/register")
+    DOCUMENT_CLOSE = staticmethod(lambda doc_id: f"/documents/{doc_id}/close")
+    DOCUMENT_REOPEN = staticmethod(lambda doc_id: f"/documents/{doc_id}/reopen")
+    DOCUMENT_REMIND = staticmethod(lambda doc_id: f"/documents/{doc_id}/remind")
+    DOCUMENT_REMARKS = staticmethod(lambda doc_id: f"/documents/{doc_id}/remarks")
+    DOCUMENT_HISTORY = staticmethod(lambda doc_id: f"/documents/{doc_id}/history")
+    HISTORY_ALL = "/history"
 
-    # --- Document Routing (DS Workflow) ---
-    DOCUMENT_ROUTE = lambda doc_id: f"/documents/{doc_id}/route"
-    DOCUMENT_BRANCHES = lambda doc_id: f"/documents/{doc_id}/branches"
-    DOCUMENT_RETURN_TO_DS = lambda doc_id: f"/documents/{doc_id}/return-to-ds"
-    DOCUMENT_FOLLOW_UP = lambda doc_id: f"/documents/{doc_id}/follow-up"
-    DOCUMENT_DIRECTOR_REVIEW = lambda doc_id: f"/documents/{doc_id}/director-review"
+    # --- Branches (routing) ---
+    DOCUMENT_BRANCHES = staticmethod(lambda doc_id: f"/documents/{doc_id}/branches")
+    BRANCH_ASSIGN = staticmethod(lambda branch_id: f"/branches/{branch_id}/work-items")
+    BRANCH_REMARK = staticmethod(lambda branch_id: f"/branches/{branch_id}/remark")
+    BRANCH_CLOSE = staticmethod(lambda branch_id: f"/branches/{branch_id}/close")
 
-    # --- Remarks ---
-    DIRECTOR_REMARK = lambda doc_id: f"/documents/{doc_id}/director-remark"
-    HOD_REMARK = lambda doc_id: f"/documents/{doc_id}/hod-remark"
-    DOCUMENT_REMARKS_HISTORY = lambda doc_id: f"/documents/{doc_id}/remarks"
+    # --- Director review ---
+    DIRECTOR_REVIEW_START = staticmethod(lambda branch_id: f"/branches/{branch_id}/director-review/start")
+    DIRECTOR_REVIEW_SUBMIT = staticmethod(lambda branch_id: f"/branches/{branch_id}/director-review")
+    DIRECTOR_REVIEWS = staticmethod(lambda doc_id: f"/documents/{doc_id}/director-reviews")
 
-    # --- Work Assignment ---
-    DOCUMENT_ASSIGN = lambda doc_id: f"/documents/{doc_id}/assign"
-    DOCUMENT_BRANCH_ASSIGN = lambda doc_id, routing_id: f"/documents/{doc_id}/branches/{routing_id}/assign"
-    DOCUMENT_ASSIGN_MULTI = lambda doc_id: f"/documents/{doc_id}/assign-multi"
-    DOCUMENT_ASSIGNMENTS = lambda doc_id: f"/documents/{doc_id}/assignments"
-    DOCUMENT_ASSIGNMENT_UPDATE = lambda doc_id, assign_id: f"/documents/{doc_id}/assignments/{assign_id}"
-
-    # Team assignment endpoints added by the current backend contract.
-    DOCUMENT_HOD_ASSIGN_TEAM = lambda doc_id: f"/documents/{doc_id}/hod-assign-team"
-    DOCUMENT_DS_ASSIGN_TEAM = lambda doc_id: f"/documents/{doc_id}/ds-assign-team"
-
-    # --- Employee Progress Updates & HOD Validation ---
-    PROGRESS_CREATE = lambda doc_id: f"/documents/{doc_id}/progress"
-    PROGRESS_LIST = lambda doc_id: f"/documents/{doc_id}/progress"
-    PROGRESS_HOD_VALIDATE = lambda doc_id, prog_id: f"/documents/{doc_id}/progress/{prog_id}/hod-validate"
+    # --- Work items (one person's work) ---
+    WORK_ITEMS_MINE = "/work-items/mine"
+    WORK_ITEMS_DEPARTMENT = "/work-items/department"
+    DOCUMENT_WORK_ITEMS = staticmethod(lambda doc_id: f"/documents/{doc_id}/work-items")
+    WORK_ITEM_DETAIL = staticmethod(lambda item_id: f"/work-items/{item_id}")
+    WORK_ITEM_STAGE = staticmethod(lambda item_id: f"/work-items/{item_id}/stage")
+    WORK_ITEM_PROGRESS = staticmethod(lambda item_id: f"/work-items/{item_id}/progress")
+    WORK_ITEM_PROGRESS_FILE = staticmethod(lambda item_id: f"/work-items/{item_id}/progress-with-file")
+    WORK_ITEM_SUBMIT = staticmethod(lambda item_id: f"/work-items/{item_id}/submit")
+    WORK_ITEM_REVIEW = staticmethod(lambda item_id: f"/work-items/{item_id}/review")
 
     # --- Attachments ---
-    ATTACHMENT_UPLOAD = lambda doc_id: f"/documents/{doc_id}/attachments"
-    ATTACHMENT_LIST = lambda doc_id: f"/documents/{doc_id}/attachments"
-    ATTACHMENT_DETAIL = lambda attach_id: f"/attachments/{attach_id}"
-    ATTACHMENT_DOWNLOAD = lambda attach_id: f"/attachments/{attach_id}/download"
+    ATTACHMENT_LIST = staticmethod(lambda doc_id: f"/documents/{doc_id}/attachments")
+    ATTACHMENT_UPLOAD = staticmethod(lambda doc_id: f"/documents/{doc_id}/attachments")
+    ATTACHMENT_DOWNLOAD = staticmethod(lambda attach_id: f"/attachments/{attach_id}/download")
 
-    # --- Workflow History ---
-    DOCUMENT_HISTORY = lambda doc_id: f"/documents/{doc_id}/history"
-    DOCUMENTS_HISTORY_ALL = "/documents/history/all"
+    # --- OCR & routing intelligence (assistive) ---
+    OCR_GET = staticmethod(lambda doc_id: f"/documents/{doc_id}/ocr")
+    OCR_RUN = staticmethod(lambda doc_id: f"/documents/{doc_id}/ocr/run")
+    OCR_VERIFY = staticmethod(lambda doc_id: f"/documents/{doc_id}/verify-field")
+    ROUTING_SUGGESTION = staticmethod(lambda doc_id: f"/documents/{doc_id}/routing-suggestion")
+    ROUTING_ANALYZE = staticmethod(lambda doc_id: f"/documents/{doc_id}/analyze-routing")
 
-    # --- OCR & Verification Pipeline ---
-    OCR_PROCESS = lambda doc_id: f"/documents/{doc_id}/process-ocr"
-    OCR_GET = lambda doc_id: f"/documents/{doc_id}/ocr"
-    OCR_VERIFY = lambda doc_id: f"/documents/{doc_id}/verify-field"
-    OCR_REANALYZE = lambda doc_id: f"/documents/{doc_id}/reanalyze"
-
-    # --- Routing Intelligence ---
-    ROUTING_ANALYZE = lambda doc_id: f"/documents/{doc_id}/analyze-routing"
-    ROUTING_SUGGESTION = lambda doc_id: f"/documents/{doc_id}/routing-suggestion"
-
-    # --- Reminders ---
-    REMINDERS_LIST = "/reminders"
-    REMINDERS_CHECK = "/reminders/check"
-    REMINDER_MARK_READ = lambda rem_id: f"/reminders/{rem_id}/read"
-
-    # --- Notifications ---
+    # --- Notifications & reminders ---
     NOTIFICATIONS_LIST = "/notifications"
     NOTIFICATIONS_UNREAD = "/notifications/unread"
-    NOTIFICATION_MARK_READ = lambda notif_id: f"/notifications/{notif_id}/read"
+    NOTIFICATION_MARK_READ = staticmethod(lambda notif_id: f"/notifications/{notif_id}/read")
     NOTIFICATIONS_MARK_ALL_READ = "/notifications/read-all"
+    REMINDERS_LIST = "/reminders"
+    REMINDERS_CHECK = "/reminders/check"
+    REMINDER_MARK_READ = staticmethod(lambda rem_id: f"/reminders/{rem_id}/read")
 
-    # --- Dashboard & Events ---
-    DASHBOARD_STATS = "/dashboard"
+    # --- Dashboard & events ---
+    DASHBOARD = "/dashboard"
     EVENTS_RECENT = "/events/recent"
+
+    # --- Administration ---
+    ADMIN_USERS = "/admin/users"
+    ADMIN_USER_DETAIL = staticmethod(lambda user_id: f"/admin/users/{user_id}")
+    ADMIN_USER_RESET_PASSWORD = staticmethod(lambda user_id: f"/admin/users/{user_id}/reset-password")
+    ADMIN_USER_TOGGLE = staticmethod(lambda user_id: f"/admin/users/{user_id}/toggle-active")
+    ADMIN_USER_CONTEXTS = staticmethod(lambda user_id: f"/admin/users/{user_id}/contexts")
+    ADMIN_USER_CONTEXT_DELETE = staticmethod(
+        lambda user_id, context_id: f"/admin/users/{user_id}/contexts/{context_id}"
+    )
+    ADMIN_TSO = "/admin/tso"
+    ADMIN_ACTIVATE_TSO = staticmethod(lambda user_id: f"/admin/tso/{user_id}/activate")
+    ADMIN_DEPARTMENTS = "/admin/departments"
+    ADMIN_DEPARTMENT_DETAIL = staticmethod(lambda dept_id: f"/admin/departments/{dept_id}")
+    ADMIN_SETTINGS = "/admin/settings"
+    ADMIN_AUDIT_LOGS = "/admin/audit-logs"
