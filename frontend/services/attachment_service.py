@@ -5,16 +5,16 @@ from repositories.provider import get_repository
 
 
 class AttachmentService:
-    """Supporting documents.
-
-    An attachment stays tied to what it belongs to: either the document
-    itself, or one specific progress update - and therefore one person's
-    work item. That link is what makes "who uploaded this, when, and for
-    which piece of work" answerable.
-    """
+    """Supporting documents."""
 
     def get_attachments(self, document_id: int) -> List[AttachmentModel]:
         return get_repository().get_attachments(document_id)
+
+    def get_document_attachments(
+        self,
+        document_id: int,
+    ) -> List[AttachmentModel]:
+        return self.get_attachments(document_id)
 
     def upload(
         self,
@@ -24,11 +24,21 @@ class AttachmentService:
         progress_update_id: Optional[int] = None,
     ) -> Optional[AttachmentModel]:
         return get_repository().upload_attachment(
-            document_id, file_path, attachment_type, progress_update_id
+            document_id,
+            file_path,
+            attachment_type,
+            progress_update_id,
         )
 
-    def download(self, attachment_id: int, dest_path: str) -> Optional[str]:
-        return get_repository().download_attachment(attachment_id, dest_path)
+    def download(
+        self,
+        attachment_id: int,
+        dest_path: str,
+    ) -> Optional[str]:
+        return get_repository().download_attachment(
+            attachment_id,
+            dest_path,
+        )
 
 
 attachment_service = AttachmentService()

@@ -389,7 +389,15 @@ def _email_enabled(db: Session) -> bool:
 _MAIL_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cdtrs-mail")
 
 
-def _send_email_async(user_id: int, document_id: int, title: str, message: str) -> None:
+def _send_email_async(
+    user_id: int,
+    document_id: int,
+    title: str,
+    message: str,
+    work_item_id: Optional[int] = None,
+    branch_id: Optional[int] = None,
+    include_progress_attachments: bool = False,
+) -> None:
     """Runs on a worker thread with its own session; SQLAlchemy sessions are
     not shareable across threads."""
     try:
@@ -399,16 +407,31 @@ def _send_email_async(user_id: int, document_id: int, title: str, message: str) 
         db = SessionLocal()
         try:
             mail_service.send_workflow_notification(
-                db=db, doc_id=document_id, recipient_user_id=user_id,
-                title=title, message=message,
-            )
+            db=db,
+            doc_id=document_id,
+            recipient_user_id=user_id,
+            title=title,
+            message=message,
+            work_item_id=work_item_id,
+            branch_id=branch_id,
+            include_progress_attachments=include_progress_attachments,
+        )
         finally:
             db.close()
     except Exception:
         pass
 
 
-def _dispatch_email(db: Session, user_id: int, document_id: Optional[int], title: str, message: str) -> None:
+def _dispatch_email(
+    db: Session,
+    user_id: int,
+    document_id: Optional[int],
+    title: str,
+    message: str,
+    work_item_id: Optional[int] = None,
+    branch_id: Optional[int] = None,
+    include_progress_attachments: bool = False,
+) -> None:
     """Best effort outgoing mail.  Notifications must never fail or delay a
     workflow action, so this is queued and every problem is swallowed - the
     in-app notification has already been recorded either way."""
@@ -418,7 +441,16 @@ def _dispatch_email(db: Session, user_id: int, document_id: Optional[int], title
         from mail.service import mail_service
         if not mail_service.is_configured():
             return
-        _MAIL_POOL.submit(_send_email_async, user_id, document_id, title, message)
+        _MAIL_POOL.submit(
+            _send_email_async,
+            user_id,
+            document_id,
+            title,
+            message,
+            work_item_id,
+            branch_id,
+            include_progress_attachments,
+        )
     except Exception:
         pass
 
@@ -435,6 +467,7 @@ def notify(
     work_item_id: Optional[int] = None,
     event_id: Optional[int] = None,
     email: bool = True,
+    include_progress_attachments: bool = False,
 ) -> models.Notification:
     """Raise an in-app notification addressed at one specific work context, and
     mirror it by email when mail notifications are switched on."""
@@ -452,7 +485,16 @@ def notify(
     )
     db.add(note)
     if email:
-        _dispatch_email(db, user_id, document_id, title, message)
+        _dispatch_email(
+            db,
+            user_id,
+            document_id,
+            title,
+            message,
+            work_item_id=work_item_id,
+            branch_id=branch_id,
+            include_progress_attachments=include_progress_attachments,
+        )
     return note
 
 
@@ -702,7 +744,105 @@ def _resolve_branch_target(
         "notify_contexts": [emp_context],
     }
 
+def _ocr_prior_director_review_detected(
+    db: Session,
+    doc: models.Document,
+) -> bool:
+    """
+    Return True when the OCR pipeline has explicitly confirmed that
+    the document already contains a prior Director review/instruction.
 
+    The OCR system is responsible for detecting and interpreting the
+    handwritten Director content. The workflow engine only consumes
+    the final confirmation.
+    """
+    field = (
+        db.query(models.DocumentExtractedField)
+        .filter(
+            models.DocumentExtractedField.document_id == doc.doc_id,
+            models.DocumentExtractedField.field_name == "PRIOR_DIRECTOR_REVIEW_DETECTED",
+        )
+        .first()
+    )
+
+    if not field:
+        return False
+
+    value = field.verified_value or field.extracted_value
+
+    return str(value).strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "detected",
+        "confirmed",
+    }
+def _director_review_satisfied(
+    db: Session,
+    doc: models.Document,
+) -> bool:
+    """
+    Director review is satisfied when either:
+
+    1. A Director has already completed a review, or
+    2. OCR has explicitly confirmed a prior Director review.
+    """
+
+    completed_review = (
+        db.query(models.DirectorReview.id)
+        .filter(
+            models.DirectorReview.document_id == doc.doc_id,
+        )
+        .first()
+        is not None
+    )
+
+    return completed_review or _ocr_prior_director_review_detected(db, doc)
+
+def _assert_director_review_before_work_routing(
+    db: Session,
+    doc: models.Document,
+    requests: Sequence[Dict[str, Any]],
+) -> None:
+    """
+    Prevent DS from routing to HOD, Employee or TSO before the
+    mandatory Director review is satisfied.
+
+    Routing to Director itself is allowed because that is the
+    mandatory first step.
+
+    Director + work recipients cannot be sent in the same routing
+    action.
+    """
+
+    branch_types = set()
+
+    for request in requests:
+        branch_type = request.get("branch_type")
+
+        if not isinstance(branch_type, BranchType):
+            branch_type = BranchType(str(branch_type))
+
+        branch_types.add(branch_type)
+
+    # Sending to Director is the mandatory first step.
+    if branch_types == {BranchType.DIRECTOR}:
+        return
+
+    # Do not allow DS to combine Director + work routing.
+    if BranchType.DIRECTOR in branch_types:
+        raise WorkflowError(
+            "Director review must be completed before routing the document "
+            "to an HOD, employee or TSO."
+        )
+
+    # HOD / Employee / TSO routing requires a satisfied Director gate.
+    if not _director_review_satisfied(db, doc):
+        raise WorkflowError(
+            "This document must undergo Director review before it can be "
+            "routed to an HOD, employee or TSO."
+        )
+    
 def open_branches(
     db: Session,
     *,
@@ -730,6 +870,12 @@ def open_branches(
 
     if not requests:
         raise WorkflowError("Select at least one recipient before routing.")
+
+    _assert_director_review_before_work_routing(
+    db,
+    doc,
+    requests,
+    )
 
     created: List[models.DocumentBranch] = []
     now = datetime.now()
@@ -775,6 +921,29 @@ def open_branches(
                 details=instructions,
             )
         else:
+            round_no = 1
+
+            if branch_type == BranchType.DIRECTOR:
+                last_director_round = (
+                    db.query(models.DocumentBranch.round_no)
+                    .filter(
+                        models.DocumentBranch.document_id == document_id,
+                        models.DocumentBranch.branch_type == BranchType.DIRECTOR,
+                    )
+                    .order_by(
+                        models.DocumentBranch.round_no.desc()
+                    )
+                    .first()
+                )
+
+                last_director_round = (
+                    last_director_round[0]
+                    if last_director_round is not None
+                    else 0
+                )
+
+                round_no = last_director_round + 1
+
             branch = models.DocumentBranch(
                 document_id=document_id,
                 branch_type=branch_type,
@@ -787,7 +956,7 @@ def open_branches(
                 instructions=instructions,
                 requires_hod_validation=requires_validation,
                 deadline=deadline,
-                round_no=1,
+                round_no=round_no,
                 is_active=True,
                 opened_at=now,
             )
@@ -1276,6 +1445,7 @@ def submit_progress(
                 event_id=event.id,
                 title=f"{doc.reference_no}: progress update",
                 message=f"{actor.full_name} updated their work on '{doc.title}'.",
+                include_progress_attachments=True,
             )
     else:
         for ds in ds_contexts(db):
@@ -1289,6 +1459,7 @@ def submit_progress(
                 event_id=event.id,
                 title=f"{doc.reference_no}: progress update",
                 message=f"{actor.full_name} updated their work on '{doc.title}'.",
+                include_progress_attachments=True,
             )
 
     recompute_branch_stage(db, branch)
@@ -1370,6 +1541,7 @@ def submit_work(
                 event_id=event.id,
                 title=f"{doc.reference_no}: work awaiting your validation",
                 message=f"{actor.full_name} submitted work on '{doc.title}' for your review.",
+                include_progress_attachments=True,
             )
     else:
         for ds in ds_contexts(db):
@@ -1383,6 +1555,7 @@ def submit_work(
                 event_id=event.id,
                 title=f"{doc.reference_no}: work completed",
                 message=f"{actor.full_name} completed their work on '{doc.title}'.",
+                include_progress_attachments=True,
             )
 
     recompute_branch_stage(db, branch)
@@ -1889,6 +2062,119 @@ def register_document(
         db.commit()
     db.refresh(doc)
     return doc
+
+def send_to_director(
+    db: Session,
+    *,
+    document_id: int,
+    actor: models.User,
+    context_id: Optional[int] = None,
+    expected_version: Optional[int] = None,
+) -> models.DocumentBranch:
+    """
+    DS explicitly sends a registered document to the Director for review.
+
+    This is a separate action from document registration.
+    The Director reviews and remarks; the Director does not close the
+    document or decide its final routing.
+    """
+    context = require_context(db, actor, context_id, WorkContextType.DS)
+    doc = _get_document(db, document_id)
+
+    _check_version(doc, expected_version)
+    _assert_open(doc)
+
+    if doc.registered_at is None:
+        raise WorkflowError(
+            "The document must be registered before it can be sent "
+            "to the Director for review."
+        )
+
+    # Do not create another Director review while one is already open.
+    existing = _find_open_branch(
+        db,
+        document_id,
+        BranchType.DIRECTOR,
+        None,
+        None,
+    )
+
+    if existing is not None:
+        raise WorkflowError(
+            "This document is already awaiting Director review."
+        )
+
+    resolved = _resolve_branch_target(
+        db,
+        BranchType.DIRECTOR,
+        department_id=None,
+        target_user_id=None,
+    )
+
+    now = datetime.now()
+    round_no = (
+    db.query(models.DocumentBranch.round_no)
+            .filter(
+                models.DocumentBranch.document_id == document_id,
+                models.DocumentBranch.branch_type == BranchType.DIRECTOR,
+            )
+            .order_by(models.DocumentBranch.round_no.desc())
+            .scalar()
+            or 0
+        ) + 1
+    branch = models.DocumentBranch(
+        document_id=document_id,
+        branch_type=BranchType.DIRECTOR,
+        stage=BranchStage.REVIEW_REQUESTED,
+        department_id=None,
+        target_user_id=resolved["target_user_id"],
+        target_context_membership_id=resolved["target_context_membership_id"],
+        opened_by_user_id=actor.id,
+        opened_by_context_membership_id=context.id,
+        instructions=None,
+        requires_hod_validation=False,
+        deadline=doc.deadline,
+        round_no=round_no,
+        version=1,
+        is_active=True,
+        opened_at=now,
+    )
+
+    db.add(branch)
+    db.flush()
+
+    event = record_event(
+        db,
+        document_id=document_id,
+        branch_id=branch.id,
+        event_type="DIRECTOR_REVIEW_REQUESTED",
+        summary=f"{actor.full_name} sent the document to the Director for review",
+        actor=actor,
+        context=context,
+    )
+
+    for target_ctx in resolved["notify_contexts"]:
+        notify(
+            db,
+            user_id=target_ctx.user_id,
+            context_membership_id=target_ctx.id,
+            document_id=document_id,
+            branch_id=branch.id,
+            event_id=event.id,
+            title=f"{doc.reference_no}: Director review requested",
+            message=(
+                f"'{doc.title}' has been sent to you for Director review."
+            ),
+        )
+
+    recompute_branch_stage(db, branch)
+    recompute_lifecycle(db, doc)
+    _touch(doc)
+
+    db.commit()
+    db.refresh(branch)
+
+    return branch
 
 
 # =========================================================

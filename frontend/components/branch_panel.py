@@ -6,13 +6,19 @@ workstream gets their own card with their own stage, deadline, written
 progress and attachments.  Nothing is summed, averaged or merged.
 """
 
+import os
+import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
+
 from PySide6.QtWidgets import (
     QFrame,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -20,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from models import BranchModel, WorkItemModel
+from services.attachment_service import attachment_service
 
 # ---------------------------------------------------------------------------
 # Stage colours.  Branch stages and work stages have separate palettes on
@@ -227,11 +234,132 @@ class WorkItemCard(QFrame):
         inner.addWidget(body)
 
         for att in update.attachments:
-            row = QLabel(f"  📎 {att.file_name}  ({att.size_label})  -  {att.uploaded_label}")
-            row.setStyleSheet("color: #0369A1; font-size: 10px;")
-            inner.addWidget(row)
+            row_holder = QWidget()
+            row = QHBoxLayout(row_holder)
+            row.setContentsMargins(0, 2, 0, 0)
+            row.setSpacing(6)
+
+            file_label = QLabel(
+                f"  📎 {att.file_name}  ({att.size_label})  -  {att.uploaded_label}"
+            )
+            file_label.setWordWrap(True)
+            file_label.setStyleSheet("color: #0369A1; font-size: 10px;")
+            row.addWidget(file_label, 1)
+
+            view_btn = small_button("View")
+            view_btn.clicked.connect(
+                lambda checked=False, a=att: self._view_attachment(a)
+            )
+            row.addWidget(view_btn)
+
+            download_btn = small_button("Download")
+            download_btn.clicked.connect(
+                lambda checked=False, a=att: self._download_attachment(a)
+            )
+            row.addWidget(download_btn)
+
+            inner.addWidget(row_holder)
 
         return block
+
+    def _view_attachment(self, attachment) -> None:
+        """Download an attachment to a temporary cache and open it locally."""
+        attachment_id = getattr(attachment, "id", None)
+        file_name = getattr(attachment, "file_name", None) or "attachment"
+
+        if not attachment_id:
+            QMessageBox.warning(
+                self,
+                "View Attachment",
+                "This attachment does not have a valid attachment ID.",
+            )
+            return
+
+        try:
+            cache_dir = os.path.join(
+                tempfile.gettempdir(),
+                "cdtrs_attachment_preview",
+            )
+            os.makedirs(cache_dir, exist_ok=True)
+
+            safe_name = os.path.basename(file_name)
+            cached_path = os.path.join(
+                cache_dir,
+                f"{attachment_id}_{safe_name}",
+            )
+
+            downloaded = attachment_service.download(
+                attachment_id,
+                cached_path,
+            )
+            final_path = downloaded or cached_path
+
+            if not final_path or not os.path.exists(final_path):
+                raise RuntimeError(
+                    "The attachment could not be downloaded from the server."
+                )
+
+            if not QDesktopServices.openUrl(
+                QUrl.fromLocalFile(os.path.abspath(final_path))
+            ):
+                raise RuntimeError(
+                    "Windows could not open the downloaded attachment."
+                )
+
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "View Attachment",
+                f"Could not open '{file_name}'.\n\n{exc}",
+            )
+
+    def _download_attachment(self, attachment) -> None:
+        """Let the current authorized user save the attachment locally."""
+        attachment_id = getattr(attachment, "id", None)
+        file_name = getattr(attachment, "file_name", None) or "attachment"
+
+        if not attachment_id:
+            QMessageBox.warning(
+                self,
+                "Download Attachment",
+                "This attachment does not have a valid attachment ID.",
+            )
+            return
+
+        target_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Attachment",
+            file_name,
+            "All Files (*)",
+        )
+
+        if not target_path:
+            return
+
+        try:
+            downloaded = attachment_service.download(
+                attachment_id,
+                target_path,
+            )
+            final_path = downloaded or target_path
+
+            if not final_path or not os.path.exists(final_path):
+                raise RuntimeError(
+                    "The attachment could not be downloaded from the server."
+                )
+
+            QMessageBox.information(
+                self,
+                "Download Complete",
+                f"Attachment saved to:\n{final_path}",
+            )
+
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Download Attachment",
+                f"Could not download '{file_name}'.\n\n{exc}",
+            )
 
     def _action_row(self) -> Optional[QWidget]:
         buttons: List[QPushButton] = []

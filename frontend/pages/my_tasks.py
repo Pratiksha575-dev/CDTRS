@@ -251,6 +251,17 @@ class MyTasksPage(QWidget):
             return
         self._show_document(doc, self.context_label.upper())
 
+    def _show_document(self, doc, role: str) -> None:
+        """Hand the document to the application shell."""
+        from services.document_service import document_service as _docs
+
+        full = _docs.get_document(doc.id) or doc
+        self.view_requested.emit(full, role)
+
+    def _on_workflow_changed(self, *_) -> None:
+        """Reload tasks when workflow/context changes."""
+        self.load_tasks()    
+
     def add_progress(self) -> None:
         item = self.selected_item()
         if not item:
@@ -323,15 +334,3 @@ class TSOTasksPage(MyTasksPage):
     def __init__(self):
         super().__init__(context_label="TSO")
 
-    def _show_document(self, doc, role: str) -> None:
-        """Hand the document to the application shell when one is hosting this
-        page; otherwise open it in its own window."""
-        from services.document_service import document_service as _docs
-
-        full = _docs.get_document(doc.id) or doc
-        self.view_requested.emit(full, role)
-
-    def _on_workflow_changed(self, *_) -> None:
-        """Bound method, not a lambda: Qt disconnects this when the
-        widget is destroyed, so a stale page never reloads itself."""
-        self.load_tasks()

@@ -359,7 +359,9 @@ class RouteRequest(BaseModel):
     branches: List[BranchCreate]
     expected_version: Optional[int] = None
 
-
+class SendToDirectorRequest(BaseModel):
+    expected_version: Optional[int] = None
+    
 class BranchResponse(BaseModel):
     id: int
     document_id: int

@@ -10,6 +10,7 @@ __pycache__/
 *$py.class
 *.so
 .pytest_cache/
+backend/mail/.token_cache.json
 
 # Packaging / build outputs
 *.egg-info/

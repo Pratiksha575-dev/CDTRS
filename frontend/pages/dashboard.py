@@ -31,7 +31,13 @@ from models.document import DocumentModel
 from services.auth_service import auth_service
 from services.dashboard_service import dashboard_service
 from services.document_service import document_service
+from components.notification_bell import (
+    NotificationBellWidget
+)
 
+from components.notification_panel import (
+    NotificationPanel
+)
 CARD_COLORS = ["#0369A1", "#1D4ED8", "#B45309", "#166534", "#7C3AED", "#B91C1C"]
 
 
@@ -51,6 +57,7 @@ class DashboardPage(QWidget):
         self.user_role = user_role
         self.documents: List[DocumentModel] = []
         self.viewer: Optional[DocumentViewer] = None
+        self.notification_panel = None
         self._build()
         self._connect_events()
 
@@ -87,13 +94,41 @@ class DashboardPage(QWidget):
         self.subtitle.setWordWrap(True)
         titles.addWidget(self.subtitle)
         header.addLayout(titles, 1)
+        self.notification_bell = NotificationBellWidget()
+
+        self.notification_bell.clicked.connect(
+            self._toggle_notifications
+        )
+
+        header.addWidget(
+            self.notification_bell,
+            0,
+            Qt.AlignmentFlag.AlignTop)
 
         refresh = QPushButton("Refresh")
-        refresh.setStyleSheet(
-            "background-color: #0F172A; color: white; font-weight: 600; "
-            "padding: 7px 16px; border-radius: 4px;"
+        refresh.setCursor(
+            Qt.CursorShape.PointingHandCursor
         )
-        refresh.clicked.connect(self.load)
+        refresh.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #0F172A;
+                color: white;
+                font-weight: 600;
+                padding: 7px 16px;
+                border-radius: 4px;
+            }
+
+            QPushButton:hover {
+                background-color: #1E293B;
+            }
+
+            QPushButton:pressed {
+                background-color: #020617;
+            }
+            """
+        )
+        refresh.clicked.connect(self._refresh_all)
         header.addWidget(refresh, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
 
@@ -250,7 +285,60 @@ class DashboardPage(QWidget):
         full = _docs.get_document(doc.id) or doc
         self.view_requested.emit(full, role)
 
+    def _refresh_all(self) -> None:
+        """Refresh dashboard data and notification state."""
+        self.load()
+
+        try:
+            self.notification_bell.refresh()
+        except Exception:
+            pass
+
+        try:
+            if self.notification_panel is not None:
+                self.notification_panel.refresh()
+        except Exception:
+            pass   
+
     def _on_workflow_changed(self, *_) -> None:
         """Bound method, not a lambda: Qt disconnects this when the
         widget is destroyed, so a stale page never reloads itself."""
         self.load()
+
+    def _toggle_notifications(self):
+
+        if self.notification_panel is None:
+
+            self.notification_panel = NotificationPanel(
+                self
+            )
+
+        self.notification_panel.refresh()
+
+        if self.notification_panel.isVisible():
+
+            self.notification_panel.hide()
+
+            return
+
+        self.notification_panel.adjustSize()
+
+        panel_width = (
+            self.notification_panel.width()
+        )
+
+        x = (
+            self.width()
+            - panel_width
+            - 28
+        )
+
+        y = 65
+
+        self.notification_panel.move(
+            x,
+            y
+        )
+
+        self.notification_panel.show()
+        self.notification_panel.raise_()

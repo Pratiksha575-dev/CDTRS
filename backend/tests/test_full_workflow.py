@@ -6,7 +6,10 @@ behaviours the redesign exists to guarantee:
   * one document, many coexisting branches
   * branches sitting at DIFFERENT stages at the same time
   * one work item per person, each with its own stage and progress
+  * explicit DS -> Director review gate before work routing
+  * OCR-bypass-compatible Director gate (tested separately by backend logic)
   * repeatable Director review, every remark preserved
+  * Director branch rounds and review numbers remain aligned
   * DS-only closure
 """
 
@@ -116,23 +119,83 @@ def run():
         check("document starts REGISTERED", doc.lifecycle == DocumentLifecycle.REGISTERED)
 
         # ---------------------------------------------------------------
-        banner("STAGE 2 - DIRECTOR REVIEW (round 1)")
-        (dir_branch,) = workflow.open_branches(
-            db, document_id=doc.doc_id,
-            requests=[{"branch_type": BranchType.DIRECTOR,
-                       "target_user_id": director.id,
-                       "instructions": "Please review and advise on handling."}],
-            actor=ds, context_id=ds_ctx.id,
-        )
-        db.refresh(doc)
-        check("lifecycle is IN_REVIEW while with Director", doc.lifecycle == DocumentLifecycle.IN_REVIEW)
+        banner("STAGE 1b - DIRECTOR GATE (routing before review must be blocked)")
 
-        workflow.start_director_review(db, branch_id=dir_branch.id, actor=director, context_id=dir_ctx.id)
-        r1 = workflow.submit_director_review(
-            db, branch_id=dir_branch.id,
-            remark_text="Route to Engineering for technical assessment. Also involve TSO.",
-            actor=director, context_id=dir_ctx.id,
+        gate_doc = crud.create_document(
+            db,
+            schemas.DocumentCreate(
+                title="Director Gate Test",
+                subject="Test document",
+                description="Must not be routed before Director review.",
+                received_date=date.today(),
+                deadline=date.today() + timedelta(days=7),
+                source="Workflow Test",
+                sender_name="Test Sender",
+                mode="MANUAL_UPLOAD",
+                priority=models.Priority.MEDIUM,
+            ),
+            created_by=ds.id,
+            context_id=ds_ctx.id,
         )
+        workflow.register_document(
+            db,
+            document_id=gate_doc.doc_id,
+            actor=ds,
+            context_id=ds_ctx.id,
+        )
+
+        try:
+            workflow.open_branches(
+                db,
+                document_id=gate_doc.doc_id,
+                requests=[
+                    {
+                        "branch_type": BranchType.DEPARTMENT,
+                        "department_id": eng_dept,
+                        "instructions": "Should be blocked.",
+                    }
+                ],
+                actor=ds,
+                context_id=ds_ctx.id,
+            )
+            check("routing before Director review is blocked", False)
+        except workflow.WorkflowError:
+            db.rollback()
+            check("routing before Director review is blocked", True)
+
+        # ---------------------------------------------------------------
+        banner("STAGE 2 - EXPLICIT SEND TO DIRECTOR (round 1)")
+        dir_branch = workflow.send_to_director(
+            db,
+            document_id=doc.doc_id,
+            actor=ds,
+            context_id=ds_ctx.id,
+        )
+
+        check("Director branch created", dir_branch.branch_type == BranchType.DIRECTOR)
+        check("Director branch is round 1", dir_branch.round_no == 1)
+
+        db.refresh(doc)
+        check(
+            "lifecycle is IN_REVIEW while with Director",
+            doc.lifecycle == DocumentLifecycle.IN_REVIEW,
+        )
+
+        workflow.start_director_review(
+            db,
+            branch_id=dir_branch.id,
+            actor=director,
+            context_id=dir_ctx.id,
+        )
+
+        r1 = workflow.submit_director_review(
+            db,
+            branch_id=dir_branch.id,
+            remark_text="Route to Engineering for technical assessment. Also involve TSO.",
+            actor=director,
+            context_id=dir_ctx.id,
+        )
+
         db.refresh(doc)
         check("director review #1 recorded", r1.review_no == 1)
         check("director branch returned to DS", dir_branch.stage == BranchStage.RETURNED_TO_DS)
@@ -265,12 +328,19 @@ def run():
         # ---------------------------------------------------------------
         banner("STAGE 6 - DIRECTOR REVIEW AGAIN (round 2)")
         (dir_branch_2,) = workflow.open_branches(
-            db, document_id=doc.doc_id,
-            requests=[{"branch_type": BranchType.DIRECTOR, "target_user_id": director.id,
-                       "instructions": "Interim review of progress so far."}],
-            actor=ds, context_id=ds_ctx.id,
+            db,
+            document_id=doc.doc_id,
+            requests=[{
+                "branch_type": BranchType.DIRECTOR,
+                "target_user_id": director.id,
+                "instructions": "Interim review of progress so far.",
+            }],
+            actor=ds,
+            context_id=ds_ctx.id,
         )
         check("a second, separate Director branch opened", dir_branch_2.id != dir_branch.id)
+        check("Director branch is round 2", dir_branch_2.round_no == 2)
+
         r2 = workflow.submit_director_review(
             db, branch_id=dir_branch_2.id,
             remark_text="Good progress. Sneha should complete the pending data confirmation.",
@@ -278,6 +348,7 @@ def run():
         )
         db.refresh(doc)
         check("director review #2 recorded", r2.review_no == 2)
+        check("Director review #2 matches branch round #2", dir_branch_2.round_no == r2.review_no)
         check("BOTH director remarks preserved", len(doc.director_reviews) == 2)
         check("first remark not overwritten", doc.director_reviews[0].remark_text == r1.remark_text)
 
@@ -315,10 +386,17 @@ def run():
         # ---------------------------------------------------------------
         banner("STAGE 8/9 - FINAL DIRECTOR REVIEW, THEN DS CLOSES")
         (dir_branch_3,) = workflow.open_branches(
-            db, document_id=doc.doc_id,
-            requests=[{"branch_type": BranchType.DIRECTOR, "target_user_id": director.id}],
-            actor=ds, context_id=ds_ctx.id,
+            db,
+            document_id=doc.doc_id,
+            requests=[{
+                "branch_type": BranchType.DIRECTOR,
+                "target_user_id": director.id,
+            }],
+            actor=ds,
+            context_id=ds_ctx.id,
         )
+        check("Director branch is round 3", dir_branch_3.round_no == 3)
+
         r3 = workflow.submit_director_review(
             db, branch_id=dir_branch_3.id, remark_text="Satisfied. May be closed.",
             actor=director, context_id=dir_ctx.id,
@@ -362,6 +440,20 @@ def run():
         check("every progress update preserved", len(doc.progress_updates) == 6)
         check("every person's work item preserved", len(doc.work_items) == 4)
         check("all branches preserved (3 director + 3 work)", len(doc.branches) == 6)
+
+        director_rounds = sorted(
+            b.round_no
+            for b in doc.branches
+            if b.branch_type == BranchType.DIRECTOR
+        )
+        director_review_numbers = sorted(
+            r.review_no
+            for r in doc.director_reviews
+        )
+        print(f"    Director branch rounds: {director_rounds}")
+        print(f"    Director review numbers: {director_review_numbers}")
+        check("Director branch rounds are [1, 2, 3]", director_rounds == [1, 2, 3])
+        check("Director review numbers are [1, 2, 3]", director_review_numbers == [1, 2, 3])
 
         per_person = {}
         for w in doc.work_items:

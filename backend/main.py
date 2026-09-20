@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
                 from mail.service import mail_service
                 db = SessionLocal()
                 try:
-                    if mail_service.is_configured("outlook"):
+                    if mail_service.is_configured():
                         mail_service.sync_ds_mailbox(db)
                 finally:
                     db.close()
@@ -670,6 +670,37 @@ def register_document(
         raise _handle(exc)
     return serializers.document_detail(db, doc)
 
+@app.post(
+    f"{API_V1}/documents/{{document_id}}/send-to-director",
+    response_model=schemas.BranchResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Director"],
+)
+async def send_to_director(
+    document_id: int,
+    payload: schemas.SendToDirectorRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    ctx: Optional[models.WorkContextMembership] = Depends(get_active_context),
+):
+    try:
+        branch = workflow.send_to_director(
+            db,
+            document_id=document_id,
+            actor=current_user,
+            context_id=_context_id(ctx),
+            expected_version=payload.expected_version,
+        )
+    except Exception as exc:
+        raise _handle(exc)
+
+    await crud.event_manager.broadcast(
+        "DIRECTOR_REVIEW_REQUESTED",
+        document_id=document_id,
+        user_id=current_user.id,
+    )
+
+    return serializers.branch(branch)
 
 @app.post(
     f"{API_V1}/documents/{{document_id}}/close",

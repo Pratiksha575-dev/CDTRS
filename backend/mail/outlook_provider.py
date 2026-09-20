@@ -50,10 +50,11 @@ class OutlookGraphProvider(BaseMailProvider):
             return True
         return False
 
-    def _get_access_token(self) -> Optional[str]:
-        # 1. Return in-memory cached token if valid (with 5-minute safety buffer)
+    def _get_access_token(self, force_refresh: bool = False) -> Optional[str]:
+        # 1. Return in-memory cached token if valid (with 5-minute safety buffer).
+        #    When force_refresh=True, deliberately skip all cached access tokens.
         now_dt = datetime.utcnow()
-        if self._cached_token and self._token_expires_at:
+        if not force_refresh and self._cached_token and self._token_expires_at:
             if now_dt < (self._token_expires_at - timedelta(minutes=5)):
                 return self._cached_token
 
@@ -63,10 +64,12 @@ class OutlookGraphProvider(BaseMailProvider):
                 with open(self.token_file, "r", encoding="utf-8") as fh:
                     tok_data = json.load(fh)
                 
-                # Check if file cached access_token is still valid before calling network
+                # Check if file cached access_token is still valid before calling network.
+                # When force_refresh=True, skip the cached access token and redeem the
+                # refresh token instead.
                 cached_file_tok = tok_data.get("access_token")
                 cached_exp_str = tok_data.get("expires_at")
-                if cached_file_tok and cached_exp_str:
+                if not force_refresh and cached_file_tok and cached_exp_str:
                     try:
                         exp_dt = datetime.fromisoformat(cached_exp_str)
                         if now_dt < (exp_dt - timedelta(minutes=5)):
@@ -163,6 +166,16 @@ class OutlookGraphProvider(BaseMailProvider):
 
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=25)
+
+            # If Graph rejects the cached bearer token, force one refresh and retry once.
+            # This handles a stale/revoked access token even when the local expires_at
+            # value still says the token is valid.
+            if resp.status_code == 401 and self.token_file.exists():
+                refreshed_token = self._get_access_token(force_refresh=True)
+                if refreshed_token:
+                    headers["Authorization"] = f"Bearer {refreshed_token}"
+                    resp = requests.get(url, headers=headers, params=params, timeout=25)
+
             # Fallback to /me if /users/{mailbox} failed on personal accounts
             if resp.status_code == 404 and "/users/" in url:
                 url = f"{self.GRAPH_BASE_URL}/me/mailFolders/{self.folder}/messages"
@@ -288,6 +301,20 @@ class OutlookGraphProvider(BaseMailProvider):
 
         try:
             resp = requests.post(url, headers=headers, json=send_payload, timeout=20)
+
+            # Retry once with a freshly redeemed access token if the cached token
+            # is rejected by Microsoft Graph.
+            if resp.status_code == 401 and self.token_file.exists():
+                refreshed_token = self._get_access_token(force_refresh=True)
+                if refreshed_token:
+                    headers["Authorization"] = f"Bearer {refreshed_token}"
+                    resp = requests.post(
+                        url,
+                        headers=headers,
+                        json=send_payload,
+                        timeout=20,
+                    )
+
             if resp.status_code == 404 and "/users/" in url:
                 url = f"{self.GRAPH_BASE_URL}/me/sendMail"
                 resp = requests.post(url, headers=headers, json=send_payload, timeout=20)
@@ -322,9 +349,29 @@ class OutlookGraphProvider(BaseMailProvider):
 
         try:
             resp = requests.patch(url, headers=headers, json={"isRead": True}, timeout=15)
+
+            # Retry once with a freshly redeemed access token if Graph rejects
+            # the cached bearer token.
+            if resp.status_code == 401 and self.token_file.exists():
+                refreshed_token = self._get_access_token(force_refresh=True)
+                if refreshed_token:
+                    headers["Authorization"] = f"Bearer {refreshed_token}"
+                    resp = requests.patch(
+                        url,
+                        headers=headers,
+                        json={"isRead": True},
+                        timeout=15,
+                    )
+
             if resp.status_code == 404 and "/users/" in url:
                 url = f"{self.GRAPH_BASE_URL}/me/messages/{message_id}"
-                resp = requests.patch(url, headers=headers, json={"isRead": True}, timeout=15)
+                resp = requests.patch(
+                    url,
+                    headers=headers,
+                    json={"isRead": True},
+                    timeout=15,
+                )
+
             return resp.status_code == 200
         except Exception:
             return False

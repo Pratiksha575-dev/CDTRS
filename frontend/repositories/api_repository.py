@@ -18,7 +18,6 @@ from models import (
     DepartmentModel,
     DirectorReviewModel,
     DocumentModel,
-    NotificationModel,
     ProgressModel,
     RemarkModel,
     UserModel,
@@ -27,6 +26,7 @@ from models import (
 )
 from models.user import ContextMembershipModel
 from repositories.base import BaseRepository
+from models.notification import NotificationModel, ReminderModel
 
 
 class APIRepository(BaseRepository):
@@ -411,20 +411,60 @@ class APIRepository(BaseRepository):
     # NOTIFICATIONS & REMINDERS
     # =========================================================
 
-    def get_notifications(self, unread_only: bool = False) -> List[NotificationModel]:
-        endpoint = Endpoints.NOTIFICATIONS_UNREAD if unread_only else Endpoints.NOTIFICATIONS_LIST
-        data = self.client.get(endpoint) or []
-        return [NotificationModel.from_dict(n) for n in data]
+    def get_notifications(
+        self,
+        unread_only: bool = False
+    ) -> List[NotificationModel]:
+        endpoint = (
+            Endpoints.NOTIFICATIONS_UNREAD
+            if unread_only
+            else Endpoints.NOTIFICATIONS_LIST
+        )
 
-    def mark_notification_read(self, notification_id: int) -> bool:
-        return bool(self.client.patch(Endpoints.NOTIFICATION_MARK_READ(notification_id)))
+        data = self.client.get(endpoint) or []
+
+        return [
+            NotificationModel.from_dict(item)
+            for item in data
+        ]
+
+
+    def mark_notification_read(
+        self,
+        notification_id: int
+    ) -> bool:
+        try:
+            self.client.patch(
+                Endpoints.NOTIFICATION_MARK_READ(notification_id)
+            )
+            return True
+        except Exception:
+            return False
+
 
     def mark_all_notifications_read(self) -> int:
-        result = self.client.patch(Endpoints.NOTIFICATIONS_MARK_ALL_READ) or {}
-        return result.get("updated", 0)
+        try:
+            result = self.client.patch(
+                Endpoints.NOTIFICATIONS_MARK_ALL_READ
+            ) or {}
 
-    def get_reminders(self) -> List[Dict[str, Any]]:
-        return self.client.get(Endpoints.REMINDERS_LIST) or []
+            return int(result.get("updated", 0))
+
+        except Exception:
+            return 0
+
+    def get_reminders(self) -> List[ReminderModel]:
+        data = self.client.get(Endpoints.REMINDERS_LIST) or []
+        return [ReminderModel.from_dict(r) for r in data]
+
+
+    def mark_reminder_read(self, reminder_id: int) -> bool:
+        return bool(
+            self.client.patch(
+                Endpoints.REMINDER_MARK_READ(reminder_id)
+            )
+        )
+
 
     def check_reminders(self) -> Dict[str, Any]:
         return self.client.post(Endpoints.REMINDERS_CHECK) or {}
@@ -436,6 +476,7 @@ class APIRepository(BaseRepository):
         recipient_user_id: Optional[int] = None,
         message: Optional[str] = None,
     ) -> Dict[str, Any]:
+
         return self.client.post(
             Endpoints.DOCUMENT_REMIND(doc_id),
             json={

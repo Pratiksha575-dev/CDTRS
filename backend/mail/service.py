@@ -24,16 +24,35 @@ logger = logging.getLogger("cdtrs.mail.service")
 
 
 # ==============================================================================
-# TEST RECIPIENT EMAIL OVERRIDE (FOR TESTING & DEMO)
-# ------------------------------------------------------------------------------
-# When this is set to an email string (e.g. "pratikshazodge575@gmail.com"),
-# ALL outgoing workflow notifications and reminder emails will be sent to this address,
-# while the sender remains your authenticated Outlook mailbox (pratiksha@outlook.com).
+# TEST RECIPIENT EMAIL OVERRIDE
+# ==============================================================================
 #
-# TO RESTORE ORIGINAL USER DATABASE EMAILS (HODs, Employees, Director):
-# Simply change this value to None:
-_env_override = os.getenv("OVERRIDE_TEST_RECIPIENT_EMAIL", "pratikshazodge575@gmail.com")
-OVERRIDE_TEST_RECIPIENT_EMAIL: Optional[str] = None if (_env_override and _env_override.lower() in ("none", "false", "off", "")) else _env_override
+# IMPORTANT:
+# Disabled by default.
+#
+# If you explicitly want to redirect ALL outgoing workflow emails to a
+# test address, set:
+#
+# OVERRIDE_TEST_RECIPIENT_EMAIL=test@example.com
+#
+# Otherwise leave it empty/None/false.
+# ==============================================================================
+
+_env_override = os.getenv(
+    "OVERRIDE_TEST_RECIPIENT_EMAIL",
+    ""
+).strip()
+
+OVERRIDE_TEST_RECIPIENT_EMAIL: Optional[str] = (
+    None
+    if _env_override.lower() in {
+        "",
+        "none",
+        "false",
+        "off",
+    }
+    else _env_override
+)
 
 
 NOTIFICATION_TEMPLATES: Dict[str, tuple] = {
@@ -257,7 +276,10 @@ class MailService:
         doc_id: int,
         recipient_user_id: int,
         context: Optional[Dict[str, Any]] = None,
-        channel: Optional[str] = None
+        channel: Optional[str] = None,
+        work_item_id: Optional[int] = None,
+        branch_id: Optional[int] = None,
+        include_progress_attachments: bool = False,
     ) -> bool:
         """
         Centrally dispatches in-app notification and email notification for a workflow event.
@@ -301,21 +323,27 @@ class MailService:
                 recipient_user_id=recipient_user_id,
                 title=title,
                 message=message,
-                channel=channel
+                channel=channel,
+                work_item_id=work_item_id,
+                branch_id=branch_id,
+                include_progress_attachments=include_progress_attachments
             )
         except Exception as ex:
             logger.warning(f"Failed to dispatch workflow email for event '{event_type}': {ex}")
             return False
 
     def send_workflow_notification(
-        self,
-        db: Session,
-        doc_id: int,
-        recipient_user_id: int,
-        title: str,
-        message: str,
-        channel: Optional[str] = None
-    ) -> bool:
+    self,
+    db: Session,
+    doc_id: int,
+    recipient_user_id: int,
+    title: str,
+    message: str,
+    work_item_id: Optional[int] = None,
+    branch_id: Optional[int] = None,
+    include_progress_attachments: bool = False,
+    channel: Optional[str] = None,
+) -> bool:
         """
         Dispatches an outgoing workflow notification email to the responsible user.
         """
@@ -371,29 +399,100 @@ Please log in to CDTRS to view or process this document.
   <p style="font-size: 12px; color: #94A3B8; margin-top: 24px;">This is an automated workflow notification from the CDTRS Institutional Management Server.</p>
 </div>
 """
+        # ==============================================================
+        # SELECT EMAIL ATTACHMENTS
+        # ==============================================================
+        # Rules:
+        # 1. If this notification is NOT tied to a WorkItem:
+        #    - send only the original/source document attachments.
+        #    - NEVER attach employee progress files.
+        #
+        # 2. If this notification IS tied to a WorkItem:
+        #    - send the original/source document attachments
+        #    - PLUS progress attachments belonging ONLY to that WorkItem.
+        #
+        # This prevents one employee's submitted files from being sent
+        # to unrelated users or branches.
 
-        # Collect canonical document attachments to include in outgoing email
         attachments_to_send: List[EmailAttachmentDTO] = []
-        doc_attachments = db.query(models.Attachment).filter(
+
+        attachment_query = db.query(models.Attachment).filter(
             models.Attachment.document_id == doc.doc_id
-        ).all()
+        )
 
-        for att in doc_attachments:
-            if att.storage_key:
-                att_file_path = self.upload_dir / att.storage_key
-                if att_file_path.exists():
-                    try:
-                        with open(att_file_path, "rb") as fh:
-                            raw_bytes = fh.read()
-                        attachments_to_send.append(EmailAttachmentDTO(
-                            filename=att.file_name or "document.pdf",
-                            content_type=att.file_type or "application/pdf",
-                            size_bytes=len(raw_bytes),
-                            content_bytes=raw_bytes
-                        ))
-                    except Exception as ex:
-                        logger.warning(f"Could not load attachment {att.file_name} for email: {ex}")
+        if include_progress_attachments and work_item_id is not None:
+            # ----------------------------------------------------------
+            # Work-specific notification:
+            # original document + this person's progress attachments
+            # ----------------------------------------------------------
+            document_attachments = attachment_query.filter(
+                models.Attachment.attachment_type.in_([
+                    models.AttachmentType.ORIGINAL,
+                    models.AttachmentType.EMAIL_ATTACHMENT,
+                    models.AttachmentType.SUPPORTING_DOCUMENT,
+                ])
+            ).all()
 
+            progress_attachments = (
+                db.query(models.Attachment)
+                .join(
+                    models.ProgressUpdate,
+                    models.ProgressUpdate.id == models.Attachment.progress_update_id,
+                )
+                .filter(
+                    models.ProgressUpdate.work_item_id == work_item_id,
+                    models.ProgressUpdate.document_id == doc.doc_id,
+                    models.Attachment.attachment_type == models.AttachmentType.PROGRESS_ATTACHMENT,
+                )
+                .all()
+            )
+
+            selected_attachments = document_attachments + progress_attachments
+
+        else:
+            # ----------------------------------------------------------
+            # Normal routing / assignment / reminder / Director notice:
+            # NEVER send employee progress attachments.
+            # ----------------------------------------------------------
+            selected_attachments = attachment_query.filter(
+                models.Attachment.attachment_type.in_([
+                    models.AttachmentType.ORIGINAL,
+                    models.AttachmentType.EMAIL_ATTACHMENT,
+                    models.AttachmentType.SUPPORTING_DOCUMENT,
+                ])
+            ).all()
+
+        for att in selected_attachments:
+            if not att.storage_key:
+                continue
+
+            att_file_path = self.upload_dir / att.storage_key
+
+            if not att_file_path.exists():
+                logger.warning(
+                    f"Attachment file not found: {att.file_name} "
+                    f"(storage_key={att.storage_key})"
+                )
+                continue
+
+            try:
+                with open(att_file_path, "rb") as fh:
+                    raw_bytes = fh.read()
+
+                attachments_to_send.append(
+                    EmailAttachmentDTO(
+                        filename=att.file_name or "document.pdf",
+                        content_type=att.file_type or "application/pdf",
+                        size_bytes=len(raw_bytes),
+                        content_bytes=raw_bytes,
+                    )
+                )
+
+            except Exception as ex:
+                logger.warning(
+                    f"Could not load attachment {att.file_name} "
+                    f"for email: {ex}"
+                )
         outgoing_dto = OutgoingEmailDTO(
             recipient_email=recipient_email,
             recipient_name=user.full_name,

@@ -1,0 +1,6 @@
+sentence-transformers==5.1.0
+torch
+transformers
+numpy
+PyMuPDF
+safetensors
