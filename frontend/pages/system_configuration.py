@@ -130,11 +130,8 @@ class SystemConfigurationPage(QWidget):
                 background: white; border: 1px solid #d0d5dd; border-radius: 8px;
                 padding: 6px;
             }
-            QPushButton {
-                min-height: 35px; background: white; border: 1px solid #d0d5dd;
-                border-radius: 8px; padding: 0 13px;
-            }
-            QPushButton:hover { background: #f2f4f7; }
+            
+            
             QPushButton#primaryButton { background: #2563eb; color: white; border-color: #2563eb; font-weight: 650; }
         """)
 

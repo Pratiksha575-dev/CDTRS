@@ -103,11 +103,8 @@ class AuditHistoryPage(QWidget):
                 min-height: 35px; background: white; border: 1px solid #d0d5dd;
                 border-radius: 8px; padding: 0 8px;
             }
-            QPushButton {
-                min-height: 35px; background: white; border: 1px solid #d0d5dd;
-                border-radius: 8px; padding: 0 12px;
-            }
-            QPushButton:hover { background: #f2f4f7; }
+            
+            
             QFrame#tableCard {
                 background: white; border: 1px solid #e4e7ec; border-radius: 10px;
             }
@@ -168,9 +165,18 @@ class AuditHistoryPage(QWidget):
     def _render(self):
         query = self.search.text().strip().lower()
         action = self.action_filter.currentData() or ""
+        
+        from_date_py = self.from_date.date().toString("yyyy-MM-dd")
+        to_date_py = self.to_date.date().toString("yyyy-MM-dd")
 
         rows = []
         for row in self.rows:
+            created_at = str(row.get("created_at") or "")
+            if created_at:
+                date_part = created_at.split("T")[0].split(" ")[0]
+                if date_part < from_date_py or date_part > to_date_py:
+                    continue
+                    
             actor = str(row.get("username") or row.get("user_name") or "").lower()
             action_value = str(row.get("action") or "")
             target = (
@@ -192,9 +198,16 @@ class AuditHistoryPage(QWidget):
             timestamp = str(row.get("created_at") or "—")
             actor = str(row.get("username") or row.get("user_name") or "Unknown admin")
             action_value = str(row.get("action") or "—")
-            target = f"{row.get('entity_type') or 'System'}"
-            if row.get("entity_id") is not None:
-                target += f" #{row.get('entity_id')}"
+            target_type = str(row.get('entity_type') or 'System')
+            target_id = row.get('entity_id')
+            if target_type.lower() == 'user':
+                target_type = 'User Account'
+            elif target_type.lower() == 'department':
+                target_type = 'Department'
+            
+            target = target_type
+            if target_id is not None:
+                target += f" #{target_id}"
             details = str(row.get("description") or row.get("details") or "—")
 
             values = [timestamp, actor, action_value, target, details]

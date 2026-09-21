@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QStackedWidget,
     QWidget,
+    QSizePolicy,
 )
 
 from components.document_viewer import DocumentViewer
@@ -249,7 +250,23 @@ class MainWindow(QMainWindow):
         # ==============================================================
 
         main_layout.addWidget(self.sidebar)
-        main_layout.addWidget(self.stack, 1)
+
+        stack_container = QWidget()
+        stack_container.setObjectName("mainContentContainer")
+        stack_container.setStyleSheet("#mainContentContainer { background: transparent; }")
+        stack_layout = QHBoxLayout(stack_container)
+        stack_layout.setContentsMargins(0, 0, 0, 0)
+        stack_layout.setSpacing(0)
+        
+        stack_layout.addStretch(1)
+        self.stack.setMaximumWidth(1400)
+        
+        # Using size policy to allow it to expand up to max width
+        self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        stack_layout.addWidget(self.stack, 10)
+        stack_layout.addStretch(1)
+
+        main_layout.addWidget(stack_container, 1)
 
         central_widget.setLayout(main_layout)
 
@@ -302,6 +319,7 @@ class MainWindow(QMainWindow):
         from pages.audit_history import AuditHistoryPage
 
         self.admin_dashboard_page = AdminDashboardPage()
+        self.admin_dashboard_page.navigate_requested.connect(self._handle_dashboard_navigate)
 
         self.user_configuration_page = UserConfigurationPage()
 
@@ -1268,22 +1286,11 @@ class MainWindow(QMainWindow):
             self.history_page.load_history()
 
     def close_document_viewer(self):
-        self._cleanup_existing_viewer()
-
         if self.previous_page is not None:
-
             previous = self.previous_page
-
-            self.stack.setCurrentWidget(
-                previous
-            )
-
-            if hasattr(
-                previous,
-                "refresh",
-            ):
+            self.stack.setCurrentWidget(previous)
+            if hasattr(previous, "refresh"):
                 previous.refresh()
-
             elif hasattr(
                 previous,
                 "load_inbox",
@@ -1301,6 +1308,8 @@ class MainWindow(QMainWindow):
                 "load_documents",
             ):
                 previous.load_documents()
+
+        self._cleanup_existing_viewer()
 
     # ==================================================================
     # LOGOUT

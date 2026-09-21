@@ -30,6 +30,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     Index,
+    JSON,
     Enum as SAEnum,
 )
 from sqlalchemy.orm import relationship
@@ -902,6 +903,7 @@ class RoutingSuggestion(Base):
     routing_reason = Column(Text, nullable=False)
     routing_source = Column(SAEnum(RoutingSource, name="routing_source_enum"), default=RoutingSource.DOCUMENT_CONTENT, nullable=False)
     is_director_instruction = Column(Boolean, default=False)
+    ranked_departments = Column(JSON, nullable=True)
     generated_at = Column(DateTime, default=datetime.now)
     confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     confirmed_at = Column(DateTime, nullable=True)

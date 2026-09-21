@@ -422,6 +422,7 @@ class BranchCard(QFrame):
     close_requested = Signal(int)        # branch_id
     further_work_requested = Signal(int)  # branch_id
     review_requested = Signal(int)       # branch_id (Director)
+    remind_requested = Signal(int)       # branch_id
 
     work_action = Signal(str, int)       # action name, work_item_id
 
@@ -568,22 +569,22 @@ class BranchCard(QFrame):
             buttons.append(b)
 
         if self._is_ds:
-            if branch.is_active and branch.branch_type != "DIRECTOR":
-                b = small_button("Assign Staff")
-                b.clicked.connect(lambda: self.assign_requested.emit(branch.id))
+            if branch.is_active:
+                if branch.branch_type != "DIRECTOR":
+                    b = small_button("Close Workstream")
+                    b.clicked.connect(lambda: self.close_requested.emit(branch.id))
+                    buttons.append(b)
+
+                b = small_button("Remind")
+                b.clicked.connect(lambda: self.remind_requested.emit(branch.id))
                 buttons.append(b)
 
-                b = small_button("Close Workstream")
-                b.clicked.connect(lambda: self.close_requested.emit(branch.id))
+                b = small_button("Add Remark")
+                b.clicked.connect(lambda: self.remark_requested.emit(branch.id))
                 buttons.append(b)
             elif not branch.is_active and branch.branch_type != "DIRECTOR":
                 b = small_button("Send Further Work")
                 b.clicked.connect(lambda: self.further_work_requested.emit(branch.id))
-                buttons.append(b)
-
-            if branch.is_active:
-                b = small_button("Add Remark")
-                b.clicked.connect(lambda: self.remark_requested.emit(branch.id))
                 buttons.append(b)
 
         if not buttons:

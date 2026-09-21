@@ -237,6 +237,8 @@ class DocumentViewer(QWidget):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
             elif item.layout() is not None:
@@ -639,6 +641,9 @@ class DocumentViewer(QWidget):
             "The changes are recorded in the document history.",
         )
 
+    def _remind_branch(self, branch_id: int) -> None:
+        self._send_reminder()
+
     def _send_reminder(self) -> None:
         dialog = ReminderDialog(self.document, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
@@ -772,8 +777,19 @@ class DocumentViewer(QWidget):
         dialog = SubmitWorkDialog(item, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
+        
+        data = dialog.get_data()
+        def do_submit():
+            if data["file_path"]:
+                work_service.add_progress(
+                    work_item_id, 
+                    description=data["note"] or "Attached final work submission file.", 
+                    file_path=data["file_path"]
+                )
+            return work_service.submit(work_item_id, data["note"])
+
         self._guard(
-            lambda: work_service.submit(work_item_id, dialog.get_note()),
+            do_submit,
             "Work submitted",
             (
                 "Your work has gone to your HOD for validation."

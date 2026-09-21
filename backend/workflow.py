@@ -541,7 +541,8 @@ def recompute_branch_stage(db: Session, branch: models.DocumentBranch) -> None:
     if branch.stage in (BranchStage.CANCELLED,) or not branch.is_active:
         return
 
-    items = list(branch.work_items)
+    # Query directly to avoid stale relationships after db.flush()
+    items = db.query(models.WorkItem).filter(models.WorkItem.branch_id == branch.id).all()
     live = [w for w in items if w.stage not in TERMINAL_WORK_STAGES]
 
     if not items:
@@ -768,7 +769,7 @@ def _ocr_prior_director_review_detected(
     if not field:
         return False
 
-    value = field.verified_value or field.extracted_value
+    value = field.verified_value
 
     return str(value).strip().lower() in {
         "true",

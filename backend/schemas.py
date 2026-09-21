@@ -575,6 +575,7 @@ class DocumentDetailResponse(DocumentListResponse):
     routing_confidence: Optional[float] = None
     routing_reason: Optional[str] = None
     is_director_instruction: bool = False
+    ranked_departments: Optional[List[Dict[str, Any]]] = None
 
 
 class CloseRequest(BaseModel):
@@ -636,6 +637,7 @@ class RoutingSuggestionResponse(BaseModel):
     routing_reason: str
     routing_source: RoutingSource
     is_director_instruction: bool = False
+    ranked_departments: Optional[List[Dict[str, Any]]] = None
     generated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -753,6 +755,7 @@ class AdminUserUpdate(BaseModel):
 class AuditLogResponse(BaseModel):
     id: int
     user_id: Optional[int] = None
+    user_name: Optional[str] = None
     action: str
     entity_type: Optional[str] = None
     entity_id: Optional[int] = None

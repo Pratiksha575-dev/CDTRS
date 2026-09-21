@@ -271,6 +271,8 @@ class UserConfigurationPage(QWidget):
 
         user_scroll = QScrollArea()
         user_scroll.setWidgetResizable(True)
+        user_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        user_scroll.setMinimumWidth(340)
         user_scroll.setFrameShape(QFrame.Shape.NoFrame)
         user_scroll.setWidget(self.user_box)
 
@@ -320,8 +322,10 @@ class UserConfigurationPage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(user_scroll)
         splitter.addWidget(self.detail)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 5)
+        splitter.setSizes([350, 800])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
@@ -340,11 +344,8 @@ class UserConfigurationPage(QWidget):
                 min-height: 35px; background: white; border: 1px solid #d0d5dd;
                 border-radius: 8px; padding: 0 9px;
             }
-            QPushButton {
-                min-height: 34px; background: white; border: 1px solid #d0d5dd;
-                border-radius: 8px; padding: 0 12px;
-            }
-            QPushButton:hover { background: #f2f4f7; }
+            
+            
             QPushButton#primaryButton { background: #2563eb; color: white; border-color: #2563eb; font-weight: 650; }
             QFrame#userCard, QFrame#detailCard, QFrame#contextCard {
                 background: white; border: 1px solid #e4e7ec; border-radius: 10px;

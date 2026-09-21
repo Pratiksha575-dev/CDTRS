@@ -203,7 +203,7 @@ class DocumentsPage(QWidget):
             "color: #94A3B8; font-size: 12px; padding: 22px;"
         )
         self.empty_note.setVisible(False)
-        layout.addWidget(self.empty_note)
+        layout.addWidget(self.empty_note, 1)
 
         hint = QLabel("Click a document to expand its workstreams, or use Open.")
         hint.setStyleSheet("color: #94A3B8; font-size: 10px;")
@@ -216,6 +216,7 @@ class DocumentsPage(QWidget):
     ) -> QFrame:
         card = QFrame()
         card.setObjectName("summaryCard")
+        card.setMaximumHeight(90)
         card.setStyleSheet(
             "QFrame#summaryCard { background: #FFFFFF; "
             "border: 1px solid #E2E8F0; border-radius: 9px; }"
@@ -248,6 +249,8 @@ class DocumentsPage(QWidget):
             item = self.summary_row.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
 
@@ -543,6 +546,11 @@ class DocumentsPage(QWidget):
         grid.setContentsMargins(8, 2, 8, 2)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
+        
+        # Use proportional sizing instead of arbitrary fixed widths
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
         # Document details
         details = self._section_card("Document Details")
@@ -564,13 +572,15 @@ class DocumentsPage(QWidget):
             row = QHBoxLayout()
             row.setSpacing(8)
             lab = QLabel(name)
-            lab.setFixedWidth(92)
+            lab.setMinimumWidth(90)
+            lab.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
             lab.setStyleSheet("color: #64748B; font-size: 9px;")
             val = self._value_label(value, bold=True)
             row.addWidget(lab)
             row.addWidget(val, 1)
             dl.addLayout(row)
 
+        dl.addStretch()
         grid.addWidget(details, 0, 0)
 
         # Workstreams
@@ -630,6 +640,7 @@ class DocumentsPage(QWidget):
 
                 wl.addWidget(branch_frame)
 
+        wl.addStretch()
         grid.addWidget(workstreams, 0, 1)
 
         # People / individual work
@@ -740,6 +751,7 @@ class DocumentsPage(QWidget):
 
                 pl.addWidget(person_frame)
 
+        pl.addStretch()
         grid.addWidget(people_card, 0, 2)
 
         # Recent Director remark / workflow information
@@ -983,6 +995,8 @@ class DocumentsPage(QWidget):
             item = self.card_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
 

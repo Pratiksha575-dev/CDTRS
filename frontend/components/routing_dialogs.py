@@ -127,6 +127,18 @@ class RoutingDialog(_BaseDialog):
         )
         self.document = document
         self.rows: List[Dict[str, Any]] = []
+        
+        if getattr(self.document, 'is_director_instruction', False) and not self.document.director_reviews:
+            self.BRANCH_CHOICES = [
+                ("Director - review & remark", "DIRECTOR"),
+            ]
+        else:
+            self.BRANCH_CHOICES = [
+                ("Director - review & remark", "DIRECTOR"),
+                ("Department HOD", "DEPARTMENT"),
+                ("Employee (direct, no HOD)", "EMPLOYEE"),
+                ("TSO", "TSO"),
+            ]
 
         self._departments = []
         self._employees_by_dept: Dict[int, List[Any]] = {}
@@ -290,6 +302,7 @@ class RoutingDialog(_BaseDialog):
                 self.warn(self, "Routing", "At least one recipient is required.")
                 return
             self.rows.remove(entry)
+            card.hide()
             card.setParent(None)
             card.deleteLater()
 
@@ -597,14 +610,50 @@ class SubmitWorkDialog(_BaseDialog):
             parent,
             width=520,
         )
+        self._file_path: Optional[str] = None
         self.note = QTextEdit()
         self.note.setPlaceholderText("Closing note (optional) - recorded as a final progress update")
         self.note.setMaximumHeight(100)
         self._root.addWidget(self.note)
+        
+        file_row = QHBoxLayout()
+        self.file_label = QLabel("No file attached")
+        self.file_label.setStyleSheet("color: #64748B; font-size: 11px;")
+        attach = QPushButton("Attach final file")
+        attach.setStyleSheet(
+            "background-color: #F8FAFC; border: 1px solid #CBD5E1; padding: 6px 12px; "
+            "border-radius: 4px; font-size: 11px; font-weight: 600;"
+        )
+        attach.clicked.connect(self._pick_file)
+        clear = QPushButton("Clear")
+        clear.setStyleSheet("color: #B91C1C; border: none; font-size: 11px;")
+        clear.clicked.connect(self._clear_file)
+        file_row.addWidget(attach)
+        file_row.addWidget(clear)
+        file_row.addWidget(self.file_label, 1)
+        self._root.addLayout(file_row)
+
         self.add_buttons("Submit")
 
-    def get_note(self) -> Optional[str]:
-        return self.note.toPlainText().strip() or None
+    def _pick_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach final document", "",
+            "All Files (*);;PDF Documents (*.pdf);;Images (*.png *.jpg *.jpeg)"
+        )
+        if path:
+            self._file_path = path
+            import os
+            self.file_label.setText(f"Attached: {os.path.basename(path)}")
+
+    def _clear_file(self) -> None:
+        self._file_path = None
+        self.file_label.setText("No file attached")
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "note": self.note.toPlainText().strip() or None,
+            "file_path": self._file_path
+        }
 
 
 # ===========================================================================

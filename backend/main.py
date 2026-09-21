@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_OCR_DIR = _PROJECT_ROOT / "OCR"
+_OCR_DIR = _PROJECT_ROOT / "OCR_new"
 for _p in (str(_OCR_DIR), str(_PROJECT_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -1787,4 +1787,8 @@ def admin_audit_logs(
     """Administrative and configuration activity only.  Document workflow
     activity lives in the document's own history."""
     _require_admin(ctx)
-    return crud.get_audit_logs(db, limit, offset)
+    logs = crud.get_audit_logs(db, limit, offset)
+    for log in logs:
+        if log.user:
+            log.user_name = log.user.username
+    return logs

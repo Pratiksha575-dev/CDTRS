@@ -199,6 +199,8 @@ class DashboardPage(QWidget):
             widget = item.widget()
             # Layout items are not always widgets (spacers have none).
             if widget is not None:
+                widget.hide()
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
 
